@@ -65,12 +65,15 @@
 - `POST /sessions/:id/handoff` — caller from `x-spur-caller-session` (agent actor, may name another session), none = human; `403 handoff_target_not_stalled` body `{ code, sessionId, status, error }`; agent self-handoff `409 todo_ledger_empty`, `409 work_snapshot_required` (running source without rate-limit/server-error marker only); response adds `movedTodoItems`; `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/switch-auth` — 404 unless `authRotation.switchAuth: true`
-- `GET /sessions/:id/todo`
+- `GET /sessions/:id/todo` — archived too; `404` without a ledger
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo-snapshot)
 - `GET /sessions/:id/snapshots` — metadata; `order=asc|desc` (default asc), `limit` 1..100, exclusive `before`/`after` versions; archived too; `400 invalid_snapshot_request|404|500 snapshot_corrupt`; `v2/src/snapshots.ts`
 - `POST /sessions/:id/snapshots` — `{content, final?}`; caller header, when set, must equal `:id`; `400|404|409 snapshot_conflict|413 snapshot_too_large`. See [snapshot](commands.md#todo-snapshot)
 - `GET /sessions/:id/snapshots/:version` — positive integer or `latest`; adds `freshness`; `includeDone=1` adds `done`; archived too, no wake; `400|404|500 snapshot_corrupt|500 todo_ledger_corrupt`. See [snapshots](snapshots.md#read)
 - `GET /snapshots/latest` — repeatable `link=label[=url]` (required, AND), `includeDone=1`; per matching session incl. completed, archived; `400 invalid_snapshot_request`, `500 snapshot_corrupt`. See [snapshots](snapshots.md#read)
+- `GET /sessions/:id/closeout` — archive manifest; live, completed, archived; `404` without archive, `500 closeout_corrupt`; `v2/src/closeout-archive.ts`
+- `GET /sessions/:id/closeout/files/:path` — `:path` = `<root>/<path>`; bytes as attachment; `404` for unsafe, unknown or expired paths
+- `GET /closeouts` — repeatable `link=label[=url]` (required, AND); `400` without a valid link. See [closeout](commands.md#todo-snapshot)
 - `GET /sessions/:id/auto-ping-suppressions` — `?all=1` adds `history`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/mute` — `{handle, mode: until_change|for|forever, durationMs?, reason?}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/resume` — exactly one of `{handle}` or `{suppressionId}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
