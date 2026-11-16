@@ -25058,9 +25058,9 @@ export class SessionService {
   startAuthorizationLogin(accountId: string, method?: AuthLoginMethod): Promise<AuthLogin> {
     this.authSnapshot = undefined;
     const account = this.requireAuthorizationAccount(accountId);
-    const allowed: AuthLoginMethod[] =
+    const allowed: readonly [AuthLoginMethod, ...AuthLoginMethod[]] =
       account.provider === "claude" ? ["oauth"] : ["device", "browser"];
-    const chosen = method ?? allowed[0]!;
+    const chosen = method ?? allowed[0];
     if (!allowed.includes(chosen)) {
       throw new AuthorizationError(
         `Sign-in method ${chosen} is not available for ${account.provider}`,

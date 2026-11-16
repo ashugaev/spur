@@ -205,6 +205,11 @@ export class AuthTerminalLogins {
     return entry.cleanup;
   }
 
+  // Reads `ended` through a call so a check after an await is not narrowed by an earlier one.
+  private hasEnded(entry: Entry): boolean {
+    return entry.ended;
+  }
+
   private async finish(
     entry: Entry,
     status: "ready" | "not_signed_in",
@@ -265,7 +270,7 @@ export class AuthTerminalLogins {
       } catch {
         // unknown pane state: treat as alive
       }
-      if (entry.ended) return;
+      if (this.hasEnded(entry)) return;
       if (!dead) {
         this.setRunning(entry);
         return;
@@ -276,7 +281,7 @@ export class AuthTerminalLogins {
         this.setRunning(entry, "companion_unavailable");
         return;
       }
-      if (entry.ended) return;
+      if (this.hasEnded(entry)) return;
       if (result.status === "sign-in-required") {
         await this.finish(entry, "not_signed_in", "exited");
         return;
@@ -352,7 +357,7 @@ export class AuthTerminalLogins {
       } catch {
         // probe failure leaves the terminal running
       }
-      if (entry.ended) return;
+      if (this.hasEnded(entry)) return;
       if (result && (result.status === "ok" || result.error === "rate_limited")) {
         await this.finish(entry, "ready");
         return;
@@ -365,7 +370,7 @@ export class AuthTerminalLogins {
     } catch {
       // unknown pane state: treat as alive
     }
-    if (entry.ended) return;
+    if (this.hasEnded(entry)) return;
     if (dead) await this.finish(entry, "not_signed_in", "exited");
   }
 }
