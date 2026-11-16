@@ -59088,6 +59088,31 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      it("on-launch provider: the successor record carries agentLaunchId before the process starts", async () => {
+        const { sessions, service } = await seedHandoff({}, { items: false });
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Work", reason: "Why" },
+          sourceAgent,
+        );
+        buildAgentLaunchPlanMock.mockImplementationOnce((agent: string) => ({
+          agent,
+          launchCommand: "cursor --prompt",
+          initialMessage: "",
+          initialMessageDeliveredOnLaunch: true,
+          readyMarkers: ["ready"],
+        }));
+        let launchIdAtCreate: string | undefined;
+        createTmuxSessionMock.mockImplementationOnce(async () => {
+          launchIdAtCreate = sessions.get("api-2")?.agentLaunchId;
+        });
+
+        await service.handoff("api-1", { agent: "cursor" });
+
+        expect(launchIdAtCreate).toEqual(expect.any(String));
+        service.dispose();
+      });
+
       it("launch evidence: the successor record carries agentLaunchId before the prompt is sent", async () => {
         const { sessions, service } = await seedHandoff({}, { items: false });
         await service.mutateTodo(
@@ -59186,6 +59211,12 @@ describe("SessionService", () => {
         },
         {
           name: "A->B after tmux start, before the prompt is confirmed",
+          build: () => seedCrashWindow("spawning", undefined, { agentLaunchId: "launch-1" }),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+        {
+          name: "A->B on-launch provider: after process start, before the post-create write",
           build: () => seedCrashWindow("spawning", undefined, { agentLaunchId: "launch-1" }),
           closedAgainst: "api-2",
           retryMoves: 0,

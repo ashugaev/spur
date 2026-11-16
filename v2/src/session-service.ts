@@ -14664,6 +14664,10 @@ export class SessionService {
         );
         launchCandidate = runningRecord;
         prAlertLaunchStarted = true;
+        // The prompt leaves with the process start when it rides the launch command, so the
+        // launch evidence (`agentLaunchId`, read by handoff recovery) must be durable first.
+        if (promptDeliveredOnLaunch)
+          this.writeSpawnRecord({ ...runningRecord, status: "spawning" });
         await createTmuxSession({
           sessionName: tmuxSession,
           cwd: workspacePath,
