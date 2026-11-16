@@ -4,14 +4,18 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readSession, writeSession } from "../../src/metadata.js";
 import {
+  closeTodoItems,
   ensureTodoLedger,
+  inheritTodo,
   mutateTodo,
+  planHandoffReconcile,
+  planHandoffTodo,
   replayTodo,
   TodoLedgerCorruptError,
   InvalidTodoRequestError,
   TodoTransitionConflictError,
 } from "../../src/todo.js";
-import type { SessionRecord, TodoActor } from "../../src/types.js";
+import type { SessionRecord, TodoActor, TodoProjection } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -324,5 +328,305 @@ describe("Spur ToDo ledger", () => {
     mkdirSync(archivedParent, { recursive: true });
     renameSync(join(dataDir, "sessions", session.id), join(archivedParent, session.id));
     expect(replayTodo(dataDir, session.id)).toEqual(before);
+  });
+
+  it("replays handoffFrom and handoffTo and keeps hold blockers", async () => {
+    const { dataDir, session } = await fixture();
+    mutateTodo(dataDir, session, { action: "add", text: "Open", reason: "Why open" }, actor);
+    const held = mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "Held", reason: "Why held" },
+      actor,
+    ).items[1];
+    if (!held) throw new Error("missing item");
+    mutateTodo(
+      dataDir,
+      session,
+      {
+        action: "hold",
+        itemId: held.id,
+        reason: "Waiting",
+        blocker: "human",
+        requiredHumanAction: "Approve",
+      },
+      actor,
+    );
+    const plan = planHandoffTodo(replayTodo(dataDir, session.id), session.id);
+    expect(plan.map((item) => item.text)).toEqual(["Open", "Held"]);
+    expect(plan[1]?.hold).toEqual({
+      reason: "Waiting",
+      blocker: { kind: "human", requiredAction: "Approve" },
+    });
+    const successor = { id: "s-2", project: session.project };
+    inheritTodo(dataDir, successor, plan);
+    const inherited = replayTodo(dataDir, "s-2");
+    expect(inherited.items.map((item) => [item.status, item.handoffFrom?.sessionId])).toEqual([
+      ["open", "s-1"],
+      ["held", "s-1"],
+    ]);
+    expect(inherited.items[0]?.added.reason).toBe("Why open");
+    expect(inherited.items[1]?.latestTransition?.blocker).toEqual({
+      kind: "human",
+      requiredAction: "Approve",
+    });
+    expect(inherited.items[0]?.added.actor).toEqual({ kind: "system", source: "handoff" });
+    const first = plan[0];
+    if (!first) throw new Error("missing plan");
+    closeTodoItems(
+      dataDir,
+      session,
+      [{ itemId: first.from.itemId, handoffTo: { sessionId: "s-2", itemId: first.itemId } }],
+      "handed off to s-2",
+    );
+    expect(replayTodo(dataDir, session.id).items[0]?.handoffTo).toEqual({
+      sessionId: "s-2",
+      itemId: first.itemId,
+    });
+  });
+
+  it("rejects a blank handoffFrom or handoffTo as corrupt", async () => {
+    const { dataDir, session } = await fixture();
+    const path = join(dataDir, "sessions", session.id, "todo.jsonl");
+    mkdirSync(join(dataDir, "sessions", session.id), { recursive: true });
+    const base = { version: 1, sessionId: session.id, at: "2026-08-20T00:00:00.000Z", actor };
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        ...base,
+        eventId: "e1",
+        type: "item_added",
+        itemId: "i1",
+        text: "T",
+        reason: "R",
+        handoffFrom: { sessionId: " ", itemId: "x" },
+      })}\n`,
+    );
+    expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
+    writeFileSync(
+      path,
+      `${JSON.stringify({ ...base, eventId: "e1", type: "item_added", itemId: "i1", text: "T", reason: "R" })}\n${JSON.stringify(
+        {
+          ...base,
+          eventId: "e2",
+          type: "item_cancelled",
+          itemId: "i1",
+          reason: "R",
+          handoffTo: { sessionId: "s-2", itemId: "" },
+        },
+      )}\n`,
+    );
+    expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
+  });
+
+  it("closeTodoItems skips terminal items and returns closed ids", async () => {
+    const { dataDir, session } = await fixture();
+    mutateTodo(dataDir, session, { action: "add", text: "A", reason: "r" }, actor);
+    const [item] = mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "B", reason: "r" },
+      actor,
+    ).items;
+    if (!item) throw new Error("missing item");
+    mutateTodo(dataDir, session, { action: "complete", itemId: item.id, reason: "done" }, actor);
+    const ids = replayTodo(dataDir, session.id).items.map((entry) => entry.id);
+    expect(
+      closeTodoItems(
+        dataDir,
+        session,
+        ids.map((itemId) => ({ itemId })),
+        "failed",
+      ),
+    ).toEqual([ids[1]]);
+    expect(closeTodoItems(dataDir, session, [{ itemId: ids[1] ?? "" }], "again")).toEqual([]);
+    expect(replayTodo(dataDir, session.id).counts).toMatchObject({ completed: 1, cancelled: 1 });
+  });
+
+  it("planHandoffReconcile matches live copies and ignores rolled-back ones", async () => {
+    const { dataDir, session } = await fixture();
+    for (const text of ["A", "B", "C"]) {
+      mutateTodo(dataDir, session, { action: "add", text, reason: "r" }, actor);
+    }
+    const source = replayTodo(dataDir, session.id);
+    const plan = planHandoffTodo(source, session.id);
+    inheritTodo(dataDir, { id: "s-2", project: session.project }, plan);
+    // B's copy is rolled back; C's copy was cancelled by the successor agent.
+    closeTodoItems(
+      dataDir,
+      { id: "s-2", project: session.project },
+      [{ itemId: plan[1]?.itemId ?? "" }],
+      "rollback",
+    );
+    mutateTodo(
+      dataDir,
+      { ...session, id: "s-2" },
+      { action: "cancel", itemId: plan[2]?.itemId ?? "", reason: "not needed" },
+      { kind: "agent", agent: "codex", sessionId: "s-2" },
+    );
+
+    const planned = planHandoffReconcile(source, session.id, [
+      { sessionId: "s-2", projection: replayTodo(dataDir, "s-2"), live: true },
+    ]);
+
+    expect(planned.map((entry) => entry.itemId)).toEqual([
+      plan[0]?.from.itemId,
+      plan[2]?.from.itemId,
+    ]);
+    expect(planned[0]?.handoffTo).toEqual({ sessionId: "s-2", itemId: plan[0]?.itemId });
+  });
+
+  it("planHandoffReconcile: a legacy-migration close does not prove ownership", async () => {
+    const { dataDir, session } = await fixture();
+    mutateTodo(dataDir, session, { action: "add", text: "A", reason: "r" }, actor);
+    const source = replayTodo(dataDir, session.id);
+    inheritTodo(
+      dataDir,
+      { id: "s-2", project: session.project },
+      planHandoffTodo(source, session.id),
+    );
+    // A killed successor without a ledger version gets its open copies closed by the migration.
+    ensureTodoLedger(dataDir, { ...session, id: "s-2", workspaceId: "s-2", status: "killed" });
+    const migrated = replayTodo(dataDir, "s-2");
+    expect(migrated.items[0]?.latestTransition?.actor).toEqual({
+      kind: "system",
+      source: "legacy_migration",
+    });
+
+    expect(
+      planHandoffReconcile(source, session.id, [
+        { sessionId: "s-2", projection: migrated, live: false },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("planHandoffReconcile: a dead successor owns moved-on copies, never open ones", async () => {
+    const { dataDir, session } = await fixture();
+    for (const text of ["A", "B"]) {
+      mutateTodo(dataDir, session, { action: "add", text, reason: "r" }, actor);
+    }
+    const source = replayTodo(dataDir, session.id);
+    const plan = planHandoffTodo(source, session.id);
+    const successor = { id: "s-2", project: session.project };
+    inheritTodo(dataDir, successor, plan);
+    // A's copy moved on to a later successor; B's copy is still open on the dead session.
+    closeTodoItems(
+      dataDir,
+      successor,
+      [{ itemId: plan[0]?.itemId ?? "", handoffTo: { sessionId: "s-3", itemId: "c-1" } }],
+      "handed off to s-3",
+    );
+
+    const planned = planHandoffReconcile(source, session.id, [
+      { sessionId: "s-2", projection: replayTodo(dataDir, "s-2"), live: false },
+    ]);
+
+    expect(planned.map((entry) => entry.itemId)).toEqual([plan[0]?.from.itemId]);
+    expect(planned[0]?.handoffTo).toEqual({ sessionId: "s-2", itemId: plan[0]?.itemId });
+  });
+
+  it.each([
+    ["live B holds an open copy", { bLive: true, withC: false }, "s-2"],
+    ["dead B holds an open copy, nothing downstream", { bLive: false, withC: false }, undefined],
+    ["dead B open copy, live C downstream open", { bLive: false, withC: true, cLive: true }, "s-2"],
+    [
+      "dead B open copy, dead C downstream open",
+      { bLive: false, withC: true, cLive: false },
+      undefined,
+    ],
+    [
+      "dead B open copy, C copy rolled back",
+      { bLive: false, withC: true, cLive: true, cRolledBack: true },
+      undefined,
+    ],
+    [
+      "B copy rolled back, live C downstream open",
+      { bLive: true, withC: true, cLive: true, bVoided: "rollback" },
+      "s-2",
+    ],
+    [
+      "B copy migration-closed, live C downstream open",
+      { bLive: false, withC: true, cLive: true, bVoided: "migration" },
+      "s-2",
+    ],
+    [
+      "B copy rolled back, nothing downstream live",
+      { bLive: true, withC: true, cLive: false, bVoided: "rollback" },
+      undefined,
+    ],
+    [
+      "dead B copy moved on to a dead C",
+      { bLive: false, withC: true, cLive: false, bMovedOn: true },
+      "s-2",
+    ],
+  ] as Array<
+    [
+      string,
+      {
+        bLive: boolean;
+        withC: boolean;
+        cLive?: boolean;
+        cRolledBack?: boolean;
+        bMovedOn?: boolean;
+        bVoided?: "rollback" | "migration";
+      },
+      string | undefined,
+    ]
+  >)("planHandoffReconcile chain: %s", async (_name, shape, expected) => {
+    const { dataDir, session } = await fixture();
+    mutateTodo(dataDir, session, { action: "add", text: "A", reason: "r" }, actor);
+    const source = replayTodo(dataDir, session.id);
+    const b = { id: "s-2", project: session.project };
+    const c = { id: "s-3", project: session.project };
+    inheritTodo(dataDir, b, planHandoffTodo(source, session.id));
+    const ledgers: Array<{ sessionId: string; projection: TodoProjection; live: boolean }> = [];
+    if (shape.withC) {
+      const toC = planHandoffTodo(replayTodo(dataDir, "s-2"), "s-2");
+      inheritTodo(dataDir, c, toC);
+      if (shape.cRolledBack) {
+        closeTodoItems(
+          dataDir,
+          c,
+          toC.map((item) => ({ itemId: item.itemId })),
+          "rollback",
+        );
+      }
+      if (shape.bVoided === "rollback") {
+        closeTodoItems(
+          dataDir,
+          b,
+          toC.map((item) => ({ itemId: item.from.itemId })),
+          "rollback",
+        );
+      }
+      if (shape.bVoided === "migration") {
+        ensureTodoLedger(dataDir, { ...session, id: "s-2", workspaceId: "s-2", status: "killed" });
+      }
+      if (shape.bMovedOn) {
+        closeTodoItems(
+          dataDir,
+          b,
+          toC.map((item) => ({
+            itemId: item.from.itemId,
+            handoffTo: { sessionId: "s-3", itemId: item.itemId },
+          })),
+          "handed off to s-3",
+        );
+      }
+      ledgers.push({
+        sessionId: "s-3",
+        projection: replayTodo(dataDir, "s-3"),
+        live: shape.cLive === true,
+      });
+    }
+    ledgers.unshift({
+      sessionId: "s-2",
+      projection: replayTodo(dataDir, "s-2"),
+      live: shape.bLive,
+    });
+
+    const planned = planHandoffReconcile(source, session.id, ledgers);
+
+    expect(planned.map((entry) => entry.successorId)).toEqual(expected ? [expected] : []);
   });
 });

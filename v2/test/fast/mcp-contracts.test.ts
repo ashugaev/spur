@@ -25,10 +25,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "d721bb6d023b173035e60d6a1b10b5ccda44eae7effb003be82dd05e8d142641",
-  "types.ts": "2e1e9875052ee36798f4270f9e34db59ab2a4fc71d9b01ffc909691d12f40933",
+  "server.ts": "08c88bc2deb4cb5bdb9aab20dce63e66cd1244060ffb6cf6fed5b1299928746e",
+  "types.ts": "39d511f2971fcb8178f40e9b966082711c4903cbe066ba1d3b93d0560022fb0d",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "8e06eb03ecc5f65182caef2a046cadbaf36c53c6379b868f33a619dbc3cbdddb",
+  "session-service.ts": "f33fdf2c66d34d2ba0324e06069b141cabd04784ae091cf19f091b57684c9abe",
   "session-transitions.ts": "832771b8d95a6722cf67fc05685f2fd5f03e7a60a923c7a438e1b5b3bc0dcbb0",
   "session-slots.ts": "cb766d6b58c70f34775a18edf6afa77312acdc766a017770b30102462535ed73",
   "task-status.ts": "98700844f71e5d5edfd628c92653ed3cfcde4ff6c213acd24b9751935034bea1",
@@ -37,7 +37,7 @@ const reviewedFingerprints = {
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
   "wake-schedule.ts": "9362828bd94ab5d691118c8ec3539cd1c0c96c97def38a3a7de4ac495deed0e8",
   "agents/models.ts": "0ea72b5d8bfe02bb9f1cebb5d816091acdfa4ee579c9f441d1bda73c35bf8480",
-  "todo.ts": "347419ef444bcd0adb99d723b0584a6a3db8a27ed92154a4f633ba33649395ce",
+  "todo.ts": "b54a89a63ef91ba0d98c190d2c7253cb28e5b9bd66df35a56ce7e7f62fce3f81",
   "auto-ping.ts": "11ce2c85526d9fad940a4d15cd6564982b2ae34d25ff26bb9138cd81b1f65ccf",
   "review-interface.ts": "3cd868f605946f29e66e96b0721adddebd9b2783a9101924d8ec489a1e37122b",
   "review-interface-consent.ts": "03fc56319c45e14e4685e169387ee96677487abf12aaea0ad8a313090cda7d3d",
