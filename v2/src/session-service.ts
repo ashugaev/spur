@@ -629,6 +629,7 @@ import {
   type SessionLinkFilter,
   type CloseoutEntry,
   type CloseoutManifestView,
+  type CompleteSessionResult,
   type TodoItemProjection,
   type WorkSnapshot,
   type WorkSnapshotFreshness,
@@ -20609,8 +20610,9 @@ export class SessionService {
     sessionId: string,
     request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean; todoActor?: TodoActor },
-  ): Promise<SessionView> {
-    return this.runLifecycle("complete", [sessionId], request.operationId, () =>
+  ): Promise<CompleteSessionResult> {
+    const startedAt = Date.now();
+    const view = await this.runLifecycle("complete", [sessionId], request.operationId, () =>
       this.withCloseoutHeads([sessionId], (heads) =>
         this.withWorkspaceLifecycleLocks(sessionId, () =>
           this.applyManualStatusLocked(sessionId, "completed", request, {
@@ -20620,6 +20622,22 @@ export class SessionService {
         ),
       ),
     );
+    const unverified = this.unverifiedCloseoutFiles(view, startedAt);
+    return unverified > 0 ? { ...view, closeout: { unverified } } : view;
+  }
+
+  // Counts "unverified" skips of the archive this complete wrote; never throws.
+  private unverifiedCloseoutFiles(session: SessionView, startedAt: number): number {
+    try {
+      const manifest = readCloseoutManifest(
+        closeoutDirAt(this.config.dataDir, session, "live"),
+        session.id,
+      );
+      if (!manifest || Date.parse(manifest.completedAt) < startedAt) return 0;
+      return manifest.skipped.filter((file) => file.reason === "unverified").length;
+    } catch {
+      return 0;
+    }
   }
 
   async readTodo(sessionId: string): Promise<TodoProjection> {

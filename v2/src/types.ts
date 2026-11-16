@@ -951,6 +951,9 @@ export interface CloseoutManifestView extends CloseoutManifest {
   versions: number[];
 }
 
+/** Added to a complete result when the archive listed files it could not verify. */
+export type CompleteSessionResult = SessionView & { closeout?: { unverified: number } };
+
 export interface CloseoutEntry {
   sessionId: string;
   status: SessionStatus;

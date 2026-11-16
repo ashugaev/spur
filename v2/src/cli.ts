@@ -199,6 +199,7 @@ import {
   type TodoProjection,
   type CloseoutEntry,
   type CloseoutManifestView,
+  type CompleteSessionResult,
   type LatestSnapshotEntry,
   type WorkSnapshotMeta,
   type WorkSnapshotRead,
@@ -791,8 +792,13 @@ function postSessionAction(
   action: "pause" | "complete" | "kill" | "reopen" | "restore",
   configPath?: string,
   body: object = {},
-): Promise<SessionView> {
-  return postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
+): Promise<CompleteSessionResult> {
+  return postJson<CompleteSessionResult>(
+    cliEntrypoint,
+    `/sessions/${sessionId}/${action}`,
+    body,
+    configPath,
+  );
 }
 
 function resolveAutoPingSessionId(explicitSession: string | undefined): string {
@@ -3936,7 +3942,10 @@ export function createProgram(cliEntrypoint: string): Command {
         label: "closing session",
         action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath, body),
         success: (session) => `Closed ${session.id}.`,
-        render: renderSessionCard,
+        render: (session) =>
+          session.closeout
+            ? `${renderSessionCard(session)}\ncloseout: ${session.closeout.unverified} files not archived: path verification needs Linux (see manifest skipped)`
+            : renderSessionCard(session),
       });
     });
 

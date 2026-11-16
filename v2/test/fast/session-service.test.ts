@@ -40171,6 +40171,39 @@ describe("SessionService", () => {
       expect(existsSync(join(TEST_ARTIFACTS_ROOT, "api-1"))).toBe(false);
     });
 
+    it("reports unverified closeout files on the complete result", async () => {
+      vi.mocked(writeCloseoutArchive).mockImplementationOnce((input) => {
+        const skipped = [
+          { root: "work" as const, path: "a.md", bytes: 1, reason: "unverified" as const },
+          { root: "work" as const, path: "b.md", bytes: 1, reason: "unverified" as const },
+          { root: "work" as const, path: "c.md", bytes: 1, reason: "max_bytes" as const },
+        ];
+        const manifest = {
+          version: 1,
+          sessionId: input.sessionId,
+          project: input.project,
+          completedAt: new Date().toISOString(),
+          links: [],
+          snapshotVersion: null,
+          headSha: null,
+          files: [],
+          skipped,
+          missingRoots: [],
+        };
+        const dir = join(input.sessionDir, "closeout", "1");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+        return manifest;
+      });
+      const { result } = await completeWith(ownWorktreeSession());
+      expect(result.closeout).toEqual({ unverified: 2 });
+    });
+
+    it("omits the closeout summary when nothing is unverified", async () => {
+      const { result } = await completeWith(ownWorktreeSession());
+      expect(result.closeout).toBeUndefined();
+    });
+
     it("throttles the retention sweep to once per hour", async () => {
       const config = baseConfig();
       loadConfigMock.mockReturnValue({

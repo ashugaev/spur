@@ -6,6 +6,7 @@ import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
 const getJsonMock = vi.fn();
 const getBytesMock = vi.fn();
+const postJsonMock = vi.fn();
 const writeStdoutMock = vi.fn();
 
 vi.mock("../../src/client.js", () => ({
@@ -14,7 +15,7 @@ vi.mock("../../src/client.js", () => ({
   getJson: getJsonMock,
   getBytes: getBytesMock,
   listProjects: vi.fn(),
-  postJson: vi.fn(),
+  postJson: postJsonMock,
   postPreflight: vi.fn(),
   restartDaemonIfRunning: vi.fn(),
   stopDaemonIfRunning: vi.fn(),
@@ -67,6 +68,7 @@ describe("closeout CLI", { timeout: 30_000 }, () => {
     vi.resetModules();
     getJsonMock.mockReset();
     getBytesMock.mockReset();
+    postJsonMock.mockReset();
     writeStdoutMock.mockReset();
   });
 
@@ -126,6 +128,35 @@ describe("closeout CLI", { timeout: 30_000 }, () => {
     const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
     await run(["closeout", "get", "api-1", "work/a.txt"]);
     expect(write).toHaveBeenCalledWith(Buffer.from("hello"));
+  });
+
+  it("complete prints exactly one closeout line when files were left unverified", async () => {
+    const session = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      status: "completed",
+      state: "stopped",
+      branch: "api-1",
+      title: "t",
+      services: [],
+      sidecars: [],
+      updatedAt: "2026-11-02T00:00:00.000Z",
+      createdAt: "2026-11-02T00:00:00.000Z",
+    };
+    postJsonMock.mockResolvedValue({ ...session, closeout: { unverified: 3 } });
+    await run(["complete", "api-1"]);
+    const lines = writeStdoutMock.mock.calls
+      .flatMap(([text]) => String(text).split("\n"))
+      .filter((line) => line.startsWith("closeout:"));
+    expect(lines).toEqual([
+      "closeout: 3 files not archived: path verification needs Linux (see manifest skipped)",
+    ]);
+
+    writeStdoutMock.mockReset();
+    postJsonMock.mockResolvedValue(session);
+    await run(["complete", "api-1"]);
+    expect(writeStdoutMock.mock.calls.flat().join("\n")).not.toContain("closeout:");
   });
 
   it("list builds repeated link queries and requires --link", async () => {
