@@ -40064,7 +40064,9 @@ describe("SessionService", () => {
     });
 
     it("still completes and logs session.closeout_archive.failed when the archive throws", async () => {
-      vi.mocked(writeCloseoutArchive).mockRejectedValueOnce(new Error("disk full"));
+      vi.mocked(writeCloseoutArchive).mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
       const { result } = await completeWith(ownWorktreeSession());
 
       expect(result.status).toBe("completed");

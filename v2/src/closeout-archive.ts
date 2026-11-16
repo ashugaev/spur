@@ -252,7 +252,7 @@ function errorText(error: unknown): string {
  * write the manifest or swap the archive in place throws. Never writes a top-level .json file
  * into the shard directory (listSessions parses those as records).
  */
-export async function writeCloseoutArchive(input: CloseoutWriteInput): Promise<CloseoutManifest> {
+export function writeCloseoutArchive(input: CloseoutWriteInput): CloseoutManifest {
   const manifest: CloseoutManifest = {
     sessionId: input.sessionId,
     project: input.project,

@@ -20610,13 +20610,14 @@ export class SessionService {
     request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean; todoActor?: TodoActor },
   ): Promise<SessionView> {
-    const closeoutHeadSha = await this.readCloseoutHead(sessionId);
     return this.runLifecycle("complete", [sessionId], request.operationId, () =>
-      this.withWorkspaceLifecycleLocks(sessionId, () =>
-        this.applyManualStatusLocked(sessionId, "completed", request, {
-          ...options,
-          closeoutHeadSha,
-        }),
+      this.withCloseoutHeads([sessionId], (heads) =>
+        this.withWorkspaceLifecycleLocks(sessionId, () =>
+          this.applyManualStatusLocked(sessionId, "completed", request, {
+            ...options,
+            closeoutHeadSha: heads.get(sessionId) ?? null,
+          }),
+        ),
       ),
     );
   }
@@ -20640,29 +20641,48 @@ export class SessionService {
   }
 
   // Own worktree only: a worktree:false record points at the shared main checkout. Read outside
-  // the lifecycle lock, like writeSnapshot: git timeouts must not block complete.
-  private async readCloseoutHead(sessionId: string): Promise<string | null> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session || !this.closeoutOwnWorktree(session)) return null;
-    if (!closeoutSettings(this.config.projects[session.project]).enabled) return null;
-    return (await readWorktreeHead(session.worktreePath)).headSha;
+  // the lifecycle lock, like writeSnapshot: git timeouts must not block complete. Runs `run`
+  // without a yield when no head needs reading, so callers keep their synchronous lock order.
+  private withCloseoutHeads<T>(
+    sessionIds: readonly string[],
+    run: (heads: ReadonlyMap<string, string | null>) => Promise<T>,
+  ): Promise<T> {
+    const heads = new Map<string, string | null>();
+    const reads: Promise<void>[] = [];
+    for (const id of sessionIds) {
+      heads.set(id, null);
+      const session = readSession(this.config.dataDir, id);
+      if (
+        session &&
+        this.closeoutOwnWorktree(session) &&
+        closeoutSettings(this.config.projects[session.project]).enabled
+      ) {
+        reads.push(
+          readWorktreeHead(session.worktreePath).then((head) => {
+            heads.set(id, head.headSha);
+          }),
+        );
+      }
+    }
+    return reads.length === 0 ? run(heads) : Promise.all(reads).then(() => run(heads));
   }
 
   private closeoutOwnWorktree(session: SessionRecord): boolean {
     return session.worktree && session.worktreePath.trim().length > 0;
   }
 
-  // Never throws: complete must not fail or change result because the archive failed.
-  private async archiveCloseout(
+  // Never throws: complete must not fail or change result because the archive failed. Sync on
+  // purpose: no yield between terminal-slot capture and artifact removal.
+  private archiveCloseout(
     session: SessionRecord,
     links: SessionLink[],
     headSha: string | null | undefined,
-  ): Promise<void> {
+  ): void {
     try {
       const settings = closeoutSettings(this.resolveProjectForSession(session));
       if (!settings.enabled) return;
       const artifacts = sessionArtifactsDir(this.config.dataDir, workspaceIdOf(session));
-      const manifest = await writeCloseoutArchive({
+      const manifest = writeCloseoutArchive({
         sessionDir: join(this.config.dataDir, "sessions", session.id),
         sessionId: session.id,
         project: session.project,
@@ -21148,22 +21168,23 @@ export class SessionService {
   }
 
   async selfDestruct(sessionId: string): Promise<SessionView> {
-    const closeoutHeadSha = await this.readCloseoutHead(sessionId);
     return this.runLifecycle("complete", [sessionId], undefined, () =>
-      this.withWorkspaceLifecycleLocks(sessionId, () => {
-        const session = readSession(this.config.dataDir, sessionId);
-        if (!session) {
-          throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-        }
-        return this.applyManualStatusLocked(
-          sessionId,
-          "completed",
-          {
-            prAction: "leave_open",
-          },
-          { eventAction: "self_destruct", closeoutHeadSha },
-        );
-      }),
+      this.withCloseoutHeads([sessionId], (heads) =>
+        this.withWorkspaceLifecycleLocks(sessionId, () => {
+          const session = readSession(this.config.dataDir, sessionId);
+          if (!session) {
+            throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+          }
+          return this.applyManualStatusLocked(
+            sessionId,
+            "completed",
+            {
+              prAction: "leave_open",
+            },
+            { eventAction: "self_destruct", closeoutHeadSha: heads.get(sessionId) ?? null },
+          );
+        }),
+      ),
     );
   }
 
@@ -21177,88 +21198,91 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const candidates = this.listDeskSessions(session);
-    const closeoutHeads = new Map<string, string | null>();
-    for (const candidate of candidates) {
-      closeoutHeads.set(candidate.id, await this.readCloseoutHead(candidate.id));
-    }
 
     const work = () =>
-      this.withSessionLifecycleLocks(
-        candidates.flatMap((candidate) => this.lifecycleIdsFor(candidate)),
-        async () => {
-          const emptySessionIds: string[] = [];
-          const unfinishedBlocked: Array<{
-            sessionId: string;
-            openItemIds: string[];
-            heldItemIds: string[];
-          }> = [];
-          const snapshotBlockedIds: string[] = [];
-          for (const candidate of candidates) {
-            const current = readSession(this.config.dataDir, candidate.id);
-            if (!current)
-              throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
-            if (isTerminalSessionStatus(current.status)) continue;
-            const projection = ensureTodoLedger(this.config.dataDir, current);
-            const block = todoLedgerBlock(projection);
-            if (block === "empty") emptySessionIds.push(candidate.id);
-            else if (block === "unfinished") {
-              unfinishedBlocked.push({ sessionId: candidate.id, ...unfinishedTodo(projection) });
-            } else if (
-              this.snapshotGateBlocks(current, projection.revision, "final", options?.todoActor)
-            ) {
-              snapshotBlockedIds.push(candidate.id);
-            }
-          }
-          if (options?.todoActor?.kind !== "human") {
-            if (emptySessionIds.length > 0) {
-              const error = new TodoEmptyLedgerError(emptySessionIds);
-              this.logManualStatusFailure(
-                "desk_complete",
-                "completed",
-                sessionId,
-                session.project,
-                error,
-              );
-              throw error;
-            }
-            if (unfinishedBlocked.length > 0) {
-              const error = new TodoOpenWorkError(unfinishedBlocked);
-              this.logManualStatusFailure(
-                "desk_complete",
-                "completed",
-                sessionId,
-                session.project,
-                error,
-              );
-              throw error;
-            }
-            if (snapshotBlockedIds.length > 0) {
-              const error = new WorkSnapshotRequiredError(snapshotBlockedIds, "final");
-              this.logManualStatusFailure(
-                "desk_complete",
-                "completed",
-                sessionId,
-                session.project,
-                error,
-              );
-              throw error;
-            }
-          }
-          const completedIds: string[] = [];
-          for (const candidate of candidates) {
-            const current = readSession(this.config.dataDir, candidate.id);
-            if (!current)
-              throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
-            if (isTerminalSessionStatus(current.status)) continue;
-            await this.applyManualStatusLocked(candidate.id, "completed", request, {
-              ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
-              eventAction: "desk_complete",
-              closeoutHeadSha: closeoutHeads.get(candidate.id) ?? null,
-            });
-            completedIds.push(candidate.id);
-          }
-          return { completedIds };
-        },
+      this.withCloseoutHeads(
+        candidates.map((candidate) => candidate.id),
+        (closeoutHeads) =>
+          this.withSessionLifecycleLocks(
+            candidates.flatMap((candidate) => this.lifecycleIdsFor(candidate)),
+            async () => {
+              const emptySessionIds: string[] = [];
+              const unfinishedBlocked: Array<{
+                sessionId: string;
+                openItemIds: string[];
+                heldItemIds: string[];
+              }> = [];
+              const snapshotBlockedIds: string[] = [];
+              for (const candidate of candidates) {
+                const current = readSession(this.config.dataDir, candidate.id);
+                if (!current)
+                  throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
+                if (isTerminalSessionStatus(current.status)) continue;
+                const projection = ensureTodoLedger(this.config.dataDir, current);
+                const block = todoLedgerBlock(projection);
+                if (block === "empty") emptySessionIds.push(candidate.id);
+                else if (block === "unfinished") {
+                  unfinishedBlocked.push({
+                    sessionId: candidate.id,
+                    ...unfinishedTodo(projection),
+                  });
+                } else if (
+                  this.snapshotGateBlocks(current, projection.revision, "final", options?.todoActor)
+                ) {
+                  snapshotBlockedIds.push(candidate.id);
+                }
+              }
+              if (options?.todoActor?.kind !== "human") {
+                if (emptySessionIds.length > 0) {
+                  const error = new TodoEmptyLedgerError(emptySessionIds);
+                  this.logManualStatusFailure(
+                    "desk_complete",
+                    "completed",
+                    sessionId,
+                    session.project,
+                    error,
+                  );
+                  throw error;
+                }
+                if (unfinishedBlocked.length > 0) {
+                  const error = new TodoOpenWorkError(unfinishedBlocked);
+                  this.logManualStatusFailure(
+                    "desk_complete",
+                    "completed",
+                    sessionId,
+                    session.project,
+                    error,
+                  );
+                  throw error;
+                }
+                if (snapshotBlockedIds.length > 0) {
+                  const error = new WorkSnapshotRequiredError(snapshotBlockedIds, "final");
+                  this.logManualStatusFailure(
+                    "desk_complete",
+                    "completed",
+                    sessionId,
+                    session.project,
+                    error,
+                  );
+                  throw error;
+                }
+              }
+              const completedIds: string[] = [];
+              for (const candidate of candidates) {
+                const current = readSession(this.config.dataDir, candidate.id);
+                if (!current)
+                  throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
+                if (isTerminalSessionStatus(current.status)) continue;
+                await this.applyManualStatusLocked(candidate.id, "completed", request, {
+                  ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
+                  eventAction: "desk_complete",
+                  closeoutHeadSha: closeoutHeads.get(candidate.id) ?? null,
+                });
+                completedIds.push(candidate.id);
+              }
+              return { completedIds };
+            },
+          ),
       );
     return this.runLifecycle(
       "complete",
@@ -22527,7 +22551,7 @@ export class SessionService {
       }
       if (targetStatus === "completed") {
         terminalSlots = this.captureTerminalSlots(session);
-        await this.archiveCloseout(session, terminalSlots?.links ?? [], options?.closeoutHeadSha);
+        this.archiveCloseout(session, terminalSlots?.links ?? [], options?.closeoutHeadSha);
         const { ranCleanup } = this.removeSessionArtifacts(session, {
           preserveAgentHistory: true,
         });
@@ -25620,7 +25644,10 @@ export class SessionService {
           this.displaySlotsForSession(source)?.links ?? [],
           spawned.id,
         );
-      const closeoutHeadSha = await this.readCloseoutHead(sessionId);
+      const closeoutHeadSha = await this.withCloseoutHeads(
+        [sessionId],
+        async (heads) => heads.get(sessionId) ?? null,
+      );
       const finalized = await this.withPaneWriteLock(receipt.generation.tmuxSession, () =>
         this.withSessionLifecycleLocks(
           [...prepared.lifecycleIds, spawned.id],
