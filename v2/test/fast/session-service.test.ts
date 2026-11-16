@@ -59045,7 +59045,8 @@ describe("SessionService", () => {
         });
         const held = internals.withWorkspaceLifecycleLocks("api-1", () => gate);
         const recovery = internals.recoverHandoffTodo();
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        // Timers may be faked here: yield microtasks so recovery reaches the lock wait.
+        for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
         const successor = sessions.get("api-2");
         if (!successor) throw new Error("Expected successor");
         sessions.set("api-2", { ...successor, status: "killed" });
