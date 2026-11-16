@@ -178,7 +178,7 @@ test.describe("Agent accounts menu", () => {
     await row.getByRole("button", { name: "Sign in codex account Fresh" }).click();
     const dialog = page.getByRole("dialog", { name: /Sign in codex/ });
     await expect(dialog).toBeVisible();
-    await dialog.getByRole("button", { name: "Continue" }).click();
+    await dialog.getByRole("button", { name: "Continue", exact: true }).click();
     await expect(row).toContainText("signing in");
     await page.keyboard.press("Escape");
 

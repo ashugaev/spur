@@ -76,7 +76,7 @@ async function openManagedDialog(page: Page) {
 }
 
 async function toLinkStep(dialog: Locator) {
-  await dialog.getByRole("button", { name: "Continue" }).click();
+  await dialog.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(dialog.getByTestId("auth-login-url")).toBeVisible();
 }
 
@@ -292,7 +292,7 @@ test.describe("Sign-in at 390px", () => {
 
     await page.getByRole("button", { name: "Sign in team" }).click();
     const dialog = page.getByRole("dialog", { name: /Sign in codex · team/i });
-    await dialog.getByRole("button", { name: "Continue" }).click();
+    await dialog.getByRole("button", { name: "Continue", exact: true }).click();
     await expect(dialog.getByTestId("auth-login-user-code")).toHaveText("IXP1-UC8L0");
     await expect(dialog.getByRole("button", { name: "Continue in terminal" })).toBeVisible();
     expect(await noOverflow()).toBe(true);

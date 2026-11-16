@@ -2908,7 +2908,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(loginDialog).toBeVisible();
     // The picker opens first; nothing starts until a method is chosen.
     await expect(loginDialog.getByRole("radio", { name: /Device code/ })).toBeChecked();
-    await loginDialog.getByRole("button", { name: "Continue" }).click();
+    await loginDialog.getByRole("button", { name: "Continue", exact: true }).click();
     await expect(loginDialog.getByTestId("auth-login-url")).toHaveAttribute(
       "href",
       "https://auth.example.test/device",
