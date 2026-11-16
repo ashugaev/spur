@@ -127,6 +127,19 @@ describe("AuthLoginDialog picker", () => {
 
     expect(terminalIcon().getAttribute("title")).toBe("Continue in terminal");
   });
+
+  it("returns focus to the opener when the dialog unmounts", () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+
+    const { unmount } = render(CLAUDE);
+    expect(document.activeElement).toBe(screen.getByRole("radio", { name: /Claude account/ }));
+    unmount();
+
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
 });
 
 describe("AuthLoginDialog link and paste", () => {
@@ -138,6 +151,10 @@ describe("AuthLoginDialog link and paste", () => {
     });
     expect(screen.getByTestId("auth-login-url").getAttribute("href")).toBe(
       "https://claude.ai/oauth/authorize?x=1",
+    );
+    // The global `a` color rule would hide the label on the accent fill without the important utility.
+    expect(screen.getByTestId("auth-login-url").className).toContain(
+      "text-[var(--color-text-inverse)]!",
     );
     expect(screen.getByText(/Copy its address bar URL/)).toBeTruthy();
     expect((screen.getByRole("button", { name: "Submit" }) as HTMLButtonElement).disabled).toBe(

@@ -213,16 +213,17 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
     return () => clearTimeout(timer);
   }, [view, onClose]);
 
-  useEffect(() => {
-    // Views without a field keep focus inside the dialog on the panel.
-    ((view === "verified" ? doneRef : inputRef).current ?? panelRef.current)?.focus();
-  }, [view]);
-
   const busy = beginMutation.isPending || inputMutation.isPending || cancelMutation.isPending;
   // Only an attempt started here is cancelled; a CLI or other-tab sign-in is left alone.
   const dismiss = () =>
     phase === "attempt" && view !== "verified" ? cancelMutation.mutate("close") : onClose();
   useDialogFocus({ panelRef, initialRef: inputRef, onEscape: dismiss, escapeBlocked: busy });
+
+  // Declared after useDialogFocus so that hook captures the opener before this moves focus.
+  useEffect(() => {
+    // Views without a field keep focus inside the dialog on the panel.
+    ((view === "verified" ? doneRef : inputRef).current ?? panelRef.current)?.focus();
+  }, [view]);
 
   const begin = (next: Begin) => beginMutation.mutate({ ...next, attempt: attempt + 1 });
   const tryAgain = () => {
@@ -263,7 +264,8 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
   const openLink = (text: string) =>
     url ? (
       <a
-        className={`${PRIMARY_BUTTON_CLASS} inline-flex items-center gap-1.5 no-underline`}
+        // The global unlayered `a` color rule beats utilities, so the colors are important (see SessionDetail).
+        className={`${PRIMARY_BUTTON_CLASS} inline-flex items-center gap-1.5 text-[var(--color-text-inverse)]! hover:text-[var(--color-text-inverse)]! hover:no-underline`}
         data-testid="auth-login-url"
         href={url}
         rel="noreferrer"
