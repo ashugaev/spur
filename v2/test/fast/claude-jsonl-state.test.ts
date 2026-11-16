@@ -1220,6 +1220,8 @@ describe("parseConversationBatch", () => {
     const tools = parseConversationBatch(
       jsonl(
         bash('"$SPUR_TODO_COMMAND" list'),
+        bash('"$SPUR_STATUS_COMMAND" --json'),
+        bash("spur-status needs_input --revision 0"),
         bash("git status && spur-todo hold 1"),
         bash("git status"),
         {
@@ -1232,7 +1234,7 @@ describe("parseConversationBatch", () => {
       ),
       NOW,
     ).entries.filter((entry) => entry.kind === "tool");
-    expect(tools.map((tool) => "spurCall" in tool)).toEqual([true, true, false, false]);
+    expect(tools.map((tool) => "spurCall" in tool)).toEqual([true, true, true, true, false, false]);
     expect(tools.some((tool) => "inputSummary" in tool)).toBe(false);
   });
 

@@ -70,7 +70,7 @@ function parseItem(value: unknown, sourceId: string): ScriptItem | null {
  * or boolean; externalId/repo/sessionId reserved. Invalid items dropped; first ID wins.
  * script:item.new data contains id/title/url/number/extras, repo script:<sourceId>,
  * externalId script:<sourceId>#<id>; all keys available in {{key}} spawn templates.
- * Spawn-only triggers; autoComplete supported. No thread target.
+ * Spawn-only triggers; autoClose supported (autoComplete config alias). No thread target.
  * emitExisting defaults false: first nonempty run records baseline without spawning.
  * Conditional scripts set emitExisting:true to spawn on first positive result.
  * At most 10 emits/run; deferred IDs remain unseen. Replay bounded snapshots, never

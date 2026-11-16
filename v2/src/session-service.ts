@@ -356,6 +356,7 @@ import {
   SLOT_TOOL_NAME,
   SNAPSHOT_TOOL_NAME,
   TODO_TOOL_NAME,
+  TASK_STATUS_TOOL_NAME,
   applyNormalizedSlotsUpdate,
   applySlotsUpdate,
   ensureSessionSlotTool,
@@ -619,8 +620,16 @@ import {
   type WorkSnapshot,
   type WorkSnapshotFreshness,
   type WorkSnapshotMeta,
+  type TaskStatusRequest,
+  type TaskStatusView,
   type WorkSnapshotRead,
 } from "./types.js";
+import {
+  clearTaskStatus,
+  projectTaskStatus,
+  readTaskStatus as taskStatusView,
+  TaskStatusError,
+} from "./task-status.js";
 import {
   closeTodoItems,
   ensureTodoLedger,
@@ -2913,6 +2922,7 @@ function buildSessionEnv(args: {
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_TODO_COMMAND: join(args.sessionToolDir, TODO_TOOL_NAME),
     SPUR_SNAPSHOT_COMMAND: join(args.sessionToolDir, SNAPSHOT_TOOL_NAME),
+    SPUR_STATUS_COMMAND: join(args.sessionToolDir, TASK_STATUS_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
@@ -8110,7 +8120,7 @@ export class SessionService {
             }
             continue;
           }
-          await this.checkPrForSession(session, view.state);
+          await this.checkPrForSession(session, classified.state);
           if (this.isDeliveryStopped()) return;
           if (detectionOnlyError) {
             const previousAttention = this.attentionStates.get(view.id);
@@ -8142,7 +8152,7 @@ export class SessionService {
             shouldParkForStale(
               {
                 status: view.status,
-                state: view.state,
+                state: classified.state,
                 lastActivityAt: parkActivityAt.toISOString(),
               },
               this.resolveStaleAfterMs(session),
@@ -15276,7 +15286,13 @@ export class SessionService {
         id: classified.session.id,
         agent: classified.session.agent,
         status: classified.session.status,
-        state: this.stabilizeState(classified.session.id, classified.state),
+        state: projectTaskStatus(
+          classified.session,
+          classified.state,
+          this.stabilizeState(classified.session.id, classified.state),
+          classified.runtime.runtimeAlive,
+          classified.workspacePresent,
+        ),
         runtimeAlive: classified.runtime.runtimeAlive,
       });
     }
@@ -18733,7 +18749,16 @@ export class SessionService {
       return record;
     }
     const record = withQueuedMessages(
-      { ...acceptedBase, updatedAt: nowIso() },
+      {
+        ...clearTaskStatus(
+          {
+            ...acceptedBase,
+            taskStatusRevision: latest.taskStatusRevision ?? 0,
+          },
+          true,
+        ),
+        updatedAt: nowIso(),
+      },
       [...latestQueued, message],
       awaitingPrompt,
     );
@@ -19485,6 +19510,13 @@ export class SessionService {
             (await this.paneGenerationMatches(current, prepared.generation)),
           );
         });
+      let taskRevisionRetired = false;
+      const retireTaskRevision = (current: SessionRecord): void => {
+        if (taskRevisionRetired) return;
+        writeSession(this.config.dataDir, clearTaskStatus(current, true));
+        this.dashboardCache.delete(sessionId);
+        taskRevisionRetired = true;
+      };
       const authorizeGenerationResend = (send: () => Promise<void>) =>
         this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           const current = readSession(this.config.dataDir, sessionId);
@@ -19496,6 +19528,7 @@ export class SessionService {
             return false;
           }
           if (options?.allowDelivery?.() === false) return false;
+          retireTaskRevision(current);
           options?.observeDelivery?.("input-started");
           await send();
           return true;
@@ -19560,6 +19593,7 @@ export class SessionService {
                 return false;
               }
               if (options?.allowDelivery?.() === false) return false;
+              retireTaskRevision(current);
               options?.observeDelivery?.("input-started");
               await send();
               return true;
@@ -19688,7 +19722,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const latest = readSession(this.config.dataDir, readySession.id) ?? readySession;
     const record = withQueuedMessages(
-      { ...readySession, status: "running", updatedAt: nowIso() },
+      { ...clearTaskStatus(latest, true), status: "running", updatedAt: nowIso() },
       [message, ...removeFirstOccurrence(queuedMessages(latest), message)],
       true,
     );
@@ -20575,6 +20609,52 @@ export class SessionService {
     });
   }
 
+  async readTaskStatus(sessionId: string): Promise<TaskStatusView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      return taskStatusView(session);
+    });
+  }
+
+  async writeTaskStatus(sessionId: string, request: TaskStatusRequest): Promise<TaskStatusView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      let session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (
+        session.status !== "running" ||
+        session.agentLaunchId !== request.agentLaunchId ||
+        (session.taskStatusRevision ?? 0) !== request.revision
+      ) {
+        throw new TaskStatusError("Task or agent launch changed", 409, "stale_task_status");
+      }
+      if (request.state === "completed") {
+        const projection = ensureTodoLedger(this.config.dataDir, session);
+        const block = todoLedgerBlock(projection);
+        if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
+        if (block) throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
+        // ensureTodoLedger can install its version marker; retain that write.
+        session = readSession(this.config.dataDir, sessionId) ?? session;
+      }
+      const record =
+        request.state === "clear"
+          ? clearTaskStatus(session)
+          : {
+              ...session,
+              taskStatus: {
+                state: request.state,
+                revision: request.revision,
+                agentLaunchId: request.agentLaunchId,
+                updatedAt: nowIso(),
+              },
+            };
+      writeSession(this.config.dataDir, record);
+      this.dashboardCache.delete(sessionId);
+      await this.refreshDashboardCacheEntry(record);
+      return taskStatusView(record);
+    });
+  }
+
   async mutateTodo(
     sessionId: string,
     request: TodoMutationRequest,
@@ -20590,7 +20670,13 @@ export class SessionService {
           "Session handoff is already in progress",
         );
       }
-      return applyTodoMutation(this.config.dataDir, session, request, actor);
+      const projection = applyTodoMutation(this.config.dataDir, session, request, actor);
+      if (request.action === "add" || request.action === "resume") {
+        const latest = readSession(this.config.dataDir, sessionId) ?? session;
+        writeSession(this.config.dataDir, clearTaskStatus(latest));
+        this.dashboardCache.delete(sessionId);
+      }
+      return projection;
     });
   }
 
@@ -29441,6 +29527,8 @@ export class SessionService {
       agentSessionId: _agentSessionId,
       agentLaunchId: _agentLaunchId,
       claudeStatusOwner: _claudeStatusOwner,
+      taskStatus: _taskStatus,
+      taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
       blockedTriggerNotices: _blockedTriggerNotices,
@@ -29457,14 +29545,20 @@ export class SessionService {
       rateLimitResetAt: _oldReset,
       ...dashboardSession
     } = session;
-    const state = this.stabilizeState(
-      session.id,
-      hasRetainedSessionError(session) ? "error" : classified.state,
+    const rawState = hasRetainedSessionError(session) ? "error" : classified.state;
+    const state = projectTaskStatus(
+      session,
+      rawState,
+      this.stabilizeState(session.id, rawState),
+      classified.runtime.runtimeAlive,
+      workspacePresent,
     );
     await this.updateStateHistory(
       session,
       state,
-      classified.source,
+      state !== rawState && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
@@ -29863,11 +29957,19 @@ export class SessionService {
     session = reported;
     classified.session = session;
     if (hasRetainedSessionError(session)) classified.state = "error";
-    const state = this.stabilizeState(session.id, classified.state);
+    const state = projectTaskStatus(
+      session,
+      classified.state,
+      this.stabilizeState(session.id, classified.state),
+      classified.runtime.runtimeAlive,
+      workspacePresent,
+    );
     await this.updateStateHistory(
       session,
       state,
-      classified.source,
+      state !== classified.state && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
@@ -29905,6 +30007,8 @@ export class SessionService {
       originalTaskPrompt: _originalTaskPrompt,
       agentLaunchId: _agentLaunchId,
       claudeStatusOwner: _claudeStatusOwner,
+      taskStatus: _taskStatus,
+      taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
       blockedTriggerNotices: _blockedTriggerNotices,

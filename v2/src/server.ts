@@ -174,6 +174,7 @@ import {
   parseSnapshotIncludeDone,
   parseSnapshotListQuery,
 } from "./snapshots.js";
+import { parseTaskStatusRequest, TaskStatusError } from "./task-status.js";
 
 interface JsonError {
   error: string;
@@ -2490,6 +2491,25 @@ export async function startServer(
         return;
       }
 
+      const taskStatusSessionId = path.match(/^\/sessions\/([^/]+)\/task-status$/)?.[1];
+      if ((method === "GET" || method === "POST") && taskStatusSessionId) {
+        const target = decodeURIComponent(taskStatusSessionId);
+        if (method === "GET") {
+          sendJson(response, 200, await service.readTaskStatus(target));
+        } else {
+          if (request.headers["x-spur-caller-session"] !== target) {
+            throw new TaskStatusError(
+              "Task status requires the target agent caller",
+              403,
+              "task_status_forbidden",
+            );
+          }
+          const body = parseTaskStatusRequest(await readJsonBody<unknown>(request));
+          sendJson(response, 200, await service.writeTaskStatus(target, body));
+        }
+        return;
+      }
+
       if (method === "GET" && path === "/snapshots/latest") {
         let links: SessionLinkFilter[];
         try {
@@ -3199,7 +3219,7 @@ export async function startServer(
         });
         return;
       }
-      if (error instanceof InvalidTodoRequestError) {
+      if (error instanceof TaskStatusError || error instanceof InvalidTodoRequestError) {
         failRequest(response, error.statusCode, message, {
           method,
           path,

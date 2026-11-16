@@ -399,7 +399,7 @@ test.describe("spawn modal capture", () => {
     await page.goto("/");
     await page.getByRole("button", { name: /spawn session/i }).click();
     const modal = modalForHeading(page, /spawn session/i);
-    await modal.getByLabel("Self-destruct").check();
+    await modal.getByLabel("Auto-close session").check();
     const addStep = modal.getByRole("button", { name: "+ Step" });
     for (let index = 0; index < 8; index += 1) {
       await addStep.evaluate((button: HTMLButtonElement) => button.click());
@@ -407,7 +407,7 @@ test.describe("spawn modal capture", () => {
 
     await expectModalGeometry(page, /spawn session/i);
     await expectAuxiliaryTargetVisible(modal, "[data-spawn-modal-controls]", addStep);
-    await expect(modal.getByLabel("Self-destruct conditions")).toBeAttached();
+    await expect(modal.getByLabel("Auto-close conditions")).toBeAttached();
     await expect(modal.getByPlaceholder("Base branch")).toBeAttached();
     await expectFooterInViewport(page, modal, /^spawn$/i);
   });

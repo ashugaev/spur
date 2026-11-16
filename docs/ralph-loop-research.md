@@ -149,13 +149,13 @@ this on:
 - No cost circuit-breaker — this is exactly the "overbaking" risk Huntley warns
   about. Start with a coarse schedule (hourly, not every-minute) and watch the
   first few runs' diffs before tightening it.
-- `spawn.autoComplete` does not apply here: `config.ts` only permits it for
-  `github:work_item.new`, `sentry:issue.new`, `github-ci:run.completed`, or
-  `jira:work_item.new` events, not `cron:tick` — setting it on a cron-triggered spawn trigger fails
-  config load. It also isn't a "which sessions are already live" concept, it's
-  one-work-item-per-PR dedup (README's `pr-review-queue-spawn` example is the
-  only place it's actually used; a desk-group PR-review trigger uses
-  `spawnDeskGroup` instead, which explicitly rejects `autoComplete`).
+- `spawn.autoClose` (deprecated alias `autoComplete`) controls session closure,
+  separate from work-item ownership/dedup. Supported events: `github:work_item.new`,
+  `sentry:issue.new`, `github-ci:run.completed`, `jira:work_item.new`, `script:item.new`;
+  `cron:tick` rejects this policy. Enabled closure requires both current and retained
+  opt-in, a running work item at least five minutes old, and a running idle session.
+  Desk groups reject enabled closure; [configuration](configuration.md#field-reference),
+  `v2/src/config.ts`, `v2/src/triggers.ts`.
   A cron-spawned Ralph iteration needs no equivalent: each tick's session just
   runs to `waiting` and sits idle in its own worktree; the next tick spawns
   another one regardless, so nothing needs to be marked "complete" to unblock

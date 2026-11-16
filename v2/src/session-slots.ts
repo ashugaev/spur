@@ -55,6 +55,7 @@ const GIT_WRAPPER_SIGNATURE = "Spur git wrapper could not find git";
 const BRANCH_TOOL_NAME = "spur-branch";
 export const TODO_TOOL_NAME = "spur-todo";
 export const SNAPSHOT_TOOL_NAME = "spur-snapshot";
+export const TASK_STATUS_TOOL_NAME = "spur-status";
 export const MANUAL_TITLE_LOCK_MESSAGE =
   "title editing unavailable because title was set manually; do not attempt title edits again.";
 
@@ -342,6 +343,9 @@ ${lines}`;
 }
 
 export function withSessionSlotInstructions(prompt: string, tags: TagDefinition[] = []): string {
+  if (!prompt.includes("SPUR_STATUS_COMMAND")) {
+    prompt += `\n\nTask status:\n- At task start, run \`"$SPUR_STATUS_COMMAND" --json\` once and retain its revision; clear any previous outcome with \`"$SPUR_STATUS_COMMAND" clear --revision <retained-revision>\`.\n- Before your final response, declare \`completed\` with the retained revision after the task and Spur ToDo are resolved, or \`needs_input\` when a human reply is required. Use \`"$SPUR_STATUS_COMMAND" <state> --revision <retained-revision>\`. Waiting for automation or CI stays waiting.\n- A stale revision means newer work arrived: never fetch a fresh revision to force an old outcome through. Completed keeps this session and its artifacts; closing the session is separate.`;
+  }
   if (prompt.includes("SPUR_SLOT_COMMAND") || prompt.includes(SLOT_TOOL_NAME)) {
     return prompt;
   }
@@ -586,6 +590,15 @@ case "$action" in
     ;;
 esac
 exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" snapshot "$action" ${shellEscape(args.sessionId)} "$@"
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  writeToolFileAtomic(
+    join(toolDir, TASK_STATUS_TOOL_NAME),
+    `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" task-status --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );
