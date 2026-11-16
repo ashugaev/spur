@@ -330,6 +330,37 @@ export async function readWorktreeHead(worktreePath: string): Promise<WorktreeHe
 }
 
 /**
+ * Commits on HEAD after `sha`. Null when the worktree is gone, `sha` or `branch` was not
+ * recorded, HEAD left that branch, or `sha` is no longer an ancestor of HEAD (amend, rebase).
+ */
+export async function countCommitsSince(
+  worktreePath: string,
+  sha: string | null,
+  branch: string | null,
+): Promise<number | null> {
+  if (sha === null || branch === null || !worktreePath.trim() || !existsSync(worktreePath)) {
+    return null;
+  }
+  try {
+    const current = await runGit(
+      worktreePath,
+      ["rev-parse", "--abbrev-ref", "HEAD"],
+      GIT_READ_TIMEOUT_MS,
+    );
+    if (current !== branch) return null;
+    await runGit(worktreePath, ["merge-base", "--is-ancestor", sha, "HEAD"], GIT_READ_TIMEOUT_MS);
+    const count = await runGit(
+      worktreePath,
+      ["rev-list", "--count", `${sha}..HEAD`],
+      GIT_READ_TIMEOUT_MS,
+    );
+    return Number(count);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Configured URL of every git remote, keyed by remote name. One spawn for the
  * whole set instead of one `remote get-url` per candidate remote, and no GitHub
  * budget at all. Empty when the repo is unreadable or has no remote.

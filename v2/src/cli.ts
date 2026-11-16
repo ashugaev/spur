@@ -29,6 +29,7 @@ import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, Option, type Help } from "commander";
 import { registerReviewApp } from "./review-app.js";
 import { registerReviewGate } from "./review-gate.js";
+import { parseTaskStatusRequest } from "./task-status.js";
 import {
   connectProjectConfig,
   deleteJson,
@@ -194,9 +195,11 @@ import {
   type HandoffSessionRequest,
   type TodoMutationRequest,
   type TodoProjection,
-  type WorkSnapshot,
+  type LatestSnapshotEntry,
   type WorkSnapshotMeta,
+  type WorkSnapshotRead,
   type WriteSnapshotRequest,
+  type TaskStatusView,
 } from "./types.js";
 import { getVersion } from "./version.js";
 import {
@@ -1960,7 +1963,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c close, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
@@ -2496,7 +2499,7 @@ async function runInteractiveSessionList(
       sessions = sessions.filter((entry) => entry.id !== completed.id);
       setSelectedSession(null);
       clearPendingConfirmations();
-      statusMessage = brandLine(`Completed ${completed.id}.`);
+      statusMessage = brandLine(`Closed ${completed.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       statusMessage = brandLine(message);
@@ -3906,14 +3909,14 @@ export function createProgram(cliEntrypoint: string): Command {
 
   program
     .command("complete")
-    .description("Mark a session complete and clean up its runtime artifacts.")
+    .description("Close a session and clean up its runtime artifacts.")
     .argument("<sessionId>", "Session id")
     .option(
       "--pr-action <action>",
       "Handle open PR before cleanup (leave_open or close)",
       parsePrActionOption,
     )
-    .option("--skip-pr-check", "Complete without any GitHub PR check (no gh calls)")
+    .option("--skip-pr-check", "Close without any GitHub PR check (no gh calls)")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -3926,11 +3929,38 @@ export function createProgram(cliEntrypoint: string): Command {
       }
       await outputResult({
         json: Boolean(options.json),
-        label: "completing session",
+        label: "closing session",
         action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath, body),
-        success: (session) => `Completed ${session.id}.`,
+        success: (session) => `Closed ${session.id}.`,
         render: renderSessionCard,
       });
+    });
+
+  program
+    .command("task-status")
+    .description("Read or declare the current task outcome without closing its session.")
+    .argument("[state]", "Task outcome: completed, needs_input, or clear")
+    .requiredOption("--session <id>", "Session id")
+    .option("--revision <integer>", "Revision retained at task start")
+    .option("--json", "Print raw JSON")
+    .action(async (state: string | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const path = `/sessions/${encodeURIComponent(options.session as string)}/task-status`;
+      const view =
+        state === undefined
+          ? await getJson<TaskStatusView>(cliEntrypoint, path, configPath)
+          : await postJson<TaskStatusView>(
+              cliEntrypoint,
+              path,
+              parseTaskStatusRequest({
+                state,
+                revision: options.revision === undefined ? undefined : Number(options.revision),
+                agentLaunchId: process.env["SPUR_AGENT_LAUNCH_ID"],
+              }),
+              configPath,
+            );
+      if (options.json) printJson(view);
+      else writeStdout(`revision ${view.revision}${view.state ? ` ${view.state}` : ""}\n`);
     });
 
   const todoCommand = program
@@ -4036,7 +4066,7 @@ export function createProgram(cliEntrypoint: string): Command {
 
   const snapshotCommand = program
     .command("snapshot")
-    .description("Write, list or show a session's work snapshots.");
+    .description("Write, list, show or find work snapshots by link.");
   const snapshotsPath = (sessionId: string): string =>
     `/sessions/${encodeURIComponent(sessionId)}/snapshots`;
   snapshotCommand
@@ -4061,17 +4091,36 @@ export function createProgram(cliEntrypoint: string): Command {
           `Wrote snapshot ${meta.version} for ${meta.sessionId}${meta.final ? " (final)" : ""}.`,
       });
     });
+  const snapshotFreshnessLine = (snapshot: WorkSnapshotRead): string => {
+    const { freshness } = snapshot;
+    return `v${snapshot.version} ${snapshot.at} age ${freshness.ageSeconds}s stale ${freshness.stale ? "yes" : "no"} commits ${freshness.commitsSince ?? "?"} activity ${freshness.activitySince ?? "none"}`;
+  };
+  const snapshotDoneLines = (done: WorkSnapshotRead["done"]): string[] =>
+    done === undefined
+      ? []
+      : done === null
+        ? ["done: unreadable ledger"]
+        : done.map((item) => `done: ${item.text}`);
   snapshotCommand
     .command("list")
     .argument("<sessionId>", "Session id")
+    .option("--limit <n>", "Maximum versions (1..100); default all")
+    .option("--before <version>", "Only versions below this one")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const query = new URLSearchParams({ order: "desc" });
+      if (options.limit !== undefined) query.set("limit", options.limit);
+      if (options.before !== undefined) query.set("before", options.before);
       await outputResult({
         json: Boolean(options.json),
         label: "loading snapshots",
         action: () =>
-          getJson<WorkSnapshotMeta[]>(cliEntrypoint, snapshotsPath(sessionId), configPath),
+          getJson<WorkSnapshotMeta[]>(
+            cliEntrypoint,
+            `${snapshotsPath(sessionId)}?${query.toString()}`,
+            configPath,
+          ),
         render: (snapshots) =>
           snapshots
             .map(
@@ -4085,7 +4134,8 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("show")
     .argument("<sessionId>", "Session id")
     .argument("[version]", "Snapshot version; defaults to the latest")
-    .option("--json", "Print the full snapshot as JSON")
+    .option("--include-done", "List the completed ToDo items")
+    .option("--json", "Print the full snapshot with freshness as JSON")
     .action(async (sessionId: string, versionArg: string | undefined, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       const version = versionArg?.trim() ?? "latest";
@@ -4096,12 +4146,53 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "loading snapshot",
         action: () =>
-          getJson<WorkSnapshot>(
+          getJson<WorkSnapshotRead>(
             cliEntrypoint,
-            `${snapshotsPath(sessionId)}/${version}`,
+            `${snapshotsPath(sessionId)}/${version}${options.includeDone ? "?includeDone=1" : ""}`,
             configPath,
           ),
-        render: (snapshot) => snapshot.content,
+        // Freshness goes to stderr so stdout stays the stored content.
+        render: (snapshot) => {
+          writeStderr(
+            [snapshotFreshnessLine(snapshot), ...snapshotDoneLines(snapshot.done)].join("\n"),
+          );
+          return snapshot.content;
+        },
+      });
+    });
+  snapshotCommand
+    .command("latest")
+    .description("Latest snapshot of every session whose links match.")
+    .option("--link <label[=url]>", "Session link; repeat to require all", collectOptionValue, [])
+    .option("--include-done", "List the completed ToDo items")
+    .option("--json", "Print the entries as JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      if (options.link.length === 0) throw new Error("snapshot latest requires --link");
+      const query = new URLSearchParams();
+      for (const link of options.link) query.append("link", link);
+      if (options.includeDone) query.set("includeDone", "1");
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading snapshots",
+        action: () =>
+          getJson<LatestSnapshotEntry[]>(
+            cliEntrypoint,
+            `/snapshots/latest?${query.toString()}`,
+            configPath,
+          ),
+        render: (entries) =>
+          entries
+            .map((entry) =>
+              [
+                `## ${entry.sessionId} (${entry.status}, ${entry.state ?? "-"})`,
+                snapshotFreshnessLine(entry.snapshot),
+                ...snapshotDoneLines(entry.snapshot.done),
+                "",
+                entry.snapshot.content,
+              ].join("\n"),
+            )
+            .join("\n"),
       });
     });
 
@@ -4273,7 +4364,7 @@ export function createProgram(cliEntrypoint: string): Command {
 
   program
     .command("reopen")
-    .description("Restart a completed session in place, keeping its id and history.")
+    .description("Restart a closed session in place, keeping its id and history.")
     .argument("<sessionId>", "Session id")
     .option(
       "--force",

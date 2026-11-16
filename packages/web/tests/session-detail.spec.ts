@@ -508,7 +508,7 @@ test.describe("S1: Session detail header", () => {
     );
     await expect(nav.getByRole("link", { name: /cursor.*detail-s1-desk-killed/i })).toHaveCount(0);
 
-    await nav.getByRole("button", { name: "Show completed desk agents" }).click();
+    await nav.getByRole("button", { name: "Show closed desk agents" }).click();
 
     await expect(nav.getByRole("link", { name: /claude.*detail-s1-desk-complete/i })).toBeVisible();
     await expect(nav.getByRole("link", { name: /cursor.*detail-s1-desk-killed/i })).toHaveCount(0);
@@ -1248,12 +1248,47 @@ test.describe("S2: Actions bar", () => {
     await expect(page.getByRole("button", { name: /^pause$/i })).toBeVisible();
   });
 
-  test("Complete button visible when session is completable", async ({ page }) => {
+  test("completed task retains artifacts and messaging until Close Session", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-task-completed",
+      state: "completed",
+      artifacts: [
+        {
+          id: "proof.zip",
+          name: "proof.zip",
+          size: 12,
+          mimeType: "application/zip",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-01-02T10:00:00.000Z",
+          updatedAt: "2026-01-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "waiting");
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.locator("header").getByText("completed", { exact: true })).toBeVisible();
+    await expect(page.getByText("proof.zip", { exact: true })).toBeVisible();
+    await expect(page.getByPlaceholder("Message...")).toBeEnabled();
+    await expect(page.getByRole("button", { name: /^close session$/i })).toHaveAttribute(
+      "title",
+      "Stop the agent and services, delete artifacts, remove the worktree",
+    );
+    session.status = "completed";
+    session.state = "stopped";
+    session.runtimeAlive = false;
+    await page.reload();
+    await expect(page.locator("header").getByText("closed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^reopen$/i })).toBeVisible();
+  });
+
+  test("Close Session button visible when session is closable", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s2-3" });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByRole("button", { name: /^complete$/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^close session$/i })).toBeVisible();
   });
 
   test("Kill button visible when session not completed/killed", async ({ page }) => {
@@ -1582,7 +1617,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^complete$/i }).click();
+    await page.getByRole("button", { name: /^close session$/i }).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -1622,7 +1657,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^complete$/i }).click();
+    await page.getByRole("button", { name: /^close session$/i }).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -1650,7 +1685,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^complete$/i }).click();
+    await page.getByRole("button", { name: /^close session$/i }).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -1717,7 +1752,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^complete$/i }).click();
+    await page.getByRole("button", { name: /^close session$/i }).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -3386,6 +3421,7 @@ test.describe("S4b: Artifacts section", () => {
     const dialog = page.getByRole("dialog", { name: "Artifact preview screenshot.png" });
     await expect(dialog).toBeVisible();
     await expectArtifactControlsOutsideSurface(page);
+    await expect(dialog.getByText(/^\d+ \/ \d+$/)).toHaveCount(0);
     await expect(dialog.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
     await expect(dialog.getByRole("button", { name: "Next artifact" })).toBeEnabled();
     await expect(dialog.getByRole("link", { name: "Download screenshot.png" })).toHaveAttribute(
@@ -3997,7 +4033,8 @@ test.describe("S4b: Artifacts section", () => {
 
       const firstDialog = page.getByRole("dialog", { name: "Artifact preview first.png" });
       await expect(firstDialog).toBeVisible();
-      await expectArtifactControlsOutsideSurface(page);
+      await expect(firstDialog.getByRole("button", { name: "Previous artifact" })).toHaveCount(1);
+      await expect(firstDialog.getByRole("button", { name: "Next artifact" })).toHaveCount(1);
       const firstSurface = firstDialog.getByLabel("Artifact preview surface");
       await expect(firstSurface).toHaveCSS("touch-action", "pan-y");
       const firstSurfaceBox = await firstSurface.boundingBox();
@@ -4118,9 +4155,265 @@ test.describe("S4b: Artifacts section", () => {
       await expect(dialog.getByText(/wrapped text preview starts/)).toBeVisible();
       await expectArtifactControlsOutsideSurface(page);
       await expect(dialog.getByRole("button", { name: "Next artifact" })).toBeEnabled();
+
+      const viewportWidth = page.viewportSize()?.width ?? 0;
+      const surfaceBox = await dialog.getByLabel("Artifact preview surface").boundingBox();
+      const nextBox = await dialog.getByRole("button", { name: "Next artifact" }).boundingBox();
+      expect(surfaceBox).not.toBeNull();
+      expect(nextBox).not.toBeNull();
+      if (!surfaceBox || !nextBox) throw new Error("Artifact lightbox layout missing bounds");
+      expect(surfaceBox.width).toBeCloseTo(viewportWidth, 0);
+      expect(nextBox.y + nextBox.height).toBeLessThanOrEqual(surfaceBox.y + 0.5);
+      await expect(dialog.getByText(/ · text · /)).not.toBeVisible();
+      await expect(dialog.getByRole("heading", { name: "wrapped.txt" }).locator("../..")).toHaveCSS(
+        "padding-top",
+        "6px",
+      );
     } finally {
       await context.close();
     }
+  });
+
+  test("mobile image lightbox is edge to edge with tap thirds and an immersive header", async ({
+    browser,
+  }) => {
+    // The preset viewport is 664 tall; the design measures a full 844 tall phone screen.
+    const context = await browser.newContext({
+      ...devices["iPhone 13"],
+      viewport: { width: 390, height: 844 },
+    });
+    await installApiRouteGuardsOnContext(context);
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-mobile-image",
+      artifacts: ["portrait.svg", "landscape.svg"].map((name) => ({
+        id: name,
+        name,
+        size: 512,
+        mimeType: "image/svg+xml",
+        kind: "image" as const,
+        origin: "intentional" as const,
+        createdAt: "2026-04-02T10:00:00.000Z",
+        updatedAt: "2026-04-02T10:00:00.000Z",
+      })),
+    });
+    const svgSizes: Record<string, [number, number]> = {
+      "portrait.svg": [1080, 1920],
+      "landscape.svg": [1920, 1080],
+    };
+
+    try {
+      await mockSessionDetail(page, session);
+      for (const [name, [width, height]] of Object.entries(svgSizes)) {
+        await page.route(`**/api/sessions/${session.id}/artifacts/${name}`, (route) => {
+          void route.fulfill({
+            status: 200,
+            contentType: "image/svg+xml",
+            body: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="${width}" height="${height}" fill="gray"/></svg>`,
+          });
+        });
+      }
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview portrait.svg" }).click({ force: true });
+
+      const firstDialog = page.getByRole("dialog", { name: "Artifact preview portrait.svg" });
+      await expect(firstDialog).toBeVisible();
+      await expect(firstDialog.getByAltText("portrait.svg")).toBeVisible();
+      const viewportWidth = page.viewportSize()?.width ?? 0;
+
+      const dialogBox = await firstDialog.boundingBox();
+      expect(dialogBox?.x).toBeCloseTo(0, 0);
+      expect(dialogBox?.width).toBeCloseTo(viewportWidth, 0);
+      const portraitBox = await firstDialog.getByAltText("portrait.svg").boundingBox();
+      expect(portraitBox?.width).toBeCloseTo(viewportWidth, 0);
+
+      await expect(firstDialog.getByRole("button", { name: "Zoom in" })).toBeHidden();
+      // Header prev/next exist; no side arrow columns, so the surface spans the viewport.
+      const headerPrevious = firstDialog.getByRole("button", { name: "Previous artifact" });
+      const headerNext = firstDialog.getByRole("button", { name: "Next artifact" });
+      await expect(headerPrevious).toHaveCount(1);
+      await expect(headerNext).toHaveCount(1);
+      await expect(headerPrevious).toBeDisabled();
+      await expect(headerNext).toBeEnabled();
+      const headerNextBox = await headerNext.boundingBox();
+      expect(headerNextBox?.y).toBeLessThan(80);
+      const imageSurfaceBox = await firstDialog
+        .getByLabel("Artifact preview surface")
+        .boundingBox();
+      expect(imageSurfaceBox?.x).toBeCloseTo(0, 0);
+      expect(imageSurfaceBox?.width).toBeCloseTo(viewportWidth, 0);
+      await expect(firstDialog.getByText("1 / 2", { exact: true })).toBeVisible();
+      await expect(firstDialog.getByText(/ · image · /)).not.toBeVisible();
+      await expect(
+        firstDialog.getByRole("heading", { name: "portrait.svg" }).locator("../.."),
+      ).toHaveCSS("padding-top", "6px");
+
+      const surfaceBox = await firstDialog.getByLabel("Artifact preview surface").boundingBox();
+      if (!surfaceBox) throw new Error("Artifact preview surface missing bounds");
+      const midY = surfaceBox.y + surfaceBox.height * 0.6;
+      const tapAt = (fraction: number) =>
+        page.touchscreen.tap(surfaceBox.x + surfaceBox.width * fraction, midY);
+      const close = firstDialog.getByRole("button", { name: "Close artifact preview" });
+
+      const artifactsDir = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+      const shotDir = artifactsDir ? join(artifactsDir, "mobile-artifact-viewer") : null;
+      if (shotDir) {
+        mkdirSync(shotDir, { recursive: true });
+        await page.screenshot({ path: join(shotDir, "image.png") });
+      }
+
+      await tapAt(0.5);
+      await expect(close).toBeHidden();
+      if (shotDir) await page.screenshot({ path: join(shotDir, "image-immersive.png") });
+      await tapAt(0.5);
+      await expect(close).toBeVisible();
+
+      await tapAt(0.1);
+      await expect(firstDialog).toBeVisible();
+      await expect(firstDialog.getByText("1 / 2", { exact: true })).toBeVisible();
+
+      await tapAt(0.9);
+      const secondDialog = page.getByRole("dialog", { name: "Artifact preview landscape.svg" });
+      await expect(secondDialog).toBeVisible();
+      await expect(secondDialog.getByText("2 / 2", { exact: true })).toBeVisible();
+      await expect(
+        secondDialog.getByRole("button", { name: "Close artifact preview" }),
+      ).toBeVisible();
+      const landscapeBox = await secondDialog.getByAltText("landscape.svg").boundingBox();
+      expect(landscapeBox?.width).toBeCloseTo(viewportWidth, 0);
+
+      await expect(secondDialog.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+      await secondDialog.getByRole("button", { name: "Previous artifact" }).tap();
+      await expect(firstDialog).toBeVisible();
+      await expect(firstDialog.getByText("1 / 2", { exact: true })).toBeVisible();
+      await firstDialog.getByRole("button", { name: "Next artifact" }).tap();
+      await expect(secondDialog).toBeVisible();
+      await expect(secondDialog.getByText("2 / 2", { exact: true })).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("320px phone lightbox header keeps every action inside the viewport", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      ...devices["iPhone 13"],
+      viewport: { width: 320, height: 844 },
+    });
+    await installApiRouteGuardsOnContext(context);
+    const page = await context.newPage();
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: () => Promise.reject(new Error("denied")) },
+      });
+      document.execCommand = () => false;
+    });
+    const names = Array.from({ length: 12 }, (_, index) => `notes-${index + 1}.txt`);
+    const session = makeWorkingSession({
+      id: "detail-s4b-narrow-header",
+      artifacts: names.map((name) => ({
+        id: name,
+        name,
+        size: 64,
+        mimeType: "text/plain; charset=utf-8",
+        kind: "text" as const,
+        origin: "intentional" as const,
+        createdAt: "2026-04-02T10:00:00.000Z",
+        updatedAt: "2026-04-02T10:00:00.000Z",
+      })),
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.route(`**/api/sessions/${session.id}/artifacts/*`, (route) => {
+        void route.fulfill({
+          status: 200,
+          contentType: "text/plain; charset=utf-8",
+          body: "narrow header text",
+        });
+      });
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview notes-12.txt" }).click({ force: true });
+
+      const dialog = page.getByRole("dialog", { name: "Artifact preview notes-12.txt" });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByText("12 / 12", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("narrow header text")).toBeVisible();
+
+      const expectActionsInViewport = async () => {
+        for (const locator of [
+          dialog.getByRole("button", { name: /^Copy/ }),
+          dialog.getByRole("link", { name: "Download notes-12.txt" }),
+          dialog.getByRole("button", { name: "Close artifact preview" }),
+        ]) {
+          const box = await locator.boundingBox();
+          expect(box).not.toBeNull();
+          if (!box) throw new Error("Header action missing bounds");
+          expect(box.x).toBeGreaterThanOrEqual(0);
+          expect(box.x + box.width).toBeLessThanOrEqual(320);
+          expect(box.width).toBeCloseTo(32, 0);
+        }
+      };
+
+      await expect(dialog.getByRole("button", { name: "Copy notes-12.txt" })).toBeVisible();
+      await expectActionsInViewport();
+
+      await dialog.getByRole("button", { name: "Copy notes-12.txt" }).tap();
+      await expect(
+        dialog.getByRole("button", { name: "Copy failed for notes-12.txt" }),
+      ).toBeVisible();
+      await expectActionsInViewport();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("mobile artifact grid shows two columns with 8px page padding", async ({ browser }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    await installApiRouteGuardsOnContext(context);
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-mobile-grid",
+      artifacts: ["one.png", "two.png", "three.png"].map((name) => ({
+        id: name,
+        name,
+        size: 1024,
+        mimeType: "image/png",
+        kind: "image" as const,
+        origin: "intentional" as const,
+        createdAt: "2026-04-02T10:00:00.000Z",
+        updatedAt: "2026-04-02T10:00:00.000Z",
+      })),
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await expect(page.locator("main")).toHaveCSS("padding-left", "8px");
+
+      const first = await page.getByLabel(/artifact one\.png$/).boundingBox();
+      const second = await page.getByLabel(/artifact two\.png$/).boundingBox();
+      expect(first).not.toBeNull();
+      expect(second).not.toBeNull();
+      if (!first || !second) throw new Error("Artifact cards missing bounds");
+      expect(second.y).toBeCloseTo(first.y, 0);
+      expect(second.x).toBeGreaterThan(first.x + 1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("desktop session page keeps 24px side padding", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const session = makeWorkingSession({ id: "detail-s4b-desktop-padding" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.locator("main")).toHaveCSS("padding-left", "24px");
   });
 
   test("shows agent artifacts by default and reveals system artifacts only after toggle", async ({
@@ -4932,7 +5225,7 @@ test.describe("S5: Runtime sidebar", () => {
         await expect(control).toBeVisible();
         await expect(control).toBeDisabled();
       }
-      for (const name of ["Continue anyway", "Restore", "Complete"]) {
+      for (const name of ["Continue anyway", "Restore", "Close Session"]) {
         await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
       }
       await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
@@ -5189,6 +5482,63 @@ test.describe("S6: Terminal modal from detail page", () => {
     // Vertical padding stays at py-1.5 (6px) — the inset adds no top/bottom height.
     expect(padding.top).toBe(6);
     expect(padding.bottom).toBe(6);
+  });
+
+  test("mobile touch terminal modal has no outer padding or border and a 6px inner gutter", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    await installApiRouteGuardsOnContext(context);
+    const page = await context.newPage();
+    const session = makeWorkingSession({ id: "detail-s6-mobile" });
+
+    try {
+      await mockSessionDetail(page, session);
+      await mockTerminalWebSocket(page);
+      await page.goto(`/sessions/${session.id}?terminal=${session.id}`);
+
+      const dialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
+      await expect(dialog).toBeVisible();
+      expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+
+      await expect(dialog).toHaveCSS("padding-left", "0px");
+      await expect(dialog).toHaveCSS("padding-bottom", "8px");
+      const root = dialog.getByTestId("direct-terminal-header").locator("..");
+      await expect(root).toHaveCSS("border-left-width", "0px");
+      await expect(dialog.getByTestId("direct-terminal-surface")).toHaveCSS("padding-left", "6px");
+      await expect(dialog.getByTestId("direct-terminal-surface")).toHaveCSS("padding-right", "6px");
+
+      const screen = dialog.locator(".xterm-screen");
+      await expect(screen).toBeVisible();
+      const rootBox = await root.boundingBox();
+      const screenBox = await screen.boundingBox();
+      expect(rootBox).not.toBeNull();
+      expect(screenBox).not.toBeNull();
+      if (!rootBox || !screenBox) throw new Error("Terminal bounds missing");
+      // Text sits 6px inside the edge; the reclaimed scrollbar width leaves a 4-14px right gap.
+      expect(screenBox.x).toBeCloseTo(6, 0);
+      const rightGap = rootBox.x + rootBox.width - (screenBox.x + screenBox.width);
+      expect(rightGap).toBeGreaterThanOrEqual(4);
+      expect(rightGap).toBeLessThan(14);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("desktop terminal modal keeps its border and surface padding", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const session = makeWorkingSession({ id: "detail-s6-desktop" });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.goto(`/sessions/${session.id}?terminal=${session.id}`);
+
+    const dialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByTestId("direct-terminal-header").locator("..")).toHaveCSS(
+      "border-left-width",
+      "1px",
+    );
+    await expect(dialog.getByTestId("direct-terminal-surface")).toHaveCSS("padding-left", "6px");
   });
 
   test("terminal header keeps the sidecar suffix in its title line", async ({ page }) => {
@@ -5605,14 +5955,14 @@ test.describe("S7: Display state override", () => {
     await expect(header.getByText("working", { exact: true })).toHaveCount(0);
   });
 
-  test("completed session shows stopped label, not working", async ({ page }) => {
+  test("completed session shows closed label, not working", async ({ page }) => {
     const session = makeCompletedSession({ id: "detail-s7-2" });
     await mockSessionDetail(page, session);
     await mockSessionConversation(page, session.id, "working");
     await page.goto(`/sessions/${session.id}`);
 
     const header = page.locator("header").first();
-    await expect(header.getByText("stopped", { exact: true }).first()).toBeVisible();
+    await expect(header.getByText("closed", { exact: true }).first()).toBeVisible();
     await expect(header.getByText("working", { exact: true })).toHaveCount(0);
   });
 

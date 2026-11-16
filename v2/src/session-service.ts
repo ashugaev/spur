@@ -125,6 +125,7 @@ import {
   findLatestCodexSessionFile,
   readCodexConversationTail,
   readCodexRolloutState,
+  readCodexTranscriptEntries,
   type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
@@ -293,6 +294,7 @@ import {
   writeSession,
   observeSessionWrites,
   withSessionWriteGuard,
+  listArchivedSessions,
 } from "./metadata.js";
 import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
@@ -353,6 +355,7 @@ import {
   SLOT_TOOL_NAME,
   SNAPSHOT_TOOL_NAME,
   TODO_TOOL_NAME,
+  TASK_STATUS_TOOL_NAME,
   applyNormalizedSlotsUpdate,
   applySlotsUpdate,
   ensureSessionSlotTool,
@@ -462,7 +465,19 @@ import {
   type RegistryScanResult,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
-import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
+import {
+  CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+  RATE_LIMIT_REACTIVATION_PROMPT,
+} from "./reactivation-prompts.js";
+import {
+  DEFAULT_DAILY_WAKE_MESSAGE,
+  DEFAULT_INTERVAL_WAKE_MESSAGE,
+  DEFAULT_WAKE_MESSAGE,
+  formatDailyWakeMessage,
+  formatIntervalWakeMessage,
+  normalizeDailyWakeTimes,
+  resolveNextDailyWakeAt,
+} from "./wake-schedule.js";
 import { reconcileTokenUsage, type ProviderTokenUsageSample } from "./token-usage.js";
 import {
   PreflightBatchClaimedError,
@@ -597,11 +612,25 @@ import {
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
   type TodoProjection,
+  type LatestSnapshotEntry,
+  type SessionLinkFilter,
+  type TodoItemProjection,
   type WorkSnapshot,
+  type WorkSnapshotFreshness,
   type WorkSnapshotMeta,
+  type TaskStatusRequest,
+  type TaskStatusView,
+  type WorkSnapshotRead,
 } from "./types.js";
 import {
+  clearTaskStatus,
+  projectTaskStatus,
+  readTaskStatus as taskStatusView,
+  TaskStatusError,
+} from "./task-status.js";
+import {
   ensureTodoLedger,
+  readTodoIfPresent,
   mutateTodo as applyTodoMutation,
   TodoEmptyLedgerError,
   TodoLedgerCorruptError,
@@ -613,14 +642,20 @@ import {
 import {
   listSnapshots,
   readSnapshot as readSnapshotVersion,
+  firstAgentWorkMs,
+  lastAgentWorkMs,
+  snapshotAgeSeconds,
+  snapshotDirAt,
   snapshotDue,
   snapshotGateBlock,
+  snapshotRequestMessage,
   snapshotSettings,
   writeSnapshot as storeSnapshot,
-  SNAPSHOT_REQUEST_MESSAGE,
   SnapshotConflictError,
   SnapshotCorruptError,
   WorkSnapshotRequiredError,
+  type SnapshotListQuery,
+  type SnapshotLocation,
 } from "./snapshots.js";
 import { cursorShowsReadyPrompt } from "./cursor-state.js";
 import { readCursorTokenUsage } from "./cursor-token-usage.js";
@@ -651,11 +686,13 @@ import {
   isGitWorktree,
   readCurrentBranch,
   readWorktreeHead,
+  countCommitsSince,
   removeWorktree,
   workspaceExists,
   probeWorkspace,
   worktreePathFor,
 } from "./workspace.js";
+import { createConcurrencyGate } from "./concurrency-gate.js";
 import { renderSelfMarker } from "./review-providers/github.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 import { getVersion } from "./version.js";
@@ -666,6 +703,8 @@ import { startDeploySwitch } from "./deploy-switch.js";
 import { getReleases } from "./releases-cache.js";
 import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./update-ledger.js";
 
+// Concurrent freshness reads for one by-link snapshot request.
+const SNAPSHOT_READ_CONCURRENCY = 4;
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const STATUS_DETECTION_ERROR_PREFIX = "Session status detection failed: ";
 const REPORTING_DETECTION_ERROR_PREFIX = STATUS_DETECTION_ERROR_PREFIX + "Resource readout ";
@@ -704,10 +743,6 @@ function recoverableRuntimeError(session: SessionRecord): boolean {
 // Not a message prefix (the message starts with "Session <id> ...") — a
 // substring marker matched via .includes() in isForeignAgentProcessMessage.
 const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
-const RATE_LIMIT_REACTIVATION_PROMPT =
-  "You were rate limited earlier and should be able to continue now. Please resume the task you were working on and pick up from where you left off.";
-const CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT =
-  "Claude hit a temporary server error earlier. Please try to continue the task now.";
 const CLAUDE_SERVER_ERROR_REACTIVATION_MS = 30 * 60 * 1000;
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
@@ -938,8 +973,6 @@ const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
-const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and continue orchestration.";
-const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
 
 type MemoryShedTrigger =
   | "available_floor"
@@ -1017,7 +1050,6 @@ function nextCgroupMaxLatched(
 ): boolean {
   return headroomBytes <= emergencyBytes || (latched && headroomBytes <= 2 * emergencyBytes);
 }
-const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
 
 interface StoredImageAttachment {
   id: string;
@@ -2855,6 +2887,7 @@ function buildSessionEnv(args: {
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_TODO_COMMAND: join(args.sessionToolDir, TODO_TOOL_NAME),
     SPUR_SNAPSHOT_COMMAND: join(args.sessionToolDir, SNAPSHOT_TOOL_NAME),
+    SPUR_STATUS_COMMAND: join(args.sessionToolDir, TASK_STATUS_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
@@ -4157,6 +4190,17 @@ export class SessionService {
   >();
   // Latest corrupt snapshot version already logged per session.
   private readonly snapshotCorruptLogged = new Map<string, number>();
+  // Last agent-work answer per session, valid while the activity instant is unchanged.
+  private readonly snapshotWorkCache = new Map<
+    string,
+    { activityMs: number; floorMs: number; workMs: number | null }
+  >();
+  // First agent work after a live session's snapshot, valid for that snapshot version.
+  private readonly firstWorkCache = new Map<string, { version: number; workMs: number }>();
+  // Live sessions whose tools this daemon process already rewrote.
+  private readonly toolsRefreshed = new Set<string>();
+  private readonly toolsRefreshFailedLogged = new Set<string>();
+  private readonly snapshotFailureLogged = new Set<string>();
   private readonly todoNudgeBackoff = new Map<
     string,
     { failures: number; nextRetryAtMs: number }
@@ -5629,36 +5673,6 @@ export class SessionService {
     return dueAt;
   }
 
-  private formatIntervalWakeMessage(
-    sessionId: string,
-    message: string,
-    stopCondition: string,
-  ): string {
-    return [
-      "Scheduled interval wake-up.",
-      `Stop condition: ${stopCondition}`,
-      "",
-      message,
-      "",
-      `If the stop condition is satisfied, cancel this interval with \`spur wake ${sessionId} --cancel\`.`,
-    ].join("\n");
-  }
-
-  private formatDailyWakeMessage(
-    sessionId: string,
-    message: string,
-    stopCondition: string,
-  ): string {
-    return [
-      "Scheduled daily wake-up.",
-      `Stop condition: ${stopCondition}`,
-      "",
-      message,
-      "",
-      `If the stop condition is satisfied, cancel this daily wake with \`spur wake ${sessionId} --cancel\`.`,
-    ].join("\n");
-  }
-
   // Gates a recurring wake (interval/daily) on wakeDeliverability before send()
   // is ever attempted. Emits session.wake.suppressed once on the transition into
   // workspace_missing and clears the once-per-session marker on the transition
@@ -5854,7 +5868,7 @@ export class SessionService {
             const nextDueAt = claimedNextDueAt;
             try {
               await this.send(session.id, {
-                message: this.formatIntervalWakeMessage(
+                message: formatIntervalWakeMessage(
                   session.id,
                   intervalWake.message,
                   intervalWake.stopCondition,
@@ -6255,7 +6269,7 @@ export class SessionService {
         if (claimedDailyNextDueAt !== null) {
           try {
             await this.send(session.id, {
-              message: this.formatDailyWakeMessage(
+              message: formatDailyWakeMessage(
                 session.id,
                 dailyWake.message,
                 dailyWake.stopCondition,
@@ -8034,6 +8048,7 @@ export class SessionService {
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         if (this.isDeliveryStopped()) return;
+        this.refreshSessionToolsOnce(session);
         try {
           this.warnIfTokenBudgetUnenforced(session);
           const { view, classified, detectionOnlyError } = await this.enrichWithClassified(
@@ -8055,7 +8070,7 @@ export class SessionService {
             }
             continue;
           }
-          await this.checkPrForSession(session, view.state);
+          await this.checkPrForSession(session, classified.state);
           if (this.isDeliveryStopped()) return;
           if (detectionOnlyError) {
             const previousAttention = this.attentionStates.get(view.id);
@@ -8087,7 +8102,7 @@ export class SessionService {
             shouldParkForStale(
               {
                 status: view.status,
-                state: view.state,
+                state: classified.state,
                 lastActivityAt: parkActivityAt.toISOString(),
               },
               this.resolveStaleAfterMs(session),
@@ -8197,6 +8212,21 @@ export class SessionService {
     }
     for (const sessionId of this.snapshotCorruptLogged.keys()) {
       if (!liveIds.has(sessionId)) this.snapshotCorruptLogged.delete(sessionId);
+    }
+    for (const sessionId of this.snapshotWorkCache.keys()) {
+      if (!liveIds.has(sessionId)) this.snapshotWorkCache.delete(sessionId);
+    }
+    for (const sessionId of this.firstWorkCache.keys()) {
+      if (!liveIds.has(sessionId)) this.firstWorkCache.delete(sessionId);
+    }
+    for (const sessionId of this.toolsRefreshed) {
+      if (!liveIds.has(sessionId)) this.toolsRefreshed.delete(sessionId);
+    }
+    for (const sessionId of this.toolsRefreshFailedLogged) {
+      if (!liveIds.has(sessionId)) this.toolsRefreshFailedLogged.delete(sessionId);
+    }
+    for (const sessionId of this.snapshotFailureLogged) {
+      if (!liveIds.has(sessionId)) this.snapshotFailureLogged.delete(sessionId);
     }
     // Keyed `${sessionId}\0${sidecarName}`, unlike every other map here —
     // test only the first \0-split segment against liveIds.
@@ -9922,11 +9952,17 @@ export class SessionService {
     const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
     if (Date.now() - lastSuccessful < 60_000) return;
     try {
+      let workAt: Date | null = null;
+      try {
+        workAt = await this.snapshotWorkAt(session, options?.agentActivityAt ?? null);
+      } catch (error) {
+        this.logSnapshotFailureOnce(session, error);
+      }
       await this.withPaneWriteLock(session.tmuxSession, async () => {
         const lifecycleIds = this.lifecycleIdsFor(session);
         const prepared = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
           if (options?.detached && this.deliveryStopped) return null;
-          return this.maybeNudgeTodoLocked(session, lifecycleIds, options?.agentActivityAt ?? null);
+          return this.maybeNudgeTodoLocked(session, lifecycleIds, workAt);
         });
         if (!prepared) return;
 
@@ -10006,7 +10042,7 @@ export class SessionService {
   private async maybeNudgeTodoLocked(
     session: SessionRecord,
     lifecycleIds: string[],
-    agentActivityAt: Date | null,
+    workAt: Date | null,
   ): Promise<PreparedTodoNudge | null> {
     const current = readSession(this.config.dataDir, session.id);
     if (
@@ -10029,8 +10065,11 @@ export class SessionService {
     )
       return null;
     session = current;
-    const snapshotRequest = this.prepareSnapshotRequest(session, agentActivityAt);
-    if (snapshotRequest) {
+    const snapshotRequest = this.prepareSnapshotRequest(session, workAt);
+    // Rewrites the tools first: an older session may lack the wrapper, and a failed write
+    // must not burn one of the request attempts. Failure skips the request, not the ToDo nudge.
+    const command = snapshotRequest ? this.snapshotRequestCommand(session) : null;
+    if (snapshotRequest && command !== null) {
       session = { ...session, snapshotNudge: snapshotRequest };
       writeSession(this.config.dataDir, session);
       return {
@@ -10042,7 +10081,7 @@ export class SessionService {
         slot: "snapshotNudge",
         ...snapshotRequest,
         session,
-        message: SNAPSHOT_REQUEST_MESSAGE,
+        message: snapshotRequestMessage(command),
       };
     }
     const projection = ensureTodoLedger(this.config.dataDir, session);
@@ -10139,15 +10178,104 @@ export class SessionService {
     };
   }
 
+  private snapshotRequestCommand(session: SessionRecord): string | null {
+    try {
+      return shellEscape(
+        join(
+          this.prepareSessionTools(session.id, session.agent, session.project),
+          SNAPSHOT_TOOL_NAME,
+        ),
+      );
+    } catch (error) {
+      this.logSnapshotFailureOnce(session, error);
+      return null;
+    }
+  }
+
+  // Snapshot logic never blocks the ToDo nudge; logged once per session per process.
+  private logSnapshotFailureOnce(session: SessionRecord, error: unknown): void {
+    if (this.snapshotFailureLogged.has(session.id)) return;
+    this.snapshotFailureLogged.add(session.id);
+    this.logEvent("session.snapshot.request_skipped", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Snapshot request skipped for ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+      details: { kind: "snapshot_failed" },
+    });
+  }
+
+  /**
+   * Instant of the newest agent work that makes a snapshot due, else null. Transcript mtime
+   * (activityAt) only bounds it: Spur's own reminders and the agent's replies bump the mtime
+   * without being work, so due sessions read their transcript entries.
+   */
+  private async snapshotWorkAt(
+    session: SessionRecord,
+    activityAt: Date | null,
+  ): Promise<Date | null> {
+    const settings = snapshotSettings(this.resolveProjectForSession(session));
+    if (!settings.enabled || activityAt === null) return null;
+    let latest;
+    try {
+      latest = readSnapshotVersion(this.config.dataDir, session, "latest", "live");
+    } catch (error) {
+      // prepareSnapshotRequest logs the corrupt snapshot.
+      if (error instanceof SnapshotCorruptError) return activityAt;
+      throw error;
+    }
+    const freshnessMs = settings.freshnessMinutes * 60_000;
+    if (
+      !snapshotDue({
+        latestAt: latest?.at ?? null,
+        sessionCreatedAt: session.createdAt,
+        activityAt,
+        freshnessMs,
+      })
+    ) {
+      return null;
+    }
+    const floorMs = Date.parse(latest?.at ?? session.createdAt) + freshnessMs;
+    const activityMs = activityAt.getTime();
+    const cached = this.snapshotWorkCache.get(session.id);
+    if (cached?.activityMs === activityMs && cached.floorMs === floorMs) {
+      return cached.workMs === null ? null : new Date(cached.workMs);
+    }
+    const options = { untimedActivityMs: activityMs, floorMs };
+    let result: { workMs: number | null; complete: boolean } = { workMs: null, complete: true };
+    if (session.agent === "claude" || session.agent === "codex") {
+      const tail =
+        session.agent === "claude"
+          ? await this.readConversationSerialized(session)
+          : await this.readCodexConversationSerialized(session);
+      if (tail) {
+        result = lastAgentWorkMs(tail.entries, { ...options, atStart: tail.startIndex === 0 });
+        if (!result.complete) {
+          result = lastAgentWorkMs(await this.readFullConversationEntries(session), {
+            ...options,
+            atStart: true,
+          });
+        }
+      }
+    } else {
+      result = lastAgentWorkMs(await this.readFullConversationEntries(session), {
+        ...options,
+        atStart: true,
+      });
+    }
+    this.snapshotWorkCache.set(session.id, { activityMs, floorMs, workMs: result.workMs });
+    return result.workMs === null ? null : new Date(result.workMs);
+  }
+
   /** Next snapshotNudge slot value when a snapshot request is due and budgeted, else null. */
   private prepareSnapshotRequest(
     session: SessionRecord,
-    agentActivityAt: Date | null,
+    workAt: Date | null,
   ): { fingerprint: string; attempts: number } | null {
-    if (agentActivityAt === null) return null;
+    if (workAt === null) return null;
     let latest;
     try {
-      latest = readSnapshotVersion(this.config.dataDir, session, "latest");
+      latest = readSnapshotVersion(this.config.dataDir, session, "latest", "live");
     } catch (error) {
       if (!(error instanceof SnapshotCorruptError)) throw error;
       if (this.snapshotCorruptLogged.get(session.id) !== error.version) {
@@ -10168,7 +10296,7 @@ export class SessionService {
       !snapshotDue({
         latestAt: latest?.at ?? null,
         sessionCreatedAt: session.createdAt,
-        activityAt: agentActivityAt,
+        activityAt: workAt,
         freshnessMs,
       })
     ) {
@@ -12665,6 +12793,18 @@ export class SessionService {
     return artifact;
   }
 
+  private async readFullConversationEntries(session: SessionRecord): Promise<TranscriptEntry[]> {
+    const result = await readAgentConversation(session.agent, {
+      worktreePath: session.worktreePath,
+      ...(session.agent === "codex" ? { codexSessionsDir: this.codexSessionsDir(session.id) } : {}),
+      ...(session.agent === "cursor"
+        ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+        : {}),
+      ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+    });
+    return result ?? [];
+  }
+
   async getConversation(
     sessionId: string,
     options?: { from?: number; preserveEnd?: boolean },
@@ -12674,18 +12814,8 @@ export class SessionService {
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
     const from = options?.from;
 
-    const readFullEntries = async (): Promise<TranscriptEntry[]> => {
-      return readAgentConversation(session.agent, {
-        worktreePath: session.worktreePath,
-        ...(session.agent === "codex"
-          ? { codexSessionsDir: this.codexSessionsDir(session.id) }
-          : {}),
-        ...(session.agent === "cursor"
-          ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
-          : {}),
-        ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-      }).then((result) => result ?? []);
-    };
+    const readFullEntries = (): Promise<TranscriptEntry[]> =>
+      this.readFullConversationEntries(session);
 
     if (session.agent === "claude") {
       // Classification always comes from the tail reader, on every request
@@ -15070,7 +15200,13 @@ export class SessionService {
         id: classified.session.id,
         agent: classified.session.agent,
         status: classified.session.status,
-        state: this.stabilizeState(classified.session.id, classified.state),
+        state: projectTaskStatus(
+          classified.session,
+          classified.state,
+          this.stabilizeState(classified.session.id, classified.state),
+          classified.runtime.runtimeAlive,
+          classified.workspacePresent,
+        ),
         runtimeAlive: classified.runtime.runtimeAlive,
       });
     }
@@ -17450,7 +17586,7 @@ export class SessionService {
     });
     try {
       await this.send(session.id, {
-        message: this.formatIntervalWakeMessage(
+        message: formatIntervalWakeMessage(
           session.id,
           intervalWake.message,
           intervalWake.stopCondition,
@@ -17546,11 +17682,7 @@ export class SessionService {
     });
     try {
       await this.send(session.id, {
-        message: this.formatDailyWakeMessage(
-          session.id,
-          dailyWake.message,
-          dailyWake.stopCondition,
-        ),
+        message: formatDailyWakeMessage(session.id, dailyWake.message, dailyWake.stopCondition),
         queue: false,
       });
       this.logEvent("session.wake.daily_sent", {
@@ -18529,7 +18661,16 @@ export class SessionService {
       return record;
     }
     const record = withQueuedMessages(
-      { ...acceptedBase, updatedAt: nowIso() },
+      {
+        ...clearTaskStatus(
+          {
+            ...acceptedBase,
+            taskStatusRevision: latest.taskStatusRevision ?? 0,
+          },
+          true,
+        ),
+        updatedAt: nowIso(),
+      },
       [...latestQueued, message],
       awaitingPrompt,
     );
@@ -19281,6 +19422,13 @@ export class SessionService {
             (await this.paneGenerationMatches(current, prepared.generation)),
           );
         });
+      let taskRevisionRetired = false;
+      const retireTaskRevision = (current: SessionRecord): void => {
+        if (taskRevisionRetired) return;
+        writeSession(this.config.dataDir, clearTaskStatus(current, true));
+        this.dashboardCache.delete(sessionId);
+        taskRevisionRetired = true;
+      };
       const authorizeGenerationResend = (send: () => Promise<void>) =>
         this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           const current = readSession(this.config.dataDir, sessionId);
@@ -19292,6 +19440,7 @@ export class SessionService {
             return false;
           }
           if (options?.allowDelivery?.() === false) return false;
+          retireTaskRevision(current);
           options?.observeDelivery?.("input-started");
           await send();
           return true;
@@ -19356,6 +19505,7 @@ export class SessionService {
                 return false;
               }
               if (options?.allowDelivery?.() === false) return false;
+              retireTaskRevision(current);
               options?.observeDelivery?.("input-started");
               await send();
               return true;
@@ -19484,7 +19634,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const latest = readSession(this.config.dataDir, readySession.id) ?? readySession;
     const record = withQueuedMessages(
-      { ...readySession, status: "running", updatedAt: nowIso() },
+      { ...clearTaskStatus(latest, true), status: "running", updatedAt: nowIso() },
       [message, ...removeFirstOccurrence(queuedMessages(latest), message)],
       true,
     );
@@ -20371,6 +20521,52 @@ export class SessionService {
     });
   }
 
+  async readTaskStatus(sessionId: string): Promise<TaskStatusView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      return taskStatusView(session);
+    });
+  }
+
+  async writeTaskStatus(sessionId: string, request: TaskStatusRequest): Promise<TaskStatusView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      let session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (
+        session.status !== "running" ||
+        session.agentLaunchId !== request.agentLaunchId ||
+        (session.taskStatusRevision ?? 0) !== request.revision
+      ) {
+        throw new TaskStatusError("Task or agent launch changed", 409, "stale_task_status");
+      }
+      if (request.state === "completed") {
+        const projection = ensureTodoLedger(this.config.dataDir, session);
+        const block = todoLedgerBlock(projection);
+        if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
+        if (block) throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
+        // ensureTodoLedger can install its version marker; retain that write.
+        session = readSession(this.config.dataDir, sessionId) ?? session;
+      }
+      const record =
+        request.state === "clear"
+          ? clearTaskStatus(session)
+          : {
+              ...session,
+              taskStatus: {
+                state: request.state,
+                revision: request.revision,
+                agentLaunchId: request.agentLaunchId,
+                updatedAt: nowIso(),
+              },
+            };
+      writeSession(this.config.dataDir, record);
+      this.dashboardCache.delete(sessionId);
+      await this.refreshDashboardCacheEntry(record);
+      return taskStatusView(record);
+    });
+  }
+
   async mutateTodo(
     sessionId: string,
     request: TodoMutationRequest,
@@ -20386,20 +20582,41 @@ export class SessionService {
           "Session handoff is already in progress",
         );
       }
-      return applyTodoMutation(this.config.dataDir, session, request, actor);
+      const projection = applyTodoMutation(this.config.dataDir, session, request, actor);
+      if (request.action === "add" || request.action === "resume") {
+        const latest = readSession(this.config.dataDir, sessionId) ?? session;
+        writeSession(this.config.dataDir, clearTaskStatus(latest));
+        this.dashboardCache.delete(sessionId);
+      }
+      return projection;
     });
   }
 
-  readSnapshots(sessionId: string): WorkSnapshotMeta[] {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    return listSnapshots(this.config.dataDir, session);
+  // Snapshot reads take no lock and never touch the pane or the record: versions are write-once,
+  // and the owner location is resolved per call (live record first, then the archive).
+  private readSnapshotOwner(sessionId: string): {
+    session: SessionRecord;
+    location: SnapshotLocation;
+  } {
+    const live = readSession(this.config.dataDir, sessionId);
+    if (live) return { session: live, location: "live" };
+    const archived = readArchivedSession(this.config.dataDir, sessionId);
+    if (archived) return { session: archived, location: "archived" };
+    throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
   }
 
-  readSnapshot(sessionId: string, version: number | "latest"): WorkSnapshot {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    const snapshot = readSnapshotVersion(this.config.dataDir, session, version);
+  readSnapshots(sessionId: string, query: SnapshotListQuery): WorkSnapshotMeta[] {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    return listSnapshots(this.config.dataDir, session, location, query);
+  }
+
+  async readSnapshot(
+    sessionId: string,
+    version: number | "latest",
+    options: { includeDone: boolean },
+  ): Promise<WorkSnapshotRead> {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    const snapshot = readSnapshotVersion(this.config.dataDir, session, version, location);
     if (!snapshot) {
       throw new SessionResourceNotFoundError(
         version === "latest"
@@ -20407,7 +20624,211 @@ export class SessionService {
           : `Snapshot ${version} not found for session ${sessionId}`,
       );
     }
-    return snapshot;
+    const read = await this.withFreshness(session, location, snapshot);
+    return options.includeDone ? { ...read, done: this.doneItems(session.id) } : read;
+  }
+
+  /** One entry per session matching every link, its latest snapshot, newest first. */
+  async latestSnapshotsByLink(
+    links: readonly SessionLinkFilter[],
+    options: { includeDone: boolean },
+  ): Promise<LatestSnapshotEntry[]> {
+    const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
+      ...listSessions(this.config.dataDir).map((session) => ({
+        session,
+        location: "live" as const,
+      })),
+      ...listArchivedSessions(this.config.dataDir, (project, id) =>
+        existsSync(snapshotDirAt(this.config.dataDir, { id, project }, "archived")),
+      ).map((session) => ({ session, location: "archived" as const })),
+    ];
+    const gate = createConcurrencyGate(SNAPSHOT_READ_CONCURRENCY);
+    const entries = await Promise.all(
+      candidates
+        .filter(({ session }) =>
+          matchesSessionLinks(this.displaySlotsForSession(session)?.links ?? [], links),
+        )
+        .map(({ session, location }) =>
+          gate.run(async (): Promise<LatestSnapshotEntry | null> => {
+            const snapshot = readSnapshotVersion(this.config.dataDir, session, "latest", location);
+            if (!snapshot) return null;
+            const read = await this.withFreshness(session, location, snapshot);
+            return {
+              sessionId: session.id,
+              status: session.status,
+              state: this.transitionsBinding?.store.observedState(session.id) ?? null,
+              snapshot: options.includeDone
+                ? { ...read, done: this.tolerantDoneItems(session.id) }
+                : read,
+            };
+          }),
+        ),
+    );
+    return entries
+      .filter((entry): entry is LatestSnapshotEntry => entry !== null)
+      .sort((a, b) => Date.parse(b.snapshot.at) - Date.parse(a.snapshot.at));
+  }
+
+  private doneItems(sessionId: string): TodoItemProjection[] {
+    const projection = readTodoIfPresent(this.config.dataDir, sessionId);
+    return projection?.items.filter((item) => item.status === "completed") ?? [];
+  }
+
+  // A damaged ledger costs its own entry the done list, not the whole response.
+  private tolerantDoneItems(sessionId: string): TodoItemProjection[] | null {
+    try {
+      return this.doneItems(sessionId);
+    } catch (error) {
+      if (error instanceof TodoLedgerCorruptError) return null;
+      throw error;
+    }
+  }
+
+  private async withFreshness(
+    session: SessionRecord,
+    location: SnapshotLocation,
+    snapshot: WorkSnapshot,
+  ): Promise<WorkSnapshotRead> {
+    const freshnessMs =
+      snapshotSettings(this.resolveProjectForSession(session)).freshnessMinutes * 60_000;
+    const [activity, commitsSince] = await Promise.all([
+      this.snapshotActivity(session, location, snapshot, freshnessMs),
+      countCommitsSince(session.worktreePath, snapshot.headSha, snapshot.branch),
+    ]);
+    const freshness: WorkSnapshotFreshness = {
+      ageSeconds: snapshotAgeSeconds(snapshot.at, Date.now()),
+      activitySince:
+        activity.firstWorkMs === null ? null : new Date(activity.firstWorkMs).toISOString(),
+      commitsSince,
+      stale: snapshotDue({
+        latestAt: snapshot.at,
+        sessionCreatedAt: session.createdAt,
+        activityAt: activity.newestWorkMs === null ? null : new Date(activity.newestWorkMs),
+        freshnessMs,
+      }),
+    };
+    return { ...snapshot, freshness };
+  }
+
+  /**
+   * First and newest agent work after the snapshot, by the rule that decides snapshot requests.
+   * Transcript write time gates the entry read; Cursor and OpenCode carry no entry times, so
+   * their transcript write time stands in for the work instant.
+   */
+  private async snapshotActivity(
+    session: SessionRecord,
+    location: SnapshotLocation,
+    snapshot: WorkSnapshot,
+    freshnessMs: number,
+  ): Promise<{ firstWorkMs: number | null; newestWorkMs: number | null }> {
+    const none = { firstWorkMs: null, newestWorkMs: null };
+    const floorMs = Date.parse(snapshot.at);
+    const cached = location === "live" ? this.firstWorkCache.get(session.id) : undefined;
+    const cachedFirstMs = cached?.version === snapshot.version ? cached.workMs : null;
+    // Newest work is never earlier than the first, so a late first work already makes it stale.
+    if (cachedFirstMs !== null && cachedFirstMs - floorMs > freshnessMs) {
+      return { firstWorkMs: cachedFirstMs, newestWorkMs: cachedFirstMs };
+    }
+    let slice: { entries: TranscriptEntry[]; startIndex: number } | null = null;
+    let activityMs: number | null;
+    if (session.agent === "claude" || session.agent === "codex") {
+      const tail = await this.readTranscriptTail(session, location);
+      if (!tail) return { firstWorkMs: cachedFirstMs, newestWorkMs: cachedFirstMs };
+      slice = tail;
+      activityMs = tail.mtimeMs;
+    } else {
+      activityMs = await this.untimedTranscriptActivityMs(session);
+    }
+    if (activityMs === null || activityMs <= floorMs) return none;
+    const untimedActivityMs = activityMs;
+    let fullEntries: Promise<TranscriptEntry[]> | undefined;
+    const scan = async (
+      run: (
+        entries: readonly TranscriptEntry[],
+        atStart: boolean,
+      ) => { workMs: number | null; complete: boolean },
+    ): Promise<number | null> => {
+      if (slice) {
+        const result = run(slice.entries, slice.startIndex === 0);
+        if (result.complete) return result.workMs;
+      }
+      fullEntries ??=
+        session.agent === "codex" && session.agentSessionId
+          ? readCodexTranscriptEntries(
+              this.codexSessionsDir(session.id),
+              session.agentSessionId,
+            ).then((entries) => entries ?? [])
+          : this.readFullConversationEntries(session);
+      return run(await fullEntries, true).workMs;
+    };
+    let firstWorkMs = cachedFirstMs;
+    if (firstWorkMs === null) {
+      firstWorkMs = await scan((entries, atStart) =>
+        firstAgentWorkMs(entries, { floorMs, atStart }),
+      );
+      if (firstWorkMs !== null && location === "live") {
+        this.firstWorkCache.set(session.id, { version: snapshot.version, workMs: firstWorkMs });
+      }
+    }
+    const newestWorkMs = await scan((entries, atStart) =>
+      lastAgentWorkMs(entries, { untimedActivityMs, floorMs, atStart }),
+    );
+    return {
+      firstWorkMs: firstWorkMs ?? newestWorkMs,
+      newestWorkMs: newestWorkMs ?? firstWorkMs,
+    };
+  }
+
+  // Live sessions share the incremental reader; archived ones bypass every reader map, which
+  // only eviction at archive time would ever clear.
+  private async readTranscriptTail(
+    session: SessionRecord,
+    location: SnapshotLocation,
+  ): Promise<{ entries: TranscriptEntry[]; startIndex: number; mtimeMs: number } | null> {
+    if (session.agent === "codex") {
+      // Pinned to the owning thread's rollout: the shared reader also follows the newest
+      // rollout in the global dir. It reuses a live cursor but never stores one.
+      if (!session.agentSessionId) return null;
+      const result = await readCodexConversationTail(
+        this.codexSessionsDir(session.id),
+        location === "live" ? this.codexConversationReaders.get(session.id) : undefined,
+        session.agentSessionId,
+      );
+      return result && { ...result, mtimeMs: result.reader.cursor.mtimeMs };
+    }
+    if (location === "live") {
+      const tail = await this.readConversationSerialized(session);
+      // The serialized read leaves its reader in the map; the reader carries the file's write time.
+      const mtimeMs = this.conversationReaders.get(session.id)?.lastMtimeMs;
+      return tail && mtimeMs !== undefined ? { ...tail, mtimeMs } : null;
+    }
+    const result = await readClaudeConversationTail(
+      session.worktreePath,
+      undefined,
+      session.agentSessionId,
+    );
+    return result && { ...result, mtimeMs: result.reader.lastMtimeMs };
+  }
+
+  private async untimedTranscriptActivityMs(session: SessionRecord): Promise<number | null> {
+    if (session.agent === "cursor") {
+      const chatId = await this.cursorTranscriptId(session);
+      const result = chatId
+        ? await readCursorJsonlState(
+            session.worktreePath,
+            undefined,
+            chatId,
+            session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {},
+          )
+        : null;
+      return result?.reader.lastMtimeMs ?? null;
+    }
+    const { state } = await readOpenCodeStructuredState(
+      session.agentSessionId,
+      session.worktreePath,
+      null,
+    );
+    return state?.activityMs ?? null;
   }
 
   async writeSnapshot(
@@ -21223,15 +21644,39 @@ export class SessionService {
       agent,
       ...(agent === "claude"
         ? {
-            snapshotHook: {
-              freshnessMinutes: snapshotSettings(project).freshnessMinutes,
-              // Absent at spawn: the record is written after tool prep, so now is the start.
-              sessionCreatedAt:
-                readSession(this.config.dataDir, sessionId)?.createdAt ?? new Date().toISOString(),
-            },
+            snapshotHook: snapshotSettings(project).enabled
+              ? {
+                  enabled: true as const,
+                  freshnessMinutes: snapshotSettings(project).freshnessMinutes,
+                  // Absent at spawn: the record is written after tool prep, so now is the start.
+                  sessionCreatedAt:
+                    readSession(this.config.dataDir, sessionId)?.createdAt ??
+                    new Date().toISOString(),
+                }
+              : { enabled: false as const },
           }
         : {}),
     });
+  }
+
+  // Sessions started by an older Spur keep old tools (and, for Claude, an old hook) until
+  // something rewrites them; rewrite each live session's tools once per daemon process.
+  private refreshSessionToolsOnce(session: SessionRecord): void {
+    if (this.toolsRefreshed.has(session.id)) return;
+    try {
+      this.prepareSessionTools(session.id, session.agent, session.project);
+      this.toolsRefreshed.add(session.id);
+    } catch (error) {
+      // Retried every sweep; logged once per session per process.
+      if (this.toolsRefreshFailedLogged.has(session.id)) return;
+      this.toolsRefreshFailedLogged.add(session.id);
+      this.logEvent("session.tools.refresh_failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Session tool refresh failed for ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
   }
 
   // Session GC archives records without removeSessionArtifacts, so the
@@ -28669,6 +29114,8 @@ export class SessionService {
       agentSessionId: _agentSessionId,
       agentLaunchId: _agentLaunchId,
       claudeStatusOwner: _claudeStatusOwner,
+      taskStatus: _taskStatus,
+      taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
       blockedTriggerNotices: _blockedTriggerNotices,
@@ -28685,14 +29132,20 @@ export class SessionService {
       rateLimitResetAt: _oldReset,
       ...dashboardSession
     } = session;
-    const state = this.stabilizeState(
-      session.id,
-      hasRetainedSessionError(session) ? "error" : classified.state,
+    const rawState = hasRetainedSessionError(session) ? "error" : classified.state;
+    const state = projectTaskStatus(
+      session,
+      rawState,
+      this.stabilizeState(session.id, rawState),
+      classified.runtime.runtimeAlive,
+      workspacePresent,
     );
     await this.updateStateHistory(
       session,
       state,
-      classified.source,
+      state !== rawState && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
@@ -29091,11 +29544,19 @@ export class SessionService {
     session = reported;
     classified.session = session;
     if (hasRetainedSessionError(session)) classified.state = "error";
-    const state = this.stabilizeState(session.id, classified.state);
+    const state = projectTaskStatus(
+      session,
+      classified.state,
+      this.stabilizeState(session.id, classified.state),
+      classified.runtime.runtimeAlive,
+      workspacePresent,
+    );
     await this.updateStateHistory(
       session,
       state,
-      classified.source,
+      state !== classified.state && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
@@ -29133,6 +29594,8 @@ export class SessionService {
       originalTaskPrompt: _originalTaskPrompt,
       agentLaunchId: _agentLaunchId,
       claudeStatusOwner: _claudeStatusOwner,
+      taskStatus: _taskStatus,
+      taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
       blockedTriggerNotices: _blockedTriggerNotices,

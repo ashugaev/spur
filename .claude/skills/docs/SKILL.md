@@ -40,7 +40,7 @@ GRANULAR: one doc, one topic, one Diataxis mode; split on drift.
 
   Tutorial (first run)          docs/install-from-npm.md
   How-to (one task)             docs/install-from-source.md, docs/voice.md,
-                                 TROUBLESHOOTING.md, SETUP.md
+                                 docs/snapshots.md, TROUBLESHOOTING.md, SETUP.md
   Reference (commands, fields)  docs/commands.md, docs/configuration.md,
                                  docs/daemon-api.md
   Explanation (why)             gitignored planning notes, not shipped
@@ -60,7 +60,7 @@ navigation for an agent that reads source freely, never a copy of the source.
   own tests, never to this file.
   New surface ships with exactly one line added. Nothing else grows.
   Line budget per file, hard cap: commands.md 132, configuration.md 250,
-  daemon-api.md 120. daemon-api.md only: one method + one full path per
+  daemon-api.md 121. daemon-api.md only: one method + one full path per
   line, always — never `GET|POST /x` or `/x/a|b`, a route grep must find
   its exact `METHOD /path` string verbatim on one line. Over budget on your
   own edit: cut elsewhere in the same file before adding.
@@ -75,8 +75,10 @@ ONE SOURCE: each topic has one owning doc, everything else links.
 
   - Commands: docs/commands.md only. Config fields: docs/configuration.md only.
     Route names: docs/daemon-api.md only — full payload/status-code contracts
-    live in the handler (`v2/src/server.ts`), per daemon-api.md's own scope line.
+    live in the handler (`v2/src/server.ts`).
     A route documented as part of a config field's behavior stays with that field.
+  - Exception: docs/snapshots.md restates snapshot config defaults (#1460);
+    configuration.md stays the field owner.
   - Contradiction: pick the owner, delete the copy, link.
 
 LINK GRAPH: every published doc reachable from the README Docs section, relative links only.

@@ -403,13 +403,19 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   }
 
   const raw = asObject(value, label);
-  if (raw["autoClose"] !== undefined) {
-    throw new Error(`${label}.autoClose is not supported; use autoComplete: true`);
-  }
   if (raw["deskGroup"] !== undefined) {
     throw new Error(`${label}.deskGroup is not supported; use trigger-level spawnDeskGroup`);
   }
+  const canonicalAutoClose = asOptionalBoolean(raw["autoClose"], `${label}.autoClose`);
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+  if (
+    canonicalAutoClose !== undefined &&
+    autoComplete !== undefined &&
+    canonicalAutoClose !== autoComplete
+  ) {
+    throw new Error(`${label}.autoClose and ${label}.autoComplete must agree`);
+  }
+  const autoClose = canonicalAutoClose ?? autoComplete;
   const restrictWrites = asOptionalBoolean(raw["restrictWrites"], `${label}.restrictWrites`);
   const allowedTriggers = asOptionalStringArray(raw["allowedTriggers"], `${label}.allowedTriggers`);
 
@@ -432,15 +438,15 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
     if (!Array.isArray(raw["blocks"]) || raw["blocks"].length === 0) {
       throw new Error(`${label}.blocks must be a non-empty array of spawn blocks`);
     }
-    if (autoComplete !== undefined && raw["blocks"].length > 1) {
-      throw new Error(`${label}.autoComplete is not supported with multiple spawn blocks`);
+    if (autoClose !== undefined && raw["blocks"].length > 1) {
+      throw new Error(`${label}.autoClose is not supported with multiple spawn blocks`);
     }
     return {
       blocks: raw["blocks"].map((entry, index) => {
         const block = asObject(entry, `${label}.blocks[${index}]`);
         return parseTriggerSpawnBlock(block, `${label}.blocks[${index}]`);
       }),
-      ...(autoComplete !== undefined ? { autoComplete } : {}),
+      ...(autoClose !== undefined ? { autoClose } : {}),
       ...(restrictWrites !== undefined ? { restrictWrites } : {}),
       ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
     };
@@ -448,7 +454,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
 
   return {
     blocks: [parseTriggerSpawnBlock(raw, label)],
-    ...(autoComplete !== undefined ? { autoComplete } : {}),
+    ...(autoClose !== undefined ? { autoClose } : {}),
     ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
   };
 }
@@ -1403,7 +1409,7 @@ function parseSendConfig(
   const label = `projects.${projectId}.triggers.${triggerId}.send`;
   const sendRaw = asObject(raw["send"], label);
   if (sendRaw["autoClose"] !== undefined) {
-    throw new Error(`${label}.autoClose is not supported; use spawn.autoComplete`);
+    throw new Error(`${label}.autoClose is only supported on spawn triggers`);
   }
   if (sendRaw["autoComplete"] !== undefined) {
     throw new Error(`${label}.autoComplete is only supported on spawn triggers`);
@@ -1472,23 +1478,32 @@ function parseProjectSnapshots(
   const label = `projects.${projectId}.snapshots`;
   const raw = asObject(value, label);
   const extraKeys = Object.keys(raw).filter(
-    (key) => key !== "maxBytes" && key !== "requireFinal" && key !== "freshnessMinutes",
+    (key) =>
+      key !== "enabled" &&
+      key !== "maxBytes" &&
+      key !== "requireFinal" &&
+      key !== "freshnessMinutes",
   );
   if (extraKeys.length > 0) {
     throw new Error(
-      `${label} only supports "maxBytes", "requireFinal" and "freshnessMinutes" (got: ${extraKeys.join(", ")})`,
+      `${label} only supports "enabled", "maxBytes", "requireFinal" and "freshnessMinutes" (got: ${extraKeys.join(", ")})`,
     );
   }
+  const enabled = asOptionalBoolean(raw["enabled"], `${label}.enabled`);
   const maxBytes = asOptionalPositiveInteger(raw["maxBytes"], `${label}.maxBytes`);
   if (maxBytes !== undefined && maxBytes > MAX_SNAPSHOT_BYTES_CEILING) {
     throw new Error(`${label}.maxBytes must be at most ${MAX_SNAPSHOT_BYTES_CEILING}`);
   }
   const requireFinal = asOptionalBoolean(raw["requireFinal"], `${label}.requireFinal`);
+  if (enabled === false && requireFinal === true) {
+    throw new Error(`${label}.requireFinal cannot be true when ${label}.enabled is false`);
+  }
   const freshnessMinutes = asOptionalPositiveInteger(
     raw["freshnessMinutes"],
     `${label}.freshnessMinutes`,
   );
   return {
+    ...(enabled !== undefined ? { enabled } : {}),
     ...(maxBytes !== undefined ? { maxBytes } : {}),
     ...(requireFinal !== undefined ? { requireFinal } : {}),
     ...(freshnessMinutes !== undefined ? { freshnessMinutes } : {}),
@@ -1816,13 +1831,13 @@ function parseTrigger(
   if (spawn.blocks.length > 1 && spawn.blocks.some((block) => block.branch !== undefined)) {
     throw new Error(`${label}.spawn.branch is not supported with multiple spawn blocks`);
   }
-  if (spawn.autoComplete !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
+  if (spawn.autoClose !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
     throw new Error(
-      `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
+      `${label}.spawn.autoClose is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
   }
-  if (spawnDeskGroup === true && spawn.autoComplete === true) {
-    throw new Error(`${label}.spawnDeskGroup is not supported with autoComplete: true`);
+  if (spawnDeskGroup === true && spawn.autoClose === true) {
+    throw new Error(`${label}.spawnDeskGroup is not supported with autoClose: true`);
   }
   if (spawnDeskGroup === true && spawn.blocks.length < 2) {
     throw new Error(`${label}.spawnDeskGroup requires at least two spawn blocks`);

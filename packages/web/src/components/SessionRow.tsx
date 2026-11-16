@@ -7,7 +7,7 @@ import { AccountsIcon } from "@/components/icons/AccountsIcon";
 import { AlertIcon } from "@/components/icons/AlertIcon";
 import { SendIcon } from "@/components/icons/SendIcon";
 import {
-  CheckIcon,
+  CloseSessionIcon,
   EditIcon,
   PauseIcon,
   PlayIcon,
@@ -19,6 +19,7 @@ import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLink
 import { TagEditor } from "@/components/TagEditor";
 import { TokenCount } from "@/components/TokenCount";
 import { formatRelativeTime, formatSidecarAge, getSessionTitle } from "@/lib/format";
+import { CLOSE_SESSION_TOOLTIP } from "@/lib/session-lifecycle";
 import {
   isReviewLinkLabel,
   isTrackerLinkLabel,
@@ -274,7 +275,8 @@ function RowActionsMenu({
     add("Continue anyway", "continue", <PlayIcon className={ICON} />);
   if (canReopen(session)) add("Reopen", "reopen", <RestoreIcon className={ICON} />);
   if (canRecover(session)) add("Recover", "recover", <AlertIcon className={ICON} />);
-  if (canComplete(session)) add("Complete", "complete", <CheckIcon className={ICON} />);
+  if (canComplete(session))
+    add("Close Session", "complete", <CloseSessionIcon className="h-3 w-3 shrink-0" />);
   if (canRespawn(session)) add("Edit & Respawn", "respawn", <EditIcon className={ICON} />);
   const showKill = !isTerminalSession(session);
   if (items.length === 0 && !showKill)
@@ -327,6 +329,7 @@ function RowActionsMenu({
               key={item.action}
               onClick={() => void select(item.action)}
               role="menuitem"
+              title={item.action === "complete" ? CLOSE_SESSION_TOOLTIP : undefined}
               type="button"
             >
               {item.icon}
@@ -508,7 +511,7 @@ export function SessionRow({
 
       {showDone ? (
         <RowIconButton
-          label={`Mark ${session.id} as done`}
+          label={`Close session ${session.id}`}
           disabled={completing}
           activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-status-ready)] hover:text-[var(--color-status-ready)]"
           onClick={async () => {

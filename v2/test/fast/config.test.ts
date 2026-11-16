@@ -119,9 +119,66 @@ ${trigger}`),
     );
     expect(config.projects["api"]?.triggers["handle"]).toMatchObject({
       event: "script:item.new",
-      spawn: { autoComplete: true },
+      spawn: { autoClose: true },
     });
   });
+  it.each([
+    ["", undefined],
+    ["autoClose: true", true],
+    ["autoClose: false", false],
+    ["autoComplete: true", true],
+    ["autoComplete: false", false],
+    ["autoClose: true, autoComplete: true", true],
+    ["autoClose: false, autoComplete: false", false],
+  ] as const)("normalizes autoClose aliases once: %s", async (policy, expected) => {
+    for (const fields of ['prompt: "{{id}}"', 'blocks: [{prompt: "{{id}}"}]']) {
+      const config = await scriptConfig(
+        "",
+        trigger("script:item.new", `spawn: {${fields}${policy ? `, ${policy}` : ""}}`),
+      );
+      const parsed = config.projects["api"]?.triggers["handle"];
+      if (!parsed || !("spawn" in parsed)) throw new Error("Missing spawn trigger");
+      expect(parsed.spawn.autoClose).toBe(expected);
+      expect(Object.hasOwn(parsed.spawn, "autoClose")).toBe(expected !== undefined);
+      expect(Object.hasOwn(parsed.spawn, "autoComplete")).toBe(false);
+    }
+  });
+  it.each(["autoClose: true, autoComplete: false", "autoClose: false, autoComplete: true"])(
+    "rejects opposite aliases in the same spawn object: %s",
+    async (policy) => {
+      await expect(
+        scriptConfig("", trigger("script:item.new", `spawn: {prompt: work, ${policy}}`)),
+      ).rejects.toThrow("autoClose and projects.api.triggers.handle.spawn.autoComplete must agree");
+    },
+  );
+  it.each(["autoClose", "autoComplete"])(
+    "validates each %s alias even beside a valid peer",
+    async (key) => {
+      const peer = key === "autoClose" ? "autoComplete" : "autoClose";
+      for (const invalid of ['"true"', "null", "1", "{}", "[]"]) {
+        await expect(
+          scriptConfig(
+            "",
+            trigger("script:item.new", `spawn: {prompt: work, ${key}: ${invalid}, ${peer}: true}`),
+          ),
+        ).rejects.toThrow(`${key} must be a boolean`);
+      }
+    },
+  );
+  it.each(["autoClose", "autoComplete"])(
+    "rejects present %s with multiple blocks even when false",
+    async (key) => {
+      await expect(
+        scriptConfig(
+          "",
+          trigger(
+            "script:item.new",
+            `spawn: {blocks: [{prompt: one}, {prompt: two}], ${key}: false}`,
+          ),
+        ),
+      ).rejects.toThrow("autoClose is not supported with multiple spawn blocks");
+    },
+  );
   it("rejects wrong events, send triggers and duplicate work-item triggers", async () => {
     await expect(scriptConfig("", trigger("cron:tick", "spawn: {prompt: fix}"))).rejects.toThrow(
       "script:item.new",
@@ -1109,7 +1166,7 @@ projects:
     const config = loadConfig(configPath);
     expect(config.projects["backend"]?.triggers["review"]).toMatchObject({
       spawn: {
-        autoComplete: true,
+        autoClose: true,
         blocks: [{ agent: "claude", model: "sonnet", prompt: "review it" }],
       },
     });
@@ -1140,7 +1197,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.review.spawn.autoComplete is not supported with multiple spawn blocks",
+      "projects.backend.triggers.review.spawn.autoClose is not supported with multiple spawn blocks",
     );
   });
 
@@ -1236,7 +1293,7 @@ projects:
     );
   });
 
-  it("rejects deskGroup with autoComplete", async () => {
+  it.each(["autoClose", "autoComplete"])("rejects deskGroup with enabled %s", async (key) => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -1251,12 +1308,12 @@ projects:
         event: github:work_item.new
         spawnDeskGroup: true
         spawn:
-          autoComplete: true
+          ${key}: true
           prompt: "ship it"
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.pickup.spawnDeskGroup is not supported with autoComplete: true",
+      "projects.backend.triggers.pickup.spawnDeskGroup is not supported with autoClose: true",
     );
   });
 
@@ -2741,7 +2798,7 @@ projects:
             prompt: "Take this work item.",
           },
         ],
-        autoComplete: true,
+        autoClose: true,
       },
     });
   });
@@ -3350,7 +3407,7 @@ projects:
             prompt: "Triage {{title}}",
           },
         ],
-        autoComplete: true,
+        autoClose: true,
       },
     });
   });
@@ -3380,8 +3437,10 @@ projects:
     );
   });
 
-  it("rejects autoComplete on non-work-item spawn triggers", async () => {
-    const configPath = await writeConfig(`
+  it.each(["autoClose", "autoComplete"])(
+    "rejects %s on non-work-item spawn triggers",
+    async (key) => {
+      const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
@@ -3395,15 +3454,16 @@ projects:
         event: cron:tick
         spawn:
           prompt: "Take this work item."
-          autoComplete: true
+          ${key}: true
 `);
 
-    expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new or sentry:issue.new or github-ci:run.completed or jira:work_item.new",
-    );
-  });
+      expect(() => loadConfig(configPath)).toThrow(
+        "projects.backend.triggers.kickoff.spawn.autoClose is only supported for github:work_item.new or sentry:issue.new or github-ci:run.completed or jira:work_item.new or script:item.new",
+      );
+    },
+  );
 
-  it("rejects autoComplete on send triggers", async () => {
+  it.each(["autoClose", "autoComplete"])("rejects %s on send triggers", async (key) => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -3416,15 +3476,15 @@ projects:
         source: pr-watch
         event: github:comment
         send:
-          autoComplete: true
+          ${key}: true
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.reply.send.autoComplete is only supported on spawn triggers",
+      `projects.backend.triggers.reply.send.${key} is only supported on spawn triggers`,
     );
   });
 
-  it("rejects legacy autoClose on spawn triggers", async () => {
+  it("rejects nonboolean autoClose on spawn triggers", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -3443,7 +3503,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.pick-up.spawn.autoClose is not supported; use autoComplete: true",
+      "projects.backend.triggers.pick-up.spawn.autoClose must be a boolean",
     );
   });
 
@@ -5196,7 +5256,7 @@ projects:
       retain: 3
 `);
     expect(() => loadConfig(unknown)).toThrow(
-      'projects.api.snapshots only supports "maxBytes", "requireFinal" and "freshnessMinutes" (got: retain)',
+      'projects.api.snapshots only supports "enabled", "maxBytes", "requireFinal" and "freshnessMinutes" (got: retain)',
     );
     const bad = await writeConfig(`
 projects:
@@ -5206,6 +5266,54 @@ projects:
       requireFinal: "yes"
 `);
     expect(() => loadConfig(bad)).toThrow("projects.api.snapshots.requireFinal must be a boolean");
+  });
+
+  it("parses snapshots.enabled and rejects a non-boolean", async () => {
+    const off = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      enabled: false
+`);
+    expect(loadConfig(off).projects["api"]?.snapshots).toEqual({ enabled: false });
+    const bad = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      enabled: "no"
+`);
+    expect(() => loadConfig(bad)).toThrow("projects.api.snapshots.enabled must be a boolean");
+  });
+
+  it("rejects snapshots.enabled false with requireFinal true, naming both keys", async () => {
+    const conflict = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      enabled: false
+      requireFinal: true
+`);
+    expect(() => loadConfig(conflict)).toThrow(
+      "projects.api.snapshots.requireFinal cannot be true when projects.api.snapshots.enabled is false",
+    );
+  });
+
+  it("accepts snapshots.enabled false with an explicit requireFinal false", async () => {
+    const off = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      enabled: false
+      requireFinal: false
+`);
+    expect(loadConfig(off).projects["api"]?.snapshots).toEqual({
+      enabled: false,
+      requireFinal: false,
+    });
   });
 
   it("rejects a non-array mcp.exclude", async () => {

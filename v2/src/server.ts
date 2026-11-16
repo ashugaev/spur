@@ -153,6 +153,7 @@ import {
   type TodoActor,
   type TodoMutationRequest,
   type WriteSnapshotRequest,
+  type SessionLinkFilter,
   type SessionListView,
   type SessionView,
 } from "./types.js";
@@ -169,7 +170,10 @@ import {
   SnapshotCorruptError,
   SnapshotTooLargeError,
   WorkSnapshotRequiredError,
+  parseSnapshotIncludeDone,
+  parseSnapshotListQuery,
 } from "./snapshots.js";
+import { parseTaskStatusRequest, TaskStatusError } from "./task-status.js";
 
 interface JsonError {
   error: string;
@@ -2435,7 +2439,14 @@ export async function startServer(
 
       const snapshotsSessionId = path.match(/^\/sessions\/([^/]+)\/snapshots$/)?.[1];
       if (method === "GET" && snapshotsSessionId) {
-        sendJson(response, 200, service.readSnapshots(decodeURIComponent(snapshotsSessionId)));
+        sendJson(
+          response,
+          200,
+          service.readSnapshots(
+            decodeURIComponent(snapshotsSessionId),
+            parseSnapshotListQuery(url.searchParams),
+          ),
+        );
         return;
       }
       if (method === "POST" && snapshotsSessionId) {
@@ -2468,10 +2479,50 @@ export async function startServer(
         sendJson(
           response,
           200,
-          service.readSnapshot(
+          await service.readSnapshot(
             decodeURIComponent(snapshotVersionMatch[1] ?? ""),
             requested === "latest" ? "latest" : Number(requested),
+            { includeDone: parseSnapshotIncludeDone(url.searchParams) },
           ),
+        );
+        return;
+      }
+
+      const taskStatusSessionId = path.match(/^\/sessions\/([^/]+)\/task-status$/)?.[1];
+      if ((method === "GET" || method === "POST") && taskStatusSessionId) {
+        const target = decodeURIComponent(taskStatusSessionId);
+        if (method === "GET") {
+          sendJson(response, 200, await service.readTaskStatus(target));
+        } else {
+          if (request.headers["x-spur-caller-session"] !== target) {
+            throw new TaskStatusError(
+              "Task status requires the target agent caller",
+              403,
+              "task_status_forbidden",
+            );
+          }
+          const body = parseTaskStatusRequest(await readJsonBody<unknown>(request));
+          sendJson(response, 200, await service.writeTaskStatus(target, body));
+        }
+        return;
+      }
+
+      if (method === "GET" && path === "/snapshots/latest") {
+        let links: SessionLinkFilter[];
+        try {
+          links = parseSessionLinkFilters(url.searchParams.getAll("link"));
+        } catch (parseError) {
+          throw new InvalidSnapshotRequestError(
+            parseError instanceof Error ? parseError.message : "Invalid link",
+          );
+        }
+        if (links.length === 0) throw new InvalidSnapshotRequestError("link is required");
+        sendJson(
+          response,
+          200,
+          await service.latestSnapshotsByLink(links, {
+            includeDone: parseSnapshotIncludeDone(url.searchParams),
+          }),
         );
         return;
       }
@@ -3160,7 +3211,7 @@ export async function startServer(
         });
         return;
       }
-      if (error instanceof InvalidTodoRequestError) {
+      if (error instanceof TaskStatusError || error instanceof InvalidTodoRequestError) {
         failRequest(response, error.statusCode, message, {
           method,
           path,

@@ -45,6 +45,7 @@ Check installation, linger and logs in [npm install](install-from-npm.md) or [so
 - `restart_daemon`, `get_daemon_restart`: durable backend restart admission and reconciliation.
 - `read_daemon_logs`: bounded live daemon event journal.
 - `get_session_pr_status`: existing extracted status for an attached PR, cache only.
+- Task outcomes: [session-bound helper](commands.md#todo-snapshot); daemon caller guards apply to MCP requests.
 
 The catalog covers every daemon route: session lifecycle, queues, questions, logs, artifacts, services, subscriptions, source replies, ToDo, work snapshots, memory, [Pages/source binding](daemon-api.md#store-routes-page-routes), projects, models, accounts, sidecars, shepherd and deployments.
 No project filter or read-only mode: connected callers can change/delete projects and sessions, run commands, switch versions and invoke every daemon operation.

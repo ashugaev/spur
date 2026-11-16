@@ -1,6 +1,7 @@
 import { open, readFile, stat } from "node:fs/promises";
 import { createHash, type Hash } from "node:crypto";
 import { SCAN_CHUNK_BYTES, scanJsonlLines } from "./jsonl-scan.js";
+import { isSpurToolCommand } from "./snapshots.js";
 import type { SessionState, TranscriptEntry } from "./types.js";
 import type { ProviderTokenUsageSample } from "./token-usage.js";
 import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
@@ -982,6 +983,12 @@ function extractAskUserQuestions(input: unknown): ClaudeQuestion[] {
 
 // ── Conversation parser (pure, no I/O) ───────────────────────────────
 
+function isSpurBashCall(name: string, input: unknown): boolean {
+  if (name !== "Bash" || input === null || typeof input !== "object") return false;
+  const command = (input as Record<string, unknown>)["command"];
+  return typeof command === "string" && isSpurToolCommand(command);
+}
+
 /**
  * Parse a batch of JSONL lines into classification records and full-fidelity
  * transcript entries (messages, tool_use calls, AskUserQuestion prompts).
@@ -1038,6 +1045,7 @@ export function parseConversationBatch(
         name,
         ...(callId ? { callId } : {}),
         timestampMs,
+        ...(isSpurBashCall(name, tool["input"]) ? { spurCall: true as const } : {}),
       });
     }
   }

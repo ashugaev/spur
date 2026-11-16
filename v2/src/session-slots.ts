@@ -13,8 +13,16 @@ import { fileURLToPath } from "node:url";
 import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { spurInstallLockPath } from "./install-lock.js";
-import { SNAPSHOT_HOOK_TOOL_NAME, SNAPSHOT_REQUEST_MESSAGE, snapshotDir } from "./snapshots.js";
+import {
+  SNAPSHOT_HOOK_TOOL_NAME,
+  SNAPSHOT_HOOK_TURN_FILE,
+  SNAPSHOT_REMINDER_PREFIXES,
+  SPUR_SESSION_TOOL_PATTERN,
+  snapshotDir,
+  snapshotRequestMessage,
+} from "./snapshots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "./self-destruct.js";
+import { DEFAULT_WAKE_FORMAT_PATTERN } from "./wake-schedule.js";
 import type {
   AgentName,
   SessionLink,
@@ -47,6 +55,7 @@ const GIT_WRAPPER_SIGNATURE = "Spur git wrapper could not find git";
 const BRANCH_TOOL_NAME = "spur-branch";
 export const TODO_TOOL_NAME = "spur-todo";
 export const SNAPSHOT_TOOL_NAME = "spur-snapshot";
+export const TASK_STATUS_TOOL_NAME = "spur-status";
 export const MANUAL_TITLE_LOCK_MESSAGE =
   "title editing unavailable because title was set manually; do not attempt title edits again.";
 
@@ -334,6 +343,9 @@ ${lines}`;
 }
 
 export function withSessionSlotInstructions(prompt: string, tags: TagDefinition[] = []): string {
+  if (!prompt.includes("SPUR_STATUS_COMMAND")) {
+    prompt += `\n\nTask status:\n- At task start, run \`"$SPUR_STATUS_COMMAND" --json\` once and retain its revision; clear any previous outcome with \`"$SPUR_STATUS_COMMAND" clear --revision <retained-revision>\`.\n- Before your final response, declare \`completed\` with the retained revision after the task and Spur ToDo are resolved, or \`needs_input\` when a human reply is required. Use \`"$SPUR_STATUS_COMMAND" <state> --revision <retained-revision>\`. Waiting for automation or CI stays waiting.\n- A stale revision means newer work arrived: never fetch a fresh revision to force an old outcome through. Completed keeps this session and its artifacts; closing the session is separate.`;
+  }
   if (prompt.includes("SPUR_SLOT_COMMAND") || prompt.includes(SLOT_TOOL_NAME)) {
     return prompt;
   }
@@ -361,13 +373,18 @@ function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
 // Standalone like the agent-state updater: runs from the session tool dir, never imports Spur modules.
 // Every failure path exits 0 with empty stdout; the only output is one hook JSON object.
 // Keep the version regex and staleness comparison in step with snapshots.ts.
-function snapshotHookScript(): string {
+// The turn file {reminder, worked} tracks the current turn: UserPromptSubmit resets it; in a Spur
+// reminder turn only a non-Spur tool call sets worked, and nothing asks until it does.
+function snapshotHookScript(message: string): string {
   return `#!/usr/bin/env node
-import { closeSync, openSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
-const MESSAGE = ${JSON.stringify(SNAPSHOT_REQUEST_MESSAGE)};
-const [snapshotDir, freshnessArg, claimPrefix, createdArg] = process.argv.slice(2);
+const MESSAGE = ${JSON.stringify(message)};
+const REMINDER_PREFIXES = ${JSON.stringify(SNAPSHOT_REMINDER_PREFIXES)};
+const DEFAULT_WAKE_FORMAT = new RegExp(${JSON.stringify(DEFAULT_WAKE_FORMAT_PATTERN)});
+const SPUR_TOOL = new RegExp(${JSON.stringify(SPUR_SESSION_TOOL_PATTERN)});
+const [snapshotDir, freshnessArg, claimPrefix, createdArg, turnFile] = process.argv.slice(2);
 const freshnessMs = Number(freshnessArg);
 const createdAtMs = Number(createdArg);
 
@@ -422,17 +439,55 @@ function latestSnapshotAt() {
   }
 }
 
+function readTurn() {
+  try {
+    const turn = JSON.parse(readFileSync(turnFile, "utf8"));
+    if (turn === null || typeof turn !== "object") return null;
+    return {
+      reminder: turn.reminder === true,
+      worked: turn.worked === true,
+      workedAt: Number.isFinite(turn.workedAt) ? turn.workedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeTurn(turn) {
+  writeFileSync(turnFile, JSON.stringify(turn));
+}
+
 function run() {
-  if (!snapshotDir || !claimPrefix || !(freshnessMs > 0) || Number.isNaN(createdAtMs)) return;
+  if (!snapshotDir || !claimPrefix || !turnFile || !(freshnessMs > 0) || Number.isNaN(createdAtMs)) return;
   const payload = readPayload();
   if (!payload) return;
-  if (typeof payload.agent_id === "string" || payload.permission_mode === "plan") return;
   const event = payload.hook_event_name;
+  if (event === "UserPromptSubmit") {
+    const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
+    const reminder =
+      REMINDER_PREFIXES.some((prefix) => prompt.startsWith(prefix)) || DEFAULT_WAKE_FORMAT.test(prompt);
+    writeTurn({ reminder, worked: false });
+    return;
+  }
+  if (typeof payload.agent_id === "string" || payload.permission_mode === "plan") return;
   if (event !== "PostToolUse" && event !== "Stop") return;
   if (event === "Stop" && payload.stop_hook_active === true) return;
+  const turn = readTurn();
+  if (!turn) return;
+  if (event === "PostToolUse" && turn.reminder) {
+    const command = payload.tool_input && payload.tool_input.command;
+    if (payload.tool_name === "Bash" && typeof command === "string" && SPUR_TOOL.test(command)) return;
+    turn.worked = true;
+    turn.workedAt = Date.now();
+    writeTurn({ reminder: true, worked: true, workedAt: turn.workedAt });
+  }
+  if (turn.reminder && !turn.worked) return;
   const latestAt = latestSnapshotAt();
   if (latestAt === undefined) return;
-  if (Date.now() - (latestAt ?? createdAtMs) <= freshnessMs) return;
+  const floor = (latestAt ?? createdAtMs) + freshnessMs;
+  if (Date.now() <= floor) return;
+  // Reminder turn: only a non-Spur call past the floor is work, as in the pane classifier.
+  if (turn.reminder && turn.workedAt <= floor) return;
   if (event === "Stop") {
     process.stdout.write(JSON.stringify({ decision: "block", reason: MESSAGE }));
     return;
@@ -475,7 +530,9 @@ export function ensureSessionSlotTool(args: {
   branchNamingRegex?: string;
   agent?: AgentName;
   installLockPath?: string;
-  snapshotHook?: { freshnessMinutes: number; sessionCreatedAt: string };
+  snapshotHook?:
+    | { enabled: false }
+    | { enabled: true; freshnessMinutes: number; sessionCreatedAt: string };
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
@@ -533,6 +590,15 @@ case "$action" in
     ;;
 esac
 exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" snapshot "$action" ${shellEscape(args.sessionId)} "$@"
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  writeToolFileAtomic(
+    join(toolDir, TASK_STATUS_TOOL_NAME),
+    `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" task-status --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );
@@ -765,16 +831,22 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
       { encoding: "utf8", mode: 0o755 },
     );
   }
-  if (args.snapshotHook) {
-    writeToolFileAtomic(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME), snapshotHookScript(), {
+  if (args.snapshotHook?.enabled === false) {
+    writeToolFileAtomic(join(toolDir, SNAPSHOT_HOOK_TOOL_NAME), "#!/usr/bin/env bash\nexit 0\n", {
       encoding: "utf8",
       mode: 0o755,
     });
+  } else if (args.snapshotHook) {
+    writeToolFileAtomic(
+      join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME),
+      snapshotHookScript(snapshotRequestMessage(shellEscape(join(toolDir, SNAPSHOT_TOOL_NAME)))),
+      { encoding: "utf8", mode: 0o755 },
+    );
     writeToolFileAtomic(
       join(toolDir, SNAPSHOT_HOOK_TOOL_NAME),
       `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME))} ${shellEscape(snapshotDir(args.dataDir, args.sessionId))} ${args.snapshotHook.freshnessMinutes * 60_000} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_CLAIM_PREFIX))} ${Date.parse(args.snapshotHook.sessionCreatedAt)}
+exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME))} ${shellEscape(snapshotDir(args.dataDir, args.sessionId))} ${args.snapshotHook.freshnessMinutes * 60_000} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_CLAIM_PREFIX))} ${Date.parse(args.snapshotHook.sessionCreatedAt)} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_TURN_FILE))}
 `,
       { encoding: "utf8", mode: 0o755 },
     );
