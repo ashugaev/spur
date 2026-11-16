@@ -2563,11 +2563,17 @@ export async function startServer(
         try {
           links = parseSessionLinkFilters(url.searchParams.getAll("link"));
         } catch (parseError) {
-          throw new InvalidSnapshotRequestError(
+          sendError(
+            response,
+            400,
             parseError instanceof Error ? parseError.message : "Invalid link",
           );
+          return;
         }
-        if (links.length === 0) throw new InvalidSnapshotRequestError("link is required");
+        if (links.length === 0) {
+          sendError(response, 400, "link is required");
+          return;
+        }
         sendJson(response, 200, service.closeoutsByLink(links));
         return;
       }

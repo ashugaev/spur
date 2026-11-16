@@ -5203,6 +5203,8 @@ projects:
     ["no root", 'include: ["x"]', "projects.api.closeout.include[0]"],
     ["dotdot", 'include: ["work:a/../b"]', "projects.api.closeout.include[0]"],
     ["absolute", 'include: ["work:/etc"]', "projects.api.closeout.include[0]"],
+    ["dot segment", 'include: ["work:./x"]', "projects.api.closeout.include[0]"],
+    ["empty segment", 'include: ["work:a//x"]', "projects.api.closeout.include[0]"],
     ["blank glob", 'include: ["work: "]', "projects.api.closeout.include[0]"],
     ["fractional maxBytes", "maxBytes: 1.5", "projects.api.closeout.maxBytes"],
     ["zero retention", "retentionDays: 0", "projects.api.closeout.retentionDays"],

@@ -154,14 +154,20 @@ function collectCandidates(
     const candidate = { root, path: relPath, glob };
     if (!isForeignOrExcludedCapture(candidate, sessionId)) found.push(candidate);
   };
-  const baseKind = (() => {
-    if (base.length === 0) return "directory";
-    try {
-      const stat = lstatSync(join(rootDir, ...base));
-      return stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other";
-    } catch {
-      return "other";
+  // lstat every base segment: a symlink anywhere on the literal path ends the pattern.
+  const baseKind = ((): "file" | "directory" | "other" => {
+    for (let depth = 1; depth <= base.length; depth += 1) {
+      try {
+        const stat = lstatSync(join(rootDir, ...base.slice(0, depth)));
+        if (stat.isSymbolicLink()) return "other";
+        if (depth === base.length)
+          return stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other";
+        if (!stat.isDirectory()) return "other";
+      } catch {
+        return "other";
+      }
     }
+    return "directory";
   })();
   if (baseKind === "file") {
     consider(base.join("/"));

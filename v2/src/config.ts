@@ -1536,12 +1536,11 @@ function parseProjectCloseout(
       colon < 0 ||
       !CLOSEOUT_ROOTS.some((known) => known === root) ||
       glob.trim().length === 0 ||
-      glob.startsWith("/") ||
       glob.includes("\\") ||
-      glob.split("/").includes("..")
+      glob.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
     ) {
       throw new Error(
-        `${label}.include[${index}] must be "<root>:<glob>" with root ${CLOSEOUT_ROOTS.join(", ")}, a relative glob and no ".." segment`,
+        `${label}.include[${index}] must be "<root>:<glob>" with root ${CLOSEOUT_ROOTS.join(", ")}, a relative glob and no empty, "." or ".." segment`,
       );
     }
   });

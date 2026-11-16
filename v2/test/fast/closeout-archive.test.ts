@@ -143,6 +143,23 @@ describe("closeout archive", () => {
     expect(manifest.skipped).toEqual([]);
   });
 
+  it("does not follow a symlink in the literal base of a pattern", async () => {
+    const outside = join(base, "outside");
+    put(join(outside, "secret", "a.txt"), "s");
+    put(join(outside, "file.md"), "f");
+    const ws = join(base, "ws");
+    mkdirSync(ws, { recursive: true });
+    symlinkSync(outside, join(ws, "docs"));
+    symlinkSync(outside, join(ws, "sub"));
+    const dirShape = await write({
+      include: ["workspace:docs/secret/**"],
+      roots: { workspace: ws },
+    });
+    expect(dirShape.files).toEqual([]);
+    const fileShape = await write({ include: ["workspace:sub/file.md"], roots: { workspace: ws } });
+    expect(fileShape.files).toEqual([]);
+  });
+
   it("lists only named roots as missing", async () => {
     expect((await write()).missingRoots).toEqual([]);
     expect((await write({ include: ["workspace:docs/**"] })).missingRoots).toEqual(["workspace"]);

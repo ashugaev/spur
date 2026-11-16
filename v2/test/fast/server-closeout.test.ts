@@ -149,7 +149,9 @@ describe("closeout routes", () => {
     const entries = (await response.json()) as Array<{ sessionId: string; status: string }>;
     expect(entries.map((entry) => entry.sessionId)).toEqual(["co-live", "co-old"]);
 
-    expect((await fetch(`${base}/closeouts`)).status).toBe(400);
+    const missing = await fetch(`${base}/closeouts`);
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toEqual({ error: "link is required" });
     expect((await fetch(`${base}/closeouts?link=Bad Label`)).status).toBe(400);
   });
 
