@@ -63,8 +63,8 @@ const METHOD_OPTIONS: Record<AuthProvider, MethodOption[]> = {
 };
 
 const ACCEPTED_LABEL: Record<SignInMethod, string> = {
-  oauth: "Code accepted",
-  browser: "Code accepted",
+  oauth: "Code received",
+  browser: "Code received",
   device: "Approval received",
   api_key: "Key received",
 };

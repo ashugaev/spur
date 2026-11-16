@@ -186,6 +186,24 @@ describe("AuthLoginDialog link and paste", () => {
     expect(terminalIcon()).toBeTruthy();
   });
 
+  it("words the code step as received while verifying", async () => {
+    await startClaudeLink();
+    route("POST", "/api/auth-accounts/claude-new/login-input", () => ({
+      payload: pending({ stage: "verifying" }),
+    }));
+    route("GET", "/api/auth-accounts/claude-new/login-status", () => ({
+      payload: pending({ stage: "verifying" }),
+    }));
+
+    fireEvent.change(screen.getByLabelText("Returned URL or code"), {
+      target: { value: "abc#def" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    expect(await screen.findByText("Code received")).toBeTruthy();
+    expect(screen.queryByText("Code accepted")).toBeNull();
+  });
+
   it("starts Codex browser sign-in with the browser method", async () => {
     route("POST", "/api/auth-accounts/codex-new/login", () => ({
       payload: pending(
