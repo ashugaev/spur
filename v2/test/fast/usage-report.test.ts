@@ -7,6 +7,7 @@ import {
   __resetUsageCacheForTest,
   buildUsageReport,
   readFreshSessionQuota,
+  readHostCredentialSources,
   parseClaudeUsage,
   parseCodexUsage,
   type UsageReportDeps,
@@ -389,6 +390,29 @@ describe("buildUsageReport quotas", () => {
     expect(result).toMatchObject({ provider: "claude", source: "default", status: "ok" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(await readFreshSessionQuota(deps, { id: "sess-1", agent: "cursor" })).toBeNull();
+  });
+
+  it("fresh read updates the cached source result", async () => {
+    const s = await setup();
+    await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+    const bad = vi.fn(async () => new Response("", { status: 401 }));
+    await buildUsageReport(s.deps(bad as unknown as typeof fetch));
+    expect(
+      (await readHostCredentialSources(s.deps(bad as unknown as typeof fetch)))[0],
+    ).toMatchObject({
+      status: "error",
+      error: "unauthorized",
+    });
+    const good = vi.fn(async () => json(CLAUDE_BODY));
+    await readFreshSessionQuota(s.deps(good as unknown as typeof fetch), {
+      id: "sess-1",
+      agent: "claude",
+    });
+    expect(good).toHaveBeenCalledTimes(1);
+    const sources = await readHostCredentialSources(s.deps(bad as unknown as typeof fetch));
+    expect(sources[0]).toMatchObject({ provider: "claude", source: "default", status: "ok" });
+    expect(bad).toHaveBeenCalledTimes(1);
+    expect(sources.map((source) => source.provider)).toEqual(["claude", "codex"]);
   });
 });
 

@@ -391,10 +391,11 @@ function cached(
   key: string,
   nowMs: number,
   run: () => Promise<FetchOutcome>,
+  fresh = false,
 ): Promise<QuotaSourceResult> {
   const entry = cache.get(key);
-  if (entry?.inflight) return entry.inflight;
-  if (entry?.settled && entry.settled.expiresAtMs > nowMs)
+  if (!fresh && entry?.inflight) return entry.inflight;
+  if (!fresh && entry?.settled && entry.settled.expiresAtMs > nowMs)
     return Promise.resolve(entry.settled.result);
   const next: CacheEntry = { inflight: null, settled: entry?.settled ?? null };
   next.inflight = run()
@@ -450,9 +451,7 @@ async function claudeSource(
       },
       best.plan,
     );
-  return fresh
-    ? (await fetchQuota()).result
-    : cached(`claude:${account.id}`, deps.nowMs, fetchQuota);
+  return cached(`claude:${account.id}`, deps.nowMs, fetchQuota, fresh);
 }
 
 async function codexSource(deps: UsageReportDeps, fresh = false): Promise<QuotaSourceResult> {
@@ -462,7 +461,26 @@ async function codexSource(deps: UsageReportDeps, fresh = false): Promise<QuotaS
   const headers: Record<string, string> = { Authorization: `Bearer ${credential.accessToken}` };
   if (credential.accountId !== null) headers["ChatGPT-Account-Id"] = credential.accountId;
   const fetchQuota = () => requestQuota(deps, base, CODEX_URL, headers, parseCodexUsage, null);
-  return fresh ? (await fetchQuota()).result : cached("codex:codex", deps.nowMs, fetchQuota);
+  return cached("codex:codex", deps.nowMs, fetchQuota, fresh);
+}
+
+/** Host logins the daemon user's CLIs own: Claude default (when its file exists) and Codex. */
+export async function readHostCredentialSources(
+  deps: UsageReportDeps,
+  fresh = false,
+): Promise<QuotaSourceResult[]> {
+  const defaultDir = join(deps.homeDir, ".claude");
+  const claude = (await fileExists(join(defaultDir, ".credentials.json")))
+    ? [
+        claudeSource(
+          deps,
+          { id: "default", label: "default", configDir: defaultDir, createdAt: "" },
+          [],
+          fresh,
+        ),
+      ]
+    : [];
+  return Promise.all([...claude, codexSource(deps, fresh)]);
 }
 
 export async function readFreshSessionQuota(
