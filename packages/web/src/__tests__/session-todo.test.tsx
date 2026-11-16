@@ -283,17 +283,17 @@ describe("SessionTodo", () => {
       await renderItems([
         item("inherited", "open", { handoffFrom: { sessionId: "api-1", itemId: "old-1" } }),
       ]);
-      expect(screen.getByText("From api-1")).toBeInTheDocument();
+      expect(screen.getByText("From api-1 · Handed off from api-1")).toBeInTheDocument();
     });
 
-    it("keeps the reason after the source once the inherited item has a transition", async () => {
+    it("shows the latest transition reason after the source once the inherited item has one", async () => {
       await renderItems([
         item("inherited", "open", {
           handoffFrom: { sessionId: "api-1", itemId: "old-1" },
-          latestTransition: { type: "resumed", actor: system, at },
+          latestTransition: { type: "cancelled", reason: "Not needed", actor: system, at },
         }),
       ]);
-      expect(screen.getByText("From api-1 · Handed off from api-1")).toBeInTheDocument();
+      expect(screen.getByText("From api-1 · Not needed")).toBeInTheDocument();
     });
 
     it("labels a handed-off source item instead of cancelled", async () => {

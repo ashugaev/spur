@@ -20,11 +20,10 @@ function reasonPreview(item: SpurTodoProjection["items"][number]): string {
   return transition?.reason ?? item.added.reason;
 }
 
-// An inherited item names its source until its own first transition has a reason to show.
+// An inherited item names its source before the reason.
 function secondaryLine(item: SpurTodoProjection["items"][number]): string {
   if (!item.handoffFrom) return reasonPreview(item);
-  const from = `From ${item.handoffFrom.sessionId}`;
-  return item.latestTransition ? `${from} · ${reasonPreview(item)}` : from;
+  return `From ${item.handoffFrom.sessionId} · ${reasonPreview(item)}`;
 }
 
 function statusGlyph(item: SpurTodoProjection["items"][number]): { glyph: string; label: string } {

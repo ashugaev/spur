@@ -83,7 +83,9 @@ test.describe("Spur ToDo handoff provenance", () => {
 
     await expect(row(page, "Inherited open item")).toBeVisible();
     await expect(
-      row(page, "Inherited open item").getByText("From api-1", { exact: true }),
+      row(page, "Inherited open item").getByText("From api-1 · Handed off from api-1", {
+        exact: true,
+      }),
     ).toBeVisible();
     await expect(
       row(page, "Inherited item with a transition").getByText(`From api-1 · ${longReason}`),
