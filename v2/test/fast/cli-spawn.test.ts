@@ -113,11 +113,48 @@ describe("spawn", () => {
     postJsonMock
       .mockResolvedValueOnce({ account: { id: "new-work", provider: "codex" } })
       .mockResolvedValueOnce({ accountId: "new-work", status: "pending", url: "https://login" });
-    await parseCli(["auth", "add", "--agent", "codex", "--label", "Work", "--json"]);
+    await parseCli(["auth", "add", "--agent", "codex", "--json"]);
     expect(postJsonMock.mock.calls.map((call) => call.slice(1, 3))).toEqual([
-      ["/auth-accounts", { provider: "codex", label: "Work" }],
+      ["/auth-accounts", { provider: "codex" }],
       ["/auth-accounts/new-work/login", {}],
     ]);
+  });
+
+  it("rejects the removed --label option", async () => {
+    await expect(
+      parseCli(["auth", "add", "--agent", "codex", "--label", "Work", "--json"]),
+    ).rejects.toThrow();
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("prints the display name and LEFT column for each account", async () => {
+    const reset = new Date(2026, 10, 16, 16, 20).toISOString();
+    const base = { provider: "claude", status: "ready", limited: false };
+    getJsonMock.mockResolvedValue({
+      accounts: [
+        {
+          ...base,
+          id: "a",
+          displayName: "alek@x.com",
+          quota: { leftPercent: 62, resetsAt: null, windows: [], fetchedAt: reset },
+        },
+        { ...base, id: "b", displayName: "alek@y.com", limited: true, cooldownUntil: reset },
+        { ...base, id: "c", displayName: "API key ····7Q2c" },
+      ],
+    });
+    await parseCli(["auth", "accounts"]);
+    expect(writeStdoutMock.mock.calls.map((call) => call[0])).toEqual([
+      "a\tclaude\talek@x.com\tready\t62%",
+      "b\tclaude\talek@y.com\tready\t0% 16:20",
+      "c\tclaude\tAPI key ····7Q2c\tready\t",
+    ]);
+  });
+
+  it("prints the accounts response unchanged with --json", async () => {
+    const response = { accounts: [{ id: "a", displayName: "x", identity: { email: "x" } }] };
+    getJsonMock.mockResolvedValue(response);
+    await parseCli(["auth", "accounts", "--json"]);
+    expect(writeStdoutMock).toHaveBeenCalledWith(expect.stringContaining('"displayName": "x"'));
   });
 
   it("rejects an unknown provider before creating a profile", async () => {

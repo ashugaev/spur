@@ -2,7 +2,7 @@
 
 > Scope: use saved Claude/Codex authorization profiles.
 
-Keep profile IDs, labels and provider pool choices outside YAML.
+Keep profile IDs and provider pool choices outside YAML.
 CLI: [`spur auth accounts|login|add|pool|switch`](commands.md#service-memory-agent-issue-comment-seen-subscribe).
 HTTP: [account operations](daemon-api.md).
 
@@ -10,7 +10,7 @@ HTTP: [account operations](daemon-api.md).
 
 Footer Accounts menu: one section per provider, Claude and Codex.
 
-- Profiles show label, status and quota cooldown.
+- Accounts show provider identity (email, organization or plan; API keys show the last 4) and quota left.
 - Set the provider default and toggle Auto-rotation.
 - Add and Sign in open a method picker.
 - Claude: account (open link, paste returned URL or `code#state`) or API key.
@@ -25,9 +25,9 @@ Dashboard alert row per broken managed account or host login, above the agents l
 Row clears after a verified sign-in. Host rows open the terminal directly.
 
 Spawn dialog Auth picker: Auto or a ready profile.
-Session Switch auth: another profile or back to Auto, for the next request.
+Session Switch account: another profile or back to Auto, for the next request.
 
-Legacy Claude labels/IDs remain; sign in again for managed routing.
+Legacy Claude IDs remain, labels are ignored; sign in again for managed routing. An account shows its identity after sign-in.
 Host credentials and existing direct processes remain untouched.
 
 ## Per-session switch

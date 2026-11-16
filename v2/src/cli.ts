@@ -233,6 +233,17 @@ const SESSION_LOG_EVENT_LIMIT = 16;
 const SESSION_LOG_LOCAL_LIMIT = 8;
 const RUNTIME_LOGS_UNAVAILABLE = "(runtime log capture unavailable)";
 
+/** LEFT column of `auth accounts`: "" without quota, "62%", or "0% HH:MM" (local) when limited or empty. */
+function authQuotaLeft(account: AuthAccountSummary): string {
+  const exhausted = account.limited || account.quota?.leftPercent === 0;
+  if (!exhausted) return account.quota ? `${Math.round(account.quota.leftPercent)}%` : "";
+  const resetsAt = account.quota?.resetsAt ?? account.cooldownUntil;
+  const reset = resetsAt ? new Date(resetsAt) : undefined;
+  if (!reset || Number.isNaN(reset.getTime())) return "0%";
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `0% ${pad(reset.getHours())}:${pad(reset.getMinutes())}`;
+}
+
 function enableTmuxMouse(sessionName: string): void {
   try {
     execFileSync("tmux", withTmuxSocketArgs(["set-option", "-t", sessionName, "mouse", "on"]), {
@@ -3423,7 +3434,7 @@ export function createProgram(cliEntrypoint: string): Command {
       else
         for (const account of result.accounts) {
           writeStdout(
-            `${account.id}\t${account.provider}\t${account.displayName}\t${account.status}`,
+            `${account.id}\t${account.provider}\t${account.displayName}\t${account.status}\t${authQuotaLeft(account)}`,
           );
         }
     });
@@ -3440,17 +3451,13 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("add")
     .description("Add a Claude or Codex authorization profile and sign in to it.")
     .requiredOption("--agent <name>", "claude or codex")
-    .option("--label <label>", "Profile label")
     .option("--json", "Start login and print the profile and login status without waiting")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       const { account } = await postJson<{ account: AuthAccountSummary }>(
         cliEntrypoint,
         "/auth-accounts",
-        {
-          provider: authProviderSchema.parse(options.agent),
-          ...(options.label !== undefined ? { label: options.label } : {}),
-        },
+        { provider: authProviderSchema.parse(options.agent) },
         configPath,
       );
       if (!options.json) writeStdout(`Added ${account.provider} profile ${account.id}`);
