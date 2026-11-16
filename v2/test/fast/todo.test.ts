@@ -4,8 +4,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readSession, writeSession } from "../../src/metadata.js";
 import {
+  closeTodoItems,
   ensureTodoLedger,
+  inheritTodo,
   mutateTodo,
+  planHandoffTodo,
   replayTodo,
   TodoLedgerCorruptError,
   InvalidTodoRequestError,
@@ -324,5 +327,118 @@ describe("Spur ToDo ledger", () => {
     mkdirSync(archivedParent, { recursive: true });
     renameSync(join(dataDir, "sessions", session.id), join(archivedParent, session.id));
     expect(replayTodo(dataDir, session.id)).toEqual(before);
+  });
+
+  it("replays handoffFrom and handoffTo and keeps hold blockers", async () => {
+    const { dataDir, session } = await fixture();
+    mutateTodo(dataDir, session, { action: "add", text: "Open", reason: "Why open" }, actor);
+    const held = mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "Held", reason: "Why held" },
+      actor,
+    ).items[1];
+    if (!held) throw new Error("missing item");
+    mutateTodo(
+      dataDir,
+      session,
+      {
+        action: "hold",
+        itemId: held.id,
+        reason: "Waiting",
+        blocker: "human",
+        requiredHumanAction: "Approve",
+      },
+      actor,
+    );
+    const plan = planHandoffTodo(replayTodo(dataDir, session.id), session.id);
+    expect(plan.map((item) => item.text)).toEqual(["Open", "Held"]);
+    expect(plan[1]?.hold).toEqual({
+      reason: "Waiting",
+      blocker: { kind: "human", requiredAction: "Approve" },
+    });
+    const successor = { id: "s-2", project: session.project };
+    inheritTodo(dataDir, successor, plan);
+    const inherited = replayTodo(dataDir, "s-2");
+    expect(inherited.items.map((item) => [item.status, item.handoffFrom?.sessionId])).toEqual([
+      ["open", "s-1"],
+      ["held", "s-1"],
+    ]);
+    expect(inherited.items[0]?.added.reason).toBe("Why open");
+    expect(inherited.items[1]?.latestTransition?.blocker).toEqual({
+      kind: "human",
+      requiredAction: "Approve",
+    });
+    expect(inherited.items[0]?.added.actor).toEqual({ kind: "system", source: "handoff" });
+    const first = plan[0];
+    if (!first) throw new Error("missing plan");
+    closeTodoItems(
+      dataDir,
+      session,
+      [{ itemId: first.from.itemId, handoffTo: { sessionId: "s-2", itemId: first.itemId } }],
+      "handed off to s-2",
+    );
+    expect(replayTodo(dataDir, session.id).items[0]?.handoffTo).toEqual({
+      sessionId: "s-2",
+      itemId: first.itemId,
+    });
+  });
+
+  it("rejects a blank handoffFrom or handoffTo as corrupt", async () => {
+    const { dataDir, session } = await fixture();
+    const path = join(dataDir, "sessions", session.id, "todo.jsonl");
+    mkdirSync(join(dataDir, "sessions", session.id), { recursive: true });
+    const base = { version: 1, sessionId: session.id, at: "2026-08-20T00:00:00.000Z", actor };
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        ...base,
+        eventId: "e1",
+        type: "item_added",
+        itemId: "i1",
+        text: "T",
+        reason: "R",
+        handoffFrom: { sessionId: " ", itemId: "x" },
+      })}\n`,
+    );
+    expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
+    writeFileSync(
+      path,
+      `${JSON.stringify({ ...base, eventId: "e1", type: "item_added", itemId: "i1", text: "T", reason: "R" })}\n${JSON.stringify(
+        {
+          ...base,
+          eventId: "e2",
+          type: "item_cancelled",
+          itemId: "i1",
+          reason: "R",
+          handoffTo: { sessionId: "s-2", itemId: "" },
+        },
+      )}\n`,
+    );
+    expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
+  });
+
+  it("closeTodoItems skips terminal items and returns closed ids", async () => {
+    const { dataDir, session } = await fixture();
+    mutateTodo(dataDir, session, { action: "add", text: "A", reason: "r" }, actor);
+    const [item] = mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "B", reason: "r" },
+      actor,
+    ).items;
+    if (!item) throw new Error("missing item");
+    mutateTodo(dataDir, session, { action: "complete", itemId: item.id, reason: "done" }, actor);
+    const ids = replayTodo(dataDir, session.id).items.map((entry) => entry.id);
+    expect(
+      closeTodoItems(
+        dataDir,
+        session,
+        ids.map((itemId) => ({ itemId })),
+        "failed",
+      ),
+    ).toEqual([ids[1]]);
+    expect(closeTodoItems(dataDir, session, [{ itemId: ids[1] ?? "" }], "again")).toEqual([]);
+    expect(replayTodo(dataDir, session.id).counts).toMatchObject({ completed: 1, cancelled: 1 });
   });
 });

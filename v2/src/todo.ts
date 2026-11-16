@@ -16,6 +16,7 @@ import {
   type TodoActor,
   type TodoBlocker,
   type TodoEvent,
+  type TodoHandoffRef,
   type TodoItemProjection,
   type TodoMutationRequest,
   type TodoProjection,
@@ -124,6 +125,13 @@ function actorValid(actor: unknown): actor is TodoActor {
   );
 }
 
+function handoffRefValid(ref: unknown): boolean {
+  if (ref === undefined) return true;
+  if (!ref || typeof ref !== "object") return false;
+  const value = ref as Record<string, unknown>;
+  return nonblank(value.sessionId) && nonblank(value.itemId);
+}
+
 function parseEvent(raw: unknown, owner: string, line: number): TodoEvent {
   const fail = (message: string): never => {
     throw new TodoLedgerCorruptError(owner, message, line);
@@ -145,8 +153,12 @@ function parseEvent(raw: unknown, owner: string, line: number): TodoEvent {
     if (!nonblank(event.itemId) || !nonblank(event.text) || !nonblank(event.reason)) {
       fail("Added item fields are invalid");
     }
+    if (!handoffRefValid(event.handoffFrom)) fail("Handoff source is invalid");
   } else if (event.type === "item_completed" || event.type === "item_cancelled") {
     if (!nonblank(event.itemId) || !nonblank(event.reason)) fail("Resolution fields are invalid");
+    if (event.type === "item_cancelled" && !handoffRefValid(event.handoffTo)) {
+      fail("Handoff target is invalid");
+    }
   } else if (event.type === "item_held") {
     if (
       !nonblank(event.itemId) ||
@@ -253,6 +265,7 @@ function replayTodoLines(lines: readonly string[], sessionId: string): TodoProje
         text: event.text,
         status: "open",
         added: { reason: event.reason, actor: event.actor, at: event.at },
+        ...(event.handoffFrom ? { handoffFrom: event.handoffFrom } : {}),
         history: [event],
       };
       items.push(item);
@@ -283,7 +296,10 @@ function replayTodoLines(lines: readonly string[], sessionId: string): TodoProje
     }
     item.history.push(event);
     if (event.type === "item_completed") item.status = "completed";
-    if (event.type === "item_cancelled") item.status = "cancelled";
+    if (event.type === "item_cancelled") {
+      item.status = "cancelled";
+      if (event.handoffTo) item.handoffTo = event.handoffTo;
+    }
     if (event.type === "item_held") item.status = "held";
     if (event.type === "item_resumed") item.status = "open";
     item.latestTransition = {
@@ -441,6 +457,97 @@ export function mutateTodo(
   }
   appendEvent(dataDir, event, session.project);
   return replayTodo(dataDir, session.id);
+}
+
+export interface HandoffTodoItem {
+  itemId: string;
+  text: string;
+  addedReason: string;
+  from: TodoHandoffRef;
+  hold?: { reason: string; blocker: TodoBlocker };
+}
+
+const HANDOFF_ACTOR: TodoActor = { kind: "system", source: "handoff" };
+
+/** Open/held items of a source ledger, in ledger order, each with a fresh id for the successor. */
+export function planHandoffTodo(projection: TodoProjection, sourceId: string): HandoffTodoItem[] {
+  const planned: HandoffTodoItem[] = [];
+  for (const item of projection.items) {
+    if (item.status !== "open" && item.status !== "held") continue;
+    const transition = item.latestTransition;
+    planned.push({
+      itemId: randomUUID(),
+      text: item.text,
+      addedReason: item.added.reason,
+      from: { sessionId: sourceId, itemId: item.id },
+      ...(item.status === "held" && transition?.type === "held" && transition.blocker
+        ? { hold: { reason: transition.reason ?? "", blocker: transition.blocker } }
+        : {}),
+    });
+  }
+  return planned;
+}
+
+export function inheritTodo(
+  dataDir: string,
+  owner: Pick<SessionRecord, "id" | "project">,
+  items: readonly HandoffTodoItem[],
+): void {
+  for (const item of items) {
+    appendEvent(
+      dataDir,
+      {
+        ...eventBase(owner.id, HANDOFF_ACTOR),
+        type: "item_added",
+        itemId: item.itemId,
+        text: item.text,
+        reason: item.addedReason,
+        handoffFrom: item.from,
+      },
+      owner.project,
+    );
+    if (item.hold) {
+      appendEvent(
+        dataDir,
+        {
+          ...eventBase(owner.id, HANDOFF_ACTOR),
+          type: "item_held",
+          itemId: item.itemId,
+          reason: item.hold.reason,
+          blocker: item.hold.blocker,
+        },
+        owner.project,
+      );
+    }
+  }
+}
+
+/** Cancels the listed items that are still open/held; returns the ids it closed. */
+export function closeTodoItems(
+  dataDir: string,
+  owner: Pick<SessionRecord, "id" | "project">,
+  closes: ReadonlyArray<{ itemId: string; handoffTo?: TodoHandoffRef }>,
+  reason: string,
+): string[] {
+  const projection = replayTodo(dataDir, owner.id);
+  const closed: string[] = [];
+  for (const close of closes) {
+    const item = projection.items.find((candidate) => candidate.id === close.itemId);
+    if (!item || (item.status !== "open" && item.status !== "held")) continue;
+    appendEvent(
+      dataDir,
+      {
+        ...eventBase(owner.id, HANDOFF_ACTOR),
+        type: "item_cancelled",
+        itemId: close.itemId,
+        reason,
+        ...(close.handoffTo ? { handoffTo: close.handoffTo } : {}),
+      },
+      owner.project,
+    );
+    closed.push(close.itemId);
+  }
+  return closed;
 }
 
 export function unfinishedTodo(projection: TodoProjection) {

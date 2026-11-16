@@ -1856,6 +1856,11 @@ export type TodoActor =
 
 export type TodoBlocker = { kind: "external" } | { kind: "human"; requiredAction: string };
 
+export interface TodoHandoffRef {
+  sessionId: string;
+  itemId: string;
+}
+
 interface TodoEventBase {
   version: 1;
   eventId: string;
@@ -1870,11 +1875,18 @@ export type TodoEvent =
       itemId: string;
       text: string;
       reason: string;
+      handoffFrom?: TodoHandoffRef;
     })
   | (TodoEventBase & {
-      type: "item_completed" | "item_cancelled";
+      type: "item_completed";
       itemId: string;
       reason: string;
+    })
+  | (TodoEventBase & {
+      type: "item_cancelled";
+      itemId: string;
+      reason: string;
+      handoffTo?: TodoHandoffRef;
     })
   | (TodoEventBase & {
       type: "item_held";
@@ -1897,6 +1909,8 @@ export interface TodoItemProjection {
   text: string;
   status: "open" | "held" | "completed" | "cancelled";
   added: { reason: string; actor: TodoActor; at: string };
+  handoffFrom?: TodoHandoffRef;
+  handoffTo?: TodoHandoffRef;
   latestTransition?: {
     type: "completed" | "cancelled" | "held" | "resumed";
     reason?: string;
@@ -2048,6 +2062,10 @@ export interface HandoffSessionRequest {
   model?: string;
   reasoningEffort?: ProviderReasoningEffort | null;
   notes?: string;
+}
+
+export interface HandoffSessionResponse extends SessionView {
+  movedTodoItems: number;
 }
 
 export interface UpdateSessionSlotsRequest {
