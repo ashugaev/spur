@@ -62,7 +62,7 @@
 - `POST /sessions/:id/kill`
 - `POST /sessions/:id/restore` — optional `operationId`; `restart` defaults false, replaces running terminal; settled receipt, lifecycle 409/503, 20-minute deadline 504, disconnect cancellation; `v2/src/server.ts`.
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
-- `POST /sessions/:id/handoff` — agent `409 work_snapshot_required`; `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
+- `POST /sessions/:id/handoff` — caller from `x-spur-caller-session` (agent actor, may name another session), none = human; `403 handoff_target_not_stalled` body `{ code, sessionId, status, error }`; agent self-handoff `409 todo_ledger_empty`, `409 work_snapshot_required` (running source without rate-limit/server-error marker only); response adds `movedTodoItems`; `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/switch-auth` — 404 unless `authRotation.switchAuth: true`
 - `GET /sessions/:id/todo`

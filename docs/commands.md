@@ -65,7 +65,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 `spur pause <sessionId> [--json]` keeps the worktree; `spur complete|kill <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]`; kill-only `--force` skips dirty-worktree/unpushed-commit confirmation; `v2/src/cli.ts`.
 `spur restore <sessionId> [--force] [--json]`, `spur reopen <sessionId> [--force] [--json]` (in place, prompt not resent) — `--force` bypasses the foreign-live-process refusal; token-budget refusal: [configuration](configuration.md#field-reference). A restore/reopen that clears both gates also clears the session's durable GitHub poll-disable ([configuration.md#automatic-reminders](configuration.md#automatic-reminders)); one refused by either gate leaves it untouched.
 `spur respawn <sessionId> [--reasoning-effort <level>] [--force] [--json]` — fresh id; same-agent reasoning override inherited; `v2/src/cli.ts`.
-`spur handoff <sessionId> --agent <name> [--model <id>] [--reasoning-effort <level>] [--notes <text>] [--json]` — same workspace; provider/model effort validation in `v2/src/session-service.ts`.
+`spur handoff <sessionId> --agent <name> [--model <id>] [--reasoning-effort <level>] [--notes <text>] [--json]` — same workspace; open/held ToDo items move to the successor (new ids, source items cancelled `handed off to <id>`), prompt lists them and inlines the latest snapshot; prints `moved <n> ToDo items`. Eligible: running, spawning, paused, stopped, errored with a workspace. Agent caller: own session anytime, another only when stopped, paused, errored, rate limited or erroring, else `403 handoff_target_not_stalled`. Provider/model effort validation in `v2/src/session-service.ts`.
 
 ## todo, snapshot
 
