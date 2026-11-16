@@ -491,6 +491,50 @@ export function planHandoffTodo(projection: TodoProjection, sourceId: string): H
   return planned;
 }
 
+/**
+ * Source items a successor already holds a live copy of, derived from the ledgers alone: a
+ * successor item records `handoffFrom`, and only the handoff rollback (a system/handoff cancel
+ * without `handoffTo`) takes a copy out of play. Used to finish a handoff that stopped between the
+ * successor write and the source cancel.
+ */
+export function planHandoffReconcile(
+  source: TodoProjection,
+  sourceId: string,
+  successors: ReadonlyArray<{ sessionId: string; projection: TodoProjection }>,
+): Array<{ successorId: string; itemId: string; handoffTo: TodoHandoffRef }> {
+  const planned: Array<{ successorId: string; itemId: string; handoffTo: TodoHandoffRef }> = [];
+  for (const item of source.items) {
+    if (item.status !== "open" && item.status !== "held") continue;
+    for (const successor of successors) {
+      const copy = successor.projection.items.find(
+        (candidate) =>
+          candidate.handoffFrom?.sessionId === sourceId &&
+          candidate.handoffFrom.itemId === item.id &&
+          !isRolledBackCopy(candidate),
+      );
+      if (copy) {
+        planned.push({
+          successorId: successor.sessionId,
+          itemId: item.id,
+          handoffTo: { sessionId: successor.sessionId, itemId: copy.id },
+        });
+        break;
+      }
+    }
+  }
+  return planned;
+}
+
+function isRolledBackCopy(item: TodoItemProjection): boolean {
+  const transition = item.latestTransition;
+  return (
+    item.status === "cancelled" &&
+    transition?.actor.kind === "system" &&
+    transition.actor.source === "handoff" &&
+    !item.handoffTo
+  );
+}
+
 export function inheritTodo(
   dataDir: string,
   owner: Pick<SessionRecord, "id" | "project">,

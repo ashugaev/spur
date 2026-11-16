@@ -8,6 +8,7 @@ import {
   ensureTodoLedger,
   inheritTodo,
   mutateTodo,
+  planHandoffReconcile,
   planHandoffTodo,
   replayTodo,
   TodoLedgerCorruptError,
@@ -440,5 +441,38 @@ describe("Spur ToDo ledger", () => {
     ).toEqual([ids[1]]);
     expect(closeTodoItems(dataDir, session, [{ itemId: ids[1] ?? "" }], "again")).toEqual([]);
     expect(replayTodo(dataDir, session.id).counts).toMatchObject({ completed: 1, cancelled: 1 });
+  });
+
+  it("planHandoffReconcile matches live copies and ignores rolled-back ones", async () => {
+    const { dataDir, session } = await fixture();
+    for (const text of ["A", "B", "C"]) {
+      mutateTodo(dataDir, session, { action: "add", text, reason: "r" }, actor);
+    }
+    const source = replayTodo(dataDir, session.id);
+    const plan = planHandoffTodo(source, session.id);
+    inheritTodo(dataDir, { id: "s-2", project: session.project }, plan);
+    // B's copy is rolled back; C's copy was cancelled by the successor agent.
+    closeTodoItems(
+      dataDir,
+      { id: "s-2", project: session.project },
+      [{ itemId: plan[1]?.itemId ?? "" }],
+      "rollback",
+    );
+    mutateTodo(
+      dataDir,
+      { ...session, id: "s-2" },
+      { action: "cancel", itemId: plan[2]?.itemId ?? "", reason: "not needed" },
+      { kind: "agent", agent: "codex", sessionId: "s-2" },
+    );
+
+    const planned = planHandoffReconcile(source, session.id, [
+      { sessionId: "s-2", projection: replayTodo(dataDir, "s-2") },
+    ]);
+
+    expect(planned.map((entry) => entry.itemId)).toEqual([
+      plan[0]?.from.itemId,
+      plan[2]?.from.itemId,
+    ]);
+    expect(planned[0]?.handoffTo).toEqual({ sessionId: "s-2", itemId: plan[0]?.itemId });
   });
 });

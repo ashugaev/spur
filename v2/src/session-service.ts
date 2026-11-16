@@ -625,6 +625,7 @@ import {
   closeTodoItems,
   ensureTodoLedger,
   inheritTodo,
+  planHandoffReconcile,
   planHandoffTodo,
   readTodoIfPresent,
   type HandoffTodoItem,
@@ -6506,6 +6507,7 @@ export class SessionService {
     this.protectDurableSpawns();
     queueMicrotask(() => {
       if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverDurableSpawns());
+      if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverHandoffTodo());
     });
     this.resumeSessionDelivery();
   }
@@ -25454,6 +25456,7 @@ export class SessionService {
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
+    this.reconcileHandoffTodoLocked(session);
     const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
     if (!human && !otherAgent && todoLedgerBlock(handoffProjection) === "empty") {
       const error = new TodoEmptyLedgerError([sessionId]);
@@ -25479,6 +25482,68 @@ export class SessionService {
       projection: handoffProjection,
       snapshotGate: sourceCanWrite ? "applied" : "skipped_source_cannot_write",
     };
+  }
+
+  // A handoff that stopped after the successor went live but before the source cancel leaves open
+  // copies in both ledgers. The successor's `handoffFrom` refs say which source items it holds, so
+  // cancel those. The source session stays stopped: the successor owns the work, and a person or
+  // agent can complete the source. Caller holds the source's workspace lifecycle lock.
+  private reconcileHandoffTodoLocked(source: SessionRecord): void {
+    const projection = readTodoIfPresent(this.config.dataDir, source.id);
+    if (!projection || projection.counts.open + projection.counts.held === 0) return;
+    const successors: Array<{ sessionId: string; projection: TodoProjection }> = [];
+    for (const candidate of listSessions(this.config.dataDir)) {
+      if (candidate.id === source.id || workspaceIdOf(candidate) !== workspaceIdOf(source)) {
+        continue;
+      }
+      try {
+        const candidateProjection = readTodoIfPresent(this.config.dataDir, candidate.id);
+        if (candidateProjection) {
+          successors.push({ sessionId: candidate.id, projection: candidateProjection });
+        }
+      } catch (error) {
+        // One damaged sibling ledger must not block the source.
+        if (!(error instanceof TodoLedgerCorruptError)) throw error;
+      }
+    }
+    const planned = planHandoffReconcile(projection, source.id, successors);
+    for (const successorId of new Set(planned.map((entry) => entry.successorId))) {
+      const closes = planned.filter((entry) => entry.successorId === successorId);
+      const closed = closeTodoItems(
+        this.config.dataDir,
+        source,
+        closes.map(({ itemId, handoffTo }) => ({ itemId, handoffTo })),
+        `handed off to ${successorId}`,
+      );
+      this.logEvent("session.handoff.todo_reconciled", {
+        level: "info",
+        sessionId: source.id,
+        projectId: source.project,
+        message: `Cancelled ${closed.length} ${source.id} ToDo item(s) already held by ${successorId}`,
+        details: { successorId, itemIds: closed },
+      });
+    }
+  }
+
+  private async recoverHandoffTodo(): Promise<void> {
+    for (const source of listSessions(this.config.dataDir)) {
+      if (source.status !== "stopped" || this.handoffsInFlight.has(source.id)) continue;
+      try {
+        await this.withWorkspaceLifecycleLocks(source.id, async () => {
+          const current = readSession(this.config.dataDir, source.id);
+          if (current?.status === "stopped" && !this.handoffsInFlight.has(source.id)) {
+            this.reconcileHandoffTodoLocked(current);
+          }
+        });
+      } catch (error) {
+        this.logEvent("session.handoff.todo_reconciled", {
+          level: "warn",
+          sessionId: source.id,
+          projectId: source.project,
+          message: `Could not reconcile handoff ToDo for ${source.id}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
   }
 
   private rollbackInheritedTodoLocked(

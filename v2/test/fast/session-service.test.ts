@@ -58900,6 +58900,72 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      // The daemon stopped after the successor went live and before the source was cancelled.
+      async function seedCrashWindow() {
+        const seeded = await seedHandoff({ status: "stopped", stopReason: "manual_pause" });
+        const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
+        const source = await seeded.service.readTodo("api-1");
+        seeded.sessions.set(
+          "api-2",
+          sessionRecord({
+            id: "api-2",
+            workspaceId: "api-1",
+            status: "running",
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+          }),
+        );
+        actualTodo.inheritTodo(
+          TEST_DATA_DIR,
+          { id: "api-2", project: "api" },
+          actualTodo.planHandoffTodo(source, "api-1"),
+        );
+        return seeded;
+      }
+
+      it("a retried handoff after the crash window cancels the source items instead of copying them again", async () => {
+        const { service } = await seedCrashWindow();
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.movedTodoItems).toBe(0);
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(source.items.map((item) => item.latestTransition?.reason)).toEqual([
+          "handed off to api-2",
+          "handed off to api-2",
+        ]);
+        const first = await service.readTodo("api-2");
+        expect(first.items.map((item) => item.status)).toEqual(["open", "held"]);
+        expect(source.items.map((item) => item.handoffTo?.itemId)).toEqual(
+          first.items.map((item) => item.id),
+        );
+        expect((await service.readTodo("api-3")).items).toEqual([]);
+        service.dispose();
+      });
+
+      it("startup recovery cancels source items already held by a live successor", async () => {
+        const { service } = await seedCrashWindow();
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect((await service.readTodo("api-2")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.handoff.todo_reconciled",
+            details: expect.objectContaining({ successorId: "api-2" }),
+          }),
+        );
+        service.dispose();
+      });
+
       it("keeps successor copies when completing the source fails after the commit", async () => {
         const { service } = await seedHandoff();
         const internals = service as unknown as {
