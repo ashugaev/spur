@@ -1,18 +1,47 @@
-<what changed for the user, one or two sentences>
-<why it was needed, one sentence>
+**DESCRIPTION**
 
-BEFORE / AFTER
+- <User-visible result and concrete problem solved>
+
+**CONFIG**
+
+- <Changed keys, defaults and compatibility; or no config change>
+
+**CORE**
+
+- <Core module labels and decisive logic; omit touched-file inventory>
+
+**FLOW**
+
+- <Application interaction and resulting behavior>
+
+**PROMPTS**
+
+- <Changed prompt context and injection point; or explicit no-change bullet without diff>
+
+  ```diff
+  -<Exact removed source line; omit deletions for new blocks>
+  +<Exact added source line>
+  ```
+
+**BEFORE / AFTER**
+
+<details>
+<summary>Changed states</summary>
 
 | State | Before <base sha> | After <head sha> |
 |---|---|---|
-| <state> | ![<state> before](./before/01-<state>.png) | ![<state> after](./after/01-<state>.png) |
+| <state> | ![<state> before](<uploaded-before-url>) | ![<state> after](<uploaded-after-url>) |
 
-DECISIONS
+</details>
 
-| Decision | Alternative | Why |
-|---|---|---|
-| <choice> | <rejected option> | <one sentence> |
+**DECISIONS**
 
-VERIFIED
+- <Material choice, rejected alternative and brief reason; or none with reason>
 
-<what proved it, one line>
+**RISKS**
+
+- <High, Medium or Low> — <One concrete behavioral reason>
+
+**VERIFIED**
+
+- <Verification result and revision proved>
