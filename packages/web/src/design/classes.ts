@@ -8,7 +8,7 @@ export const INPUT_CLASS =
   "border border-[var(--color-input-border)] bg-[var(--color-input-bg)] px-2.5 py-2 text-[var(--color-input-text)] outline-none transition focus:border-[var(--color-accent)]";
 
 const BUTTON_BASE_CLASS =
-  "border px-2 py-1 font-bold uppercase outline-none transition-colors focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50";
+  "border px-2 py-1 font-bold uppercase outline-hidden transition-colors focus-visible:outline-1 focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50";
 
 export const SECONDARY_BUTTON_CLASS = `${BUTTON_BASE_CLASS} border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]`;
 
@@ -19,7 +19,7 @@ export const DANGER_BUTTON_CLASS = `${BUTTON_BASE_CLASS} border-[var(--color-sta
 export const ATTENTION_BUTTON_CLASS = `${BUTTON_BASE_CLASS} border-[var(--color-status-attention)] text-[var(--color-status-attention)] hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)]`;
 
 export const CHECKBOX_CLASS =
-  "accent-[var(--color-accent)] outline-none focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]";
+  "accent-[var(--color-accent)] outline-hidden focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]";
 
 export const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 

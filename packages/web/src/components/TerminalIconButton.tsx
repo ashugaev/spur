@@ -24,7 +24,7 @@ export function TerminalIconButton({
   return (
     <button
       aria-label={label}
-      className={`inline-flex shrink-0 items-center justify-center border outline-none transition focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50 ${TONE_CLASS[tone]}`}
+      className={`inline-flex shrink-0 items-center justify-center border outline-hidden transition focus-visible:outline-1 focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50 ${TONE_CLASS[tone]}`}
       disabled={disabled}
       onClick={onClick}
       title={label}
