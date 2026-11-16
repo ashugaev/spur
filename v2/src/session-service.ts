@@ -25504,7 +25504,14 @@ export class SessionService {
     if (!projection || projection.counts.open + projection.counts.held === 0) return;
     const successors: Array<{ sessionId: string; projection: TodoProjection }> = [];
     for (const candidate of sameWorkspace()) {
-      if (candidate.id === source.id || isTerminalSessionStatus(candidate.status)) continue;
+      // Only a launched, live successor owns copies; a `spawning` record never confirmed launch.
+      if (
+        candidate.id === source.id ||
+        candidate.status === "spawning" ||
+        isTerminalSessionStatus(candidate.status)
+      ) {
+        continue;
+      }
       try {
         const candidateProjection = readTodoIfPresent(this.config.dataDir, candidate.id);
         if (candidateProjection) {
@@ -25534,6 +25541,36 @@ export class SessionService {
     }
   }
 
+  // A successor still `spawning` after a restart never confirmed its launch (the record turns
+  // `running` only after the prompt went out), so its inherited copies belong to no live agent:
+  // cancel them as the failure rollback does, leaving the source items open for the next handoff.
+  // Caller holds the successor's workspace lifecycle lock.
+  private neutralizeUnlaunchedHandoffCopiesLocked(successor: SessionRecord): void {
+    const projection = readTodoIfPresent(this.config.dataDir, successor.id);
+    if (!projection) return;
+    const bySource = new Map<string, string[]>();
+    for (const item of projection.items) {
+      if (!item.handoffFrom || (item.status !== "open" && item.status !== "held")) continue;
+      const ids = bySource.get(item.handoffFrom.sessionId) ?? [];
+      bySource.set(item.handoffFrom.sessionId, [...ids, item.id]);
+    }
+    for (const [sourceId, itemIds] of bySource) {
+      const closed = closeTodoItems(
+        this.config.dataDir,
+        successor,
+        itemIds.map((itemId) => ({ itemId })),
+        `handoff to ${successor.id} failed; item stays open in ${sourceId}`,
+      );
+      this.logEvent("session.handoff.todo_reconciled", {
+        level: "info",
+        sessionId: successor.id,
+        projectId: successor.project,
+        message: `Cancelled ${closed.length} unlaunched handoff ToDo copies in ${successor.id}; ${sourceId} keeps its items`,
+        details: { sourceId, itemIds: closed, rolledBack: true },
+      });
+    }
+  }
+
   private async recoverHandoffTodo(): Promise<void> {
     const all = listSessions(this.config.dataDir);
     const byWorkspace = new Map<string, SessionRecord[]>();
@@ -25541,12 +25578,30 @@ export class SessionService {
       const key = workspaceIdOf(candidate);
       byWorkspace.set(key, [...(byWorkspace.get(key) ?? []), candidate]);
     }
+    for (const successor of all) {
+      if (successor.status !== "spawning" || this.spawnsInFlight.has(successor.id)) continue;
+      try {
+        await this.withWorkspaceLifecycleLocks(successor.id, async () => {
+          const current = readSession(this.config.dataDir, successor.id);
+          if (current?.status === "spawning" && !this.spawnsInFlight.has(current.id)) {
+            this.neutralizeUnlaunchedHandoffCopiesLocked(current);
+          }
+        });
+      } catch (error) {
+        this.logEvent("session.handoff.todo_reconcile_failed", {
+          level: "warn",
+          sessionId: successor.id,
+          projectId: successor.project,
+          message: `Could not neutralize handoff ToDo copies of ${successor.id}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
     for (const source of all) {
-      if (source.status !== "stopped") continue;
+      if (isTerminalSessionStatus(source.status)) continue;
       try {
         await this.withWorkspaceLifecycleLocks(source.id, async () => {
           const current = readSession(this.config.dataDir, source.id);
-          if (current?.status === "stopped") {
+          if (current && !isTerminalSessionStatus(current.status)) {
             this.reconcileHandoffTodoLocked(
               current,
               () => byWorkspace.get(workspaceIdOf(current)) ?? [],

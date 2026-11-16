@@ -58901,8 +58901,11 @@ describe("SessionService", () => {
       });
 
       // The daemon stopped after the successor went live and before the source was cancelled.
-      async function seedCrashWindow(successorStatus: SessionRecord["status"] = "running") {
-        const seeded = await seedHandoff({ status: "stopped", stopReason: "manual_pause" });
+      async function seedCrashWindow(
+        successorStatus: SessionRecord["status"] = "running",
+        sourceOverrides: Partial<SessionRecord> = { status: "stopped", stopReason: "manual_pause" },
+      ) {
+        const seeded = await seedHandoff(sourceOverrides);
         const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
         const source = await seeded.service.readTodo("api-1");
         seeded.sessions.set(
@@ -58963,6 +58966,55 @@ describe("SessionService", () => {
             details: expect.objectContaining({ successorId: "api-2" }),
           }),
         );
+        service.dispose();
+      });
+
+      it("startup recovery reconciles a paused source against a launched successor", async () => {
+        const { service } = await seedCrashWindow("running", { status: "paused" });
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "cancelled",
+          "cancelled",
+        ]);
+        service.dispose();
+      });
+
+      it("startup recovery rolls back copies of an unlaunched successor, and a retry moves them once", async () => {
+        const { service } = await seedCrashWindow("spawning");
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        await expectRolledBack(service);
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+        const response = await service.handoff("api-1", { agent: "cursor" });
+        expect(response.id).toBe("api-3");
+        expect(response.movedTodoItems).toBe(2);
+        expect((await service.readTodo("api-3")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "cancelled",
+          "cancelled",
+        ]);
+        expect((await service.readTodo("api-2")).items.map((item) => item.status)).toEqual([
+          "cancelled",
+          "cancelled",
+        ]);
+        service.dispose();
+      });
+
+      it("a retried handoff does not treat an unlaunched successor as the owner", async () => {
+        const { service } = await seedCrashWindow("spawning");
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.movedTodoItems).toBe(2);
         service.dispose();
       });
 
