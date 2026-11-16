@@ -15,7 +15,7 @@ import {
   InvalidTodoRequestError,
   TodoTransitionConflictError,
 } from "../../src/todo.js";
-import type { SessionRecord, TodoActor } from "../../src/types.js";
+import type { SessionRecord, TodoActor, TodoProjection } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -466,7 +466,7 @@ describe("Spur ToDo ledger", () => {
     );
 
     const planned = planHandoffReconcile(source, session.id, [
-      { sessionId: "s-2", projection: replayTodo(dataDir, "s-2"), dead: false },
+      { sessionId: "s-2", projection: replayTodo(dataDir, "s-2"), live: true },
     ]);
 
     expect(planned.map((entry) => entry.itemId)).toEqual([
@@ -495,7 +495,7 @@ describe("Spur ToDo ledger", () => {
 
     expect(
       planHandoffReconcile(source, session.id, [
-        { sessionId: "s-2", projection: migrated, dead: true },
+        { sessionId: "s-2", projection: migrated, live: false },
       ]),
     ).toEqual([]);
   });
@@ -518,10 +518,88 @@ describe("Spur ToDo ledger", () => {
     );
 
     const planned = planHandoffReconcile(source, session.id, [
-      { sessionId: "s-2", projection: replayTodo(dataDir, "s-2"), dead: true },
+      { sessionId: "s-2", projection: replayTodo(dataDir, "s-2"), live: false },
     ]);
 
     expect(planned.map((entry) => entry.itemId)).toEqual([plan[0]?.from.itemId]);
     expect(planned[0]?.handoffTo).toEqual({ sessionId: "s-2", itemId: plan[0]?.itemId });
+  });
+
+  it.each([
+    ["live B holds an open copy", { bLive: true, withC: false }, "s-2"],
+    ["dead B holds an open copy, nothing downstream", { bLive: false, withC: false }, undefined],
+    ["dead B open copy, live C downstream open", { bLive: false, withC: true, cLive: true }, "s-2"],
+    [
+      "dead B open copy, dead C downstream open",
+      { bLive: false, withC: true, cLive: false },
+      undefined,
+    ],
+    [
+      "dead B open copy, C copy rolled back",
+      { bLive: false, withC: true, cLive: true, cRolledBack: true },
+      undefined,
+    ],
+    [
+      "dead B copy moved on to a dead C",
+      { bLive: false, withC: true, cLive: false, bMovedOn: true },
+      "s-2",
+    ],
+  ] as Array<
+    [
+      string,
+      {
+        bLive: boolean;
+        withC: boolean;
+        cLive?: boolean;
+        cRolledBack?: boolean;
+        bMovedOn?: boolean;
+      },
+      string | undefined,
+    ]
+  >)("planHandoffReconcile chain: %s", async (_name, shape, expected) => {
+    const { dataDir, session } = await fixture();
+    mutateTodo(dataDir, session, { action: "add", text: "A", reason: "r" }, actor);
+    const source = replayTodo(dataDir, session.id);
+    const b = { id: "s-2", project: session.project };
+    const c = { id: "s-3", project: session.project };
+    inheritTodo(dataDir, b, planHandoffTodo(source, session.id));
+    const ledgers: Array<{ sessionId: string; projection: TodoProjection; live: boolean }> = [];
+    if (shape.withC) {
+      const toC = planHandoffTodo(replayTodo(dataDir, "s-2"), "s-2");
+      inheritTodo(dataDir, c, toC);
+      if (shape.cRolledBack) {
+        closeTodoItems(
+          dataDir,
+          c,
+          toC.map((item) => ({ itemId: item.itemId })),
+          "rollback",
+        );
+      }
+      if (shape.bMovedOn) {
+        closeTodoItems(
+          dataDir,
+          b,
+          toC.map((item) => ({
+            itemId: item.from.itemId,
+            handoffTo: { sessionId: "s-3", itemId: item.itemId },
+          })),
+          "handed off to s-3",
+        );
+      }
+      ledgers.push({
+        sessionId: "s-3",
+        projection: replayTodo(dataDir, "s-3"),
+        live: shape.cLive === true,
+      });
+    }
+    ledgers.unshift({
+      sessionId: "s-2",
+      projection: replayTodo(dataDir, "s-2"),
+      live: shape.bLive,
+    });
+
+    const planned = planHandoffReconcile(source, session.id, ledgers);
+
+    expect(planned.map((entry) => entry.successorId)).toEqual(expected ? [expected] : []);
   });
 });

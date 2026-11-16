@@ -59116,70 +59116,174 @@ describe("SessionService", () => {
         service.dispose();
       });
 
-      // A -> B -> C: B (still finalizing A's handoff) handed itself off to C and completed, then
-      // the daemon stopped before A's finalize.
-      async function seedChain() {
-        // todoLedgerVersion 1: a completed record without it would get its open items migrated.
-        const seeded = await seedCrashWindow("completed", undefined, { todoLedgerVersion: 1 });
+      // Crash points of A -> B and A -> B -> C. Each row is entered through both recovery paths.
+      type Seeded = Awaited<ReturnType<typeof seedCrashWindow>>;
+
+      async function addC(
+        seeded: Seeded,
+        c: { status: SessionRecord["status"]; agentLaunchId?: string; movedOn?: boolean },
+      ): Promise<Seeded> {
         const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
-        const bLedger = actualTodo.replayTodo(TEST_DATA_DIR, "api-2");
-        const toC = actualTodo.planHandoffTodo(bLedger, "api-2");
+        const toC = actualTodo.planHandoffTodo(
+          actualTodo.replayTodo(TEST_DATA_DIR, "api-2"),
+          "api-2",
+        );
         seeded.sessions.set(
           "api-3",
           sessionRecord({
             id: "api-3",
             workspaceId: "api-1",
-            status: "running",
+            status: c.status,
             worktreePath: "/tmp/spur-worktrees/api/api-1",
+            ...(c.agentLaunchId ? { agentLaunchId: c.agentLaunchId } : {}),
           }),
         );
         actualTodo.inheritTodo(TEST_DATA_DIR, { id: "api-3", project: "api" }, toC);
-        actualTodo.closeTodoItems(
-          TEST_DATA_DIR,
-          { id: "api-2", project: "api" },
-          toC.map((item) => ({
-            itemId: item.from.itemId,
-            handoffTo: { sessionId: "api-3", itemId: item.itemId },
-          })),
-          "handed off to api-3",
-        );
+        if (c.movedOn) {
+          actualTodo.closeTodoItems(
+            TEST_DATA_DIR,
+            { id: "api-2", project: "api" },
+            toC.map((item) => ({
+              itemId: item.from.itemId,
+              handoffTo: { sessionId: "api-3", itemId: item.itemId },
+            })),
+            "handed off to api-3",
+          );
+        }
         return seeded;
       }
 
-      it("chain: startup recovery keeps ownership through a completed middle successor", async () => {
-        const { service } = await seedChain();
-        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+      const migrated = { todoLedgerVersion: 1 } as const;
+      const stopped = { status: "stopped", stopReason: "manual_pause" } as const;
+      const crashPoints: Array<{
+        name: string;
+        build: () => Promise<Seeded>;
+        closedAgainst?: string;
+        retryMoves: number;
+      }> = [
+        {
+          name: "A->B before the copy",
+          build: () => seedHandoff({ ...stopped }) as unknown as Promise<Seeded>,
+          retryMoves: 2,
+        },
+        {
+          name: "A->B after the copy, before tmux",
+          build: () => seedCrashWindow("spawning"),
+          retryMoves: 2,
+        },
+        {
+          name: "A->B after tmux start, before the prompt is confirmed",
+          build: () => seedCrashWindow("spawning", undefined, { agentLaunchId: "launch-1" }),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+        {
+          name: "A->B after running, before the source close",
+          build: () => seedCrashWindow("running"),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+        {
+          name: "A->B->C B handed off to C and completed",
+          build: async () =>
+            addC(await seedCrashWindow("completed", undefined, migrated), {
+              status: "running",
+              movedOn: true,
+            }),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+        {
+          name: "A->B->C B killed after C launched, B copies still open",
+          build: async () =>
+            addC(await seedCrashWindow("killed", undefined, migrated), { status: "running" }),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+        {
+          name: "A->B->C C unlaunched",
+          build: async () => addC(await seedCrashWindow("running"), { status: "spawning" }),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+      ];
 
-        await internals.recoverHandoffTodo();
+      // Open/held copies of one A item, across every ledger, that a live session holds.
+      async function liveCopies(seeded: Seeded, itemId: string): Promise<number> {
+        const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
+        const found = new Set([`api-1\0${itemId}`]);
+        let live = 0;
+        let grew = true;
+        while (grew) {
+          grew = false;
+          for (let n = 1; n <= 9; n += 1) {
+            const id = `api-${n}`;
+            const ledger = actualTodo.readTodoIfPresent(TEST_DATA_DIR, id);
+            if (!ledger) continue;
+            for (const item of ledger.items) {
+              const key = `${id}\0${item.id}`;
+              const fromKey = item.handoffFrom
+                ? `${item.handoffFrom.sessionId}\0${item.handoffFrom.itemId}`
+                : undefined;
+              if (found.has(key) || !fromKey || !found.has(fromKey)) continue;
+              found.add(key);
+              grew = true;
+            }
+          }
+        }
+        for (const key of found) {
+          const [id, copyId] = key.split("\0");
+          const record = seeded.sessions.get(id ?? "");
+          const item = actualTodo
+            .readTodoIfPresent(TEST_DATA_DIR, id ?? "")
+            ?.items.find((candidate) => candidate.id === copyId);
+          const sessionLive =
+            record !== undefined &&
+            !["completed", "killed"].includes(record.status) &&
+            !(record.status === "spawning" && !record.agentLaunchId);
+          if (sessionLive && (item?.status === "open" || item?.status === "held")) live += 1;
+        }
+        return live;
+      }
 
-        const source = await service.readTodo("api-1");
-        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
-        expect(source.items.every((item) => item.handoffTo?.sessionId === "api-2")).toBe(true);
-        expect((await service.readTodo("api-3")).items.map((item) => item.status)).toEqual([
-          "open",
-          "held",
-        ]);
-        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-4");
-        expect((await service.handoff("api-1", { agent: "cursor" })).movedTodoItems).toBe(0);
-        service.dispose();
-      });
+      it.each(
+        crashPoints.flatMap((row) => [
+          [row.name, "startup", row] as const,
+          [row.name, "retry", row] as const,
+        ]),
+      )("crash point: %s, recovered by %s", async (_name, entry, row) => {
+        const seeded = await row.build();
+        const aItemIds = (await seeded.service.readTodo("api-1")).items.map((item) => item.id);
+        let service = seeded.service;
+        if (entry === "startup") {
+          seeded.service.dispose();
+          service = await createDisposedSessionService();
+          await (
+            service as unknown as { recoverHandoffTodo(): Promise<void> }
+          ).recoverHandoffTodo();
+          const afterBoot = await service.readTodo("api-1");
+          if (row.closedAgainst) {
+            expect(afterBoot.items.map((item) => item.handoffTo?.sessionId)).toEqual([
+              row.closedAgainst,
+              row.closedAgainst,
+            ]);
+          } else {
+            expect(afterBoot.items.map((item) => item.status)).toEqual(["open", "held"]);
+          }
+        }
 
-      it("chain: a retried handoff of the first source does not duplicate the later successor's work", async () => {
-        const { service } = await seedChain();
-        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-4");
-
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-9");
         const response = await service.handoff("api-1", { agent: "cursor" });
 
-        expect(response.movedTodoItems).toBe(0);
-        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
-          "cancelled",
-          "cancelled",
-        ]);
-        expect((await service.readTodo("api-4")).items).toEqual([]);
-        expect((await service.readTodo("api-3")).items.map((item) => item.status)).toEqual([
-          "open",
-          "held",
-        ]);
+        expect(response.movedTodoItems).toBe(row.retryMoves);
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        if (row.closedAgainst) {
+          expect(
+            source.items.every((item) => item.handoffTo?.sessionId === row.closedAgainst),
+          ).toBe(true);
+        }
+        for (const itemId of aItemIds) expect(await liveCopies(seeded, itemId)).toBe(1);
         service.dispose();
       });
 

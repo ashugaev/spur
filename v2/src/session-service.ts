@@ -25505,25 +25505,24 @@ export class SessionService {
     if (this.handoffsInFlight.has(source.id)) return;
     const projection = readTodoIfPresent(this.config.dataDir, source.id);
     if (!projection || projection.counts.open + projection.counts.held === 0) return;
-    const successors: Array<{ sessionId: string; projection: TodoProjection; dead: boolean }> = [];
+    const ledgers: Array<{ sessionId: string; projection: TodoProjection; live: boolean }> = [];
     for (const candidate of sameWorkspace()) {
       if (candidate.id === source.id) continue;
-      // Dead: terminal, or `spawning` before its launch began (`agentLaunchId`). The planner
-      // lets a dead successor own only copies that already left the open state.
-      const dead =
-        isTerminalSessionStatus(candidate.status) ||
-        (candidate.status === "spawning" && !candidate.agentLaunchId);
+      // Live: not terminal and, while `spawning`, past the start of its launch (`agentLaunchId`).
+      const live =
+        !isTerminalSessionStatus(candidate.status) &&
+        !(candidate.status === "spawning" && !candidate.agentLaunchId);
       try {
         const candidateProjection = readTodoIfPresent(this.config.dataDir, candidate.id);
         if (candidateProjection) {
-          successors.push({ sessionId: candidate.id, projection: candidateProjection, dead });
+          ledgers.push({ sessionId: candidate.id, projection: candidateProjection, live });
         }
       } catch (error) {
         // One damaged sibling ledger must not block the source.
         if (!(error instanceof TodoLedgerCorruptError)) throw error;
       }
     }
-    const planned = planHandoffReconcile(projection, source.id, successors);
+    const planned = planHandoffReconcile(projection, source.id, ledgers);
     for (const successorId of new Set(planned.map((entry) => entry.successorId))) {
       const closes = planned.filter((entry) => entry.successorId === successorId);
       const closed = closeTodoItems(

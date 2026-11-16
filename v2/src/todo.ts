@@ -492,38 +492,58 @@ export function planHandoffTodo(projection: TodoProjection, sourceId: string): H
 }
 
 /**
- * Source items a successor already holds a live copy of, derived from the ledgers alone: a
- * successor item records `handoffFrom`, and only the handoff rollback (a system/handoff cancel
- * without `handoffTo`) takes a copy out of play. A `dead` successor (killed, completed, or never
- * launched) owns only copies that already left the open state (completed, cancelled, moved on by
- * a later handoff); a copy still open/held there has no owner. Used to finish a handoff that
- * stopped between the successor write and the source cancel.
+ * Source items that a successor chain already owns, derived from the ledgers alone, to finish a
+ * handoff that stopped between the successor write and the source cancel. `ledgers` holds every
+ * same-workspace session's ledger; `live` marks a session that is non-terminal and has begun its
+ * launch. A copy is owned unless it is a rollback or a legacy-migration close, and then when
+ * (1) its session is live and the copy is still open/held, (2) it left the open state by its
+ * session's own decision (completed, cancelled, moved on), or (3) a downstream copy that records
+ * it in `handoffFrom` is owned. The source item closes against the first hop.
  */
 export function planHandoffReconcile(
   source: TodoProjection,
   sourceId: string,
-  successors: ReadonlyArray<{ sessionId: string; projection: TodoProjection; dead: boolean }>,
+  ledgers: ReadonlyArray<{ sessionId: string; projection: TodoProjection; live: boolean }>,
 ): Array<{ successorId: string; itemId: string; handoffTo: TodoHandoffRef }> {
+  const refKey = (sessionId: string, itemId: string) => `${sessionId}\0${itemId}`;
+  const downstream = new Map<
+    string,
+    Array<{ ledger: (typeof ledgers)[number]; item: TodoItemProjection }>
+  >();
+  for (const ledger of ledgers) {
+    for (const item of ledger.projection.items) {
+      if (!item.handoffFrom) continue;
+      const key = refKey(item.handoffFrom.sessionId, item.handoffFrom.itemId);
+      const entry = { ledger, item };
+      const list = downstream.get(key);
+      if (list) list.push(entry);
+      else downstream.set(key, [entry]);
+    }
+  }
+  const visiting = new Set<string>();
+  const owned = (ledger: (typeof ledgers)[number], item: TodoItemProjection): boolean => {
+    if (isRolledBackCopy(item) || isMigrationClosed(item)) return false;
+    const key = refKey(ledger.sessionId, item.id);
+    if (visiting.has(key)) return false;
+    const unfinished = item.status === "open" || item.status === "held";
+    if (ledger.live && unfinished) return true;
+    if (!unfinished) return true;
+    visiting.add(key);
+    const viaDownstream = (downstream.get(key) ?? []).some((next) => owned(next.ledger, next.item));
+    visiting.delete(key);
+    return viaDownstream;
+  };
   const planned: Array<{ successorId: string; itemId: string; handoffTo: TodoHandoffRef }> = [];
   for (const item of source.items) {
     if (item.status !== "open" && item.status !== "held") continue;
-    for (const successor of successors) {
-      const copy = successor.projection.items.find(
-        (candidate) =>
-          candidate.handoffFrom?.sessionId === sourceId &&
-          candidate.handoffFrom.itemId === item.id &&
-          !isRolledBackCopy(candidate) &&
-          !isMigrationClosed(candidate) &&
-          !(successor.dead && (candidate.status === "open" || candidate.status === "held")),
-      );
-      if (copy) {
-        planned.push({
-          successorId: successor.sessionId,
-          itemId: item.id,
-          handoffTo: { sessionId: successor.sessionId, itemId: copy.id },
-        });
-        break;
-      }
+    for (const entry of downstream.get(refKey(sourceId, item.id)) ?? []) {
+      if (!owned(entry.ledger, entry.item)) continue;
+      planned.push({
+        successorId: entry.ledger.sessionId,
+        itemId: item.id,
+        handoffTo: { sessionId: entry.ledger.sessionId, itemId: entry.item.id },
+      });
+      break;
     }
   }
   return planned;
