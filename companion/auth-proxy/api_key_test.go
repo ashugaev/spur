@@ -73,6 +73,12 @@ func TestAPIKeyRecordLoadsThroughServiceWatcher(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	// The model registry is process-global: start and end clean.
+	registry := cliproxy.GlobalModelRegistry()
+	for _, id := range []string{"key-claude", "key-codex"} {
+		registry.UnregisterClient(authFileID(id))
+		t.Cleanup(func() { registry.UnregisterClient(authFileID(id)) })
+	}
 	dir := seedVerified(t, t.TempDir(), "key-claude", "key-codex")
 	f := startCompanionFixture(t, dir)
 	configureAccounts(t, f)
@@ -89,25 +95,24 @@ func TestAPIKeyRecordLoadsThroughServiceWatcher(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	registry := cliproxy.GlobalModelRegistry()
-	models := map[string]string{}
-	deadline := time.Now().Add(15 * time.Second)
-	for len(models) < 2 && time.Now().Before(deadline) {
-		for id := range map[string]bool{"key-claude": true, "key-codex": true} {
-			if list := registry.GetModelsForClient(authFileID(id)); len(list) > 0 {
-				models[id] = list[0].ID
+	// Both accounts become ready: registered with their projected key and given models.
+	polls := 100
+	waitFor(t, "API-key accounts ready", func() bool {
+		polls++
+		for _, status := range accountStatuses(t, f, polls) {
+			if status.Status != "ready" || status.Credential != "api_key" {
+				return false
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if len(models) != 2 {
-		t.Fatalf("API-key records never registered models: %v", models)
-	}
-	statuses := accountStatuses(t, f, 2)
-	for id, status := range statuses {
-		if status.Status != "ready" || status.Credential != "api_key" {
-			t.Fatalf("%s: %+v", id, status)
+		return true
+	})
+	models := map[string]string{}
+	for _, id := range []string{"key-claude", "key-codex"} {
+		list := registry.GetModelsForClient(authFileID(id))
+		if len(list) == 0 {
+			t.Fatalf("%s ready without models", id)
 		}
+		models[id] = list[0].ID
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	for _, test := range []struct {
