@@ -324,3 +324,39 @@ func TestGetUsageSequentialChunks(t *testing.T) {
 		}
 	}
 }
+
+// busyProbe is the control output: it records whether the usage slot is still held when a reply is written.
+type busyProbe struct {
+	c      *control
+	busy   chan bool
+	closed bool
+}
+
+func (p *busyProbe) Write(b []byte) (int, error) {
+	if !p.closed {
+		p.closed = true
+		p.busy <- p.c.usageBusy.Load()
+	}
+	return len(b), nil
+}
+
+// TestGetUsageFreesSlotBeforeReply fails when the reply is written while the slot is still held: the
+// daemon's next chunk would then be rejected as overlapping.
+func TestGetUsageFreesSlotBeforeReply(t *testing.T) {
+	f := newLoginFixture(t)
+	if _, err := f.l.manager.Register(context.Background(), identityFixture(t, "account-a", "org-1", "user-1")); err != nil {
+		t.Fatal(err)
+	}
+	c := &control{router: f.r, logins: f.l}
+	probe := &busyProbe{c: c, busy: make(chan bool, 1)}
+	c.out = probe
+	c.handle(context.Background(), controlRequest{ID: 1, Method: "getUsage", Params: json.RawMessage(`{"accountIds":["account-a"]}`)})
+	select {
+	case busy := <-probe.busy:
+		if busy {
+			t.Fatal("usage slot still held when the reply was written")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no reply")
+	}
+}
