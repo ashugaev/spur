@@ -249,6 +249,11 @@ describe("renderHandoffPrompt snapshot and inherited ToDo", () => {
     expect(prompt.indexOf("Inherited ToDo")).toBeLessThan(prompt.indexOf("Bring the work"));
   });
 
+  it("uses the singular for one commit since the snapshot", () => {
+    const prompt = renderHandoffPrompt({ ...base, snapshot: { ...snapshot, commitsSince: 1 } });
+    expect(prompt).toContain("1 commit since, stale yes");
+  });
+
   it("omits git pointers without a head sha and reports unknown commit counts", () => {
     const prompt = renderHandoffPrompt({
       ...base,

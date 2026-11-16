@@ -160,7 +160,7 @@ function renderSnapshotLines(ctx: HandoffPromptContext): string[] {
   const commits = snapshot.commitsSince === null ? "unknown" : String(snapshot.commitsSince);
   const lines = [
     "",
-    `Latest snapshot v${snapshot.version} at ${snapshot.at} (age ${snapshot.ageMinutes} min, ${commits} commits since, stale ${snapshot.stale ? "yes" : "no"}):`,
+    `Latest snapshot v${snapshot.version} at ${snapshot.at} (age ${snapshot.ageMinutes} min, ${commits} ${snapshot.commitsSince === 1 ? "commit" : "commits"} since, stale ${snapshot.stale ? "yes" : "no"}):`,
     Buffer.byteLength(snapshot.content) <= HANDOFF_SNAPSHOT_INLINE_MAX_BYTES
       ? snapshot.content
       : `Read it: spur snapshot show ${src} ${snapshot.version}`,
