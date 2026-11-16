@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   archiveSessions,
+  listArchivedSessions,
   listTelegramTopicSessionIds,
   readArchivedSession,
   readTelegramTopicGcClock,
@@ -3151,6 +3152,50 @@ describe("archiveSessions", () => {
 
     expect(result.retainedAnchorIds).toEqual(["api-1"]);
     expect(readSession(dataDir, "api-1")).not.toBeNull();
+  });
+});
+
+describe("listArchivedSessions", () => {
+  function archiveRecords(dataDir: string, ids: string[]): void {
+    for (const id of ids) {
+      writeSession(dataDir, { ...sessionBase, id, tmuxSession: id });
+    }
+    archiveSessions(
+      dataDir,
+      ids.map((id) => ({ id, project: "api" })),
+    );
+  }
+
+  it("skips an invalid archived record and keeps the rest", async () => {
+    const dataDir = await newDataDir();
+    archiveRecords(dataDir, ["api-1", "api-2"]);
+    writeFileSync(join(dataDir, "sessions-archive", "api", "api-2.json"), "{}", "utf-8");
+
+    const sessions = listArchivedSessions(dataDir, () => true);
+
+    expect(sessions.map((session) => session.id)).toEqual(["api-1"]);
+  });
+
+  it("runs the include predicate before parsing the file", async () => {
+    const dataDir = await newDataDir();
+    archiveRecords(dataDir, ["api-1", "api-2"]);
+    // Parsing a directory throws EISDIR, a plain Error that is not skipped as invalid metadata.
+    const excluded = join(dataDir, "sessions-archive", "api", "api-2.json");
+    await rm(excluded);
+    mkdirSync(excluded);
+    const seen: string[] = [];
+
+    const sessions = listArchivedSessions(dataDir, (project, id) => {
+      seen.push(`${project}/${id}`);
+      return id === "api-1";
+    });
+
+    expect(sessions.map((session) => session.id)).toEqual(["api-1"]);
+    expect(seen.sort()).toEqual(["api/api-1", "api/api-2"]);
+  });
+
+  it("returns nothing without an archive", async () => {
+    expect(listArchivedSessions(await newDataDir(), () => true)).toEqual([]);
   });
 });
 

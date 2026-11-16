@@ -8,6 +8,7 @@ import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 const getJsonMock = vi.fn();
 const postJsonMock = vi.fn();
 const writeStdoutMock = vi.fn();
+const writeStderrMock = vi.fn();
 const stdinMock = vi.hoisted(() => ({ text: "" }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -46,7 +47,7 @@ vi.mock("../../src/config.js", () => ({
 }));
 
 vi.mock("../../src/io.js", () => ({
-  writeStderr: vi.fn(),
+  writeStderr: writeStderrMock,
   writeStdout: writeStdoutMock,
 }));
 
@@ -78,12 +79,20 @@ const meta = {
   final: false,
 };
 
+const freshness = {
+  ageSeconds: 90,
+  activitySince: "2026-11-01T10:05:00.000Z",
+  commitsSince: 2,
+  stale: true,
+};
+
 describe("snapshot CLI", { timeout: 30_000 }, () => {
   beforeEach(() => {
     vi.resetModules();
     getJsonMock.mockReset();
     postJsonMock.mockReset();
     writeStdoutMock.mockReset();
+    writeStderrMock.mockReset();
     stdinMock.text = "";
   });
 
@@ -128,8 +137,8 @@ describe("snapshot CLI", { timeout: 30_000 }, () => {
     expect(writeStdoutMock.mock.calls.flat().join("\n")).toContain("snapshot 2 for api-1 (final)");
   });
 
-  it("shows the latest content by default and a numbered version on request", async () => {
-    getJsonMock.mockResolvedValue({ ...meta, content: "# Body" });
+  it("shows stored content on stdout and freshness on stderr", async () => {
+    getJsonMock.mockResolvedValue({ ...meta, content: "# Body", freshness });
 
     await run(["snapshot", "show", "api-1"]);
     expect(getJsonMock).toHaveBeenLastCalledWith(
@@ -137,34 +146,129 @@ describe("snapshot CLI", { timeout: 30_000 }, () => {
       "/sessions/api-1/snapshots/latest",
       "/tmp/spur.yaml",
     );
-    expect(writeStdoutMock).toHaveBeenLastCalledWith("# Body");
+    expect(writeStdoutMock.mock.calls).toEqual([["# Body"]]);
+    expect(writeStderrMock.mock.calls).toEqual([
+      ["v2 2026-11-01T10:00:00.000Z age 90s stale yes commits 2 activity 2026-11-01T10:05:00.000Z"],
+    ]);
+  });
 
-    await run(["snapshot", "show", "api-1", "2", "--json"]);
+  it("prints unknown counts and the done list", async () => {
+    getJsonMock.mockResolvedValue({
+      ...meta,
+      content: "# Body",
+      freshness: { ...freshness, activitySince: null, commitsSince: null, stale: false },
+      done: [{ text: "Ship it" }, { text: "Test it" }],
+    });
+
+    await run(["snapshot", "show", "api-1", "2", "--include-done"]);
+
     expect(getJsonMock).toHaveBeenLastCalledWith(
       "/tmp/dist/cli.js",
-      "/sessions/api-1/snapshots/2",
+      "/sessions/api-1/snapshots/2?includeDone=1",
       "/tmp/spur.yaml",
     );
+    expect(writeStderrMock.mock.calls).toEqual([
+      [
+        "v2 2026-11-01T10:00:00.000Z age 90s stale no commits ? activity none\ndone: Ship it\ndone: Test it",
+      ],
+    ]);
+    expect(writeStdoutMock).toHaveBeenLastCalledWith("# Body");
+  });
+
+  it("prints the full read as JSON and rejects a bad version", async () => {
+    getJsonMock.mockResolvedValue({ ...meta, content: "# Body", freshness });
+
+    await run(["snapshot", "show", "api-1", "2", "--json"]);
+
     expect(writeStdoutMock).toHaveBeenLastCalledWith(
-      JSON.stringify({ ...meta, content: "# Body" }, null, 2),
+      JSON.stringify({ ...meta, content: "# Body", freshness }, null, 2),
     );
     await expect(run(["snapshot", "show", "api-1", "0"])).rejects.toThrow(
       "version must be a positive integer",
     );
   });
 
-  it("lists one row per version", async () => {
+  it("lists newest first with one row per version", async () => {
     getJsonMock.mockResolvedValue([meta]);
 
     await run(["snapshot", "list", "api-1"]);
 
     expect(getJsonMock).toHaveBeenCalledWith(
       "/tmp/dist/cli.js",
-      "/sessions/api-1/snapshots",
+      "/sessions/api-1/snapshots?order=desc",
       "/tmp/spur.yaml",
     );
     expect(writeStdoutMock).toHaveBeenLastCalledWith(
       "2\t2026-11-01T10:00:00.000Z\tmanual\tfeature/x\t01234567",
     );
+  });
+
+  it("forwards --limit and --before to the list query", async () => {
+    getJsonMock.mockResolvedValue([]);
+
+    await run(["snapshot", "list", "api-1", "--limit", "5", "--before", "9"]);
+
+    expect(getJsonMock).toHaveBeenLastCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/api-1/snapshots?order=desc&limit=5&before=9",
+      "/tmp/spur.yaml",
+    );
+  });
+
+  it("finds the latest snapshot of each session by link", async () => {
+    getJsonMock.mockResolvedValue([
+      {
+        sessionId: "api-1",
+        status: "completed",
+        state: null,
+        snapshot: { ...meta, content: "# Body", freshness, done: [{ text: "Ship it" }] },
+      },
+      {
+        sessionId: "api-2",
+        status: "running",
+        state: "working",
+        snapshot: { ...meta, content: "# Two", freshness, done: null },
+      },
+    ]);
+
+    await run([
+      "snapshot",
+      "latest",
+      "--link",
+      "pr=https://example.test/pr/1",
+      "--link",
+      "tracker",
+      "--include-done",
+    ]);
+
+    expect(getJsonMock).toHaveBeenLastCalledWith(
+      "/tmp/dist/cli.js",
+      "/snapshots/latest?link=pr%3Dhttps%3A%2F%2Fexample.test%2Fpr%2F1&link=tracker&includeDone=1",
+      "/tmp/spur.yaml",
+    );
+    const header =
+      "v2 2026-11-01T10:00:00.000Z age 90s stale yes commits 2 activity 2026-11-01T10:05:00.000Z";
+    expect(writeStdoutMock).toHaveBeenLastCalledWith(
+      [
+        `## api-1 (completed, -)\n${header}\ndone: Ship it\n\n# Body`,
+        `## api-2 (running, working)\n${header}\ndone: unreadable ledger\n\n# Two`,
+      ].join("\n"),
+    );
+  });
+
+  it("prints the entries as JSON and requires --link", async () => {
+    getJsonMock.mockResolvedValue([]);
+
+    await run(["snapshot", "latest", "--link", "pr", "--json"]);
+    expect(writeStdoutMock).toHaveBeenLastCalledWith("[]");
+    expect(getJsonMock).toHaveBeenLastCalledWith(
+      "/tmp/dist/cli.js",
+      "/snapshots/latest?link=pr",
+      "/tmp/spur.yaml",
+    );
+
+    getJsonMock.mockClear();
+    await expect(run(["snapshot", "latest"])).rejects.toThrow("snapshot latest requires --link");
+    expect(getJsonMock).not.toHaveBeenCalled();
   });
 });

@@ -1959,6 +1959,31 @@ export function readArchivedSession(dataDir: string, sessionId: string): Session
   return null;
 }
 
+// Archived records whose (project, id) pass `include`, uncached. The predicate runs before the
+// file is parsed, so callers pay only for the sessions they want. Invalid files are skipped.
+export function listArchivedSessions(
+  dataDir: string,
+  include: (projectId: string, sessionId: string) => boolean,
+): SessionRecord[] {
+  const root = join(dataDir, "sessions-archive");
+  if (!existsSync(root)) return [];
+  const sessions: SessionRecord[] = [];
+  for (const projectEntry of readdirSync(root, { withFileTypes: true })) {
+    if (!projectEntry.isDirectory()) continue;
+    const projectDir = join(root, projectEntry.name);
+    for (const fileName of readdirSync(projectDir)) {
+      if (!fileName.endsWith(".json")) continue;
+      if (!include(projectEntry.name, fileName.slice(0, -".json".length))) continue;
+      try {
+        sessions.push(readSessionFile(join(projectDir, fileName)));
+      } catch (error) {
+        if (!(error instanceof InvalidSessionMetadataError)) throw error;
+      }
+    }
+  }
+  return sessions;
+}
+
 // Group-atomic archival for session GC: moves every member's record (and its
 // per-session log shard dir, if any) out of dataDir/sessions/ into the
 // sibling dataDir/sessions-archive/ tree, then rewrites the index once. Files

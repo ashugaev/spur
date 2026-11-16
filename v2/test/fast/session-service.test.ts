@@ -184,6 +184,8 @@ import {
   readTelegramBindingsMock,
   readTelegramReplyTargetMock,
   readArchivedSessionMock,
+  countCommitsSinceMock,
+  readWorktreeHeadMock,
   listTelegramTopicSessionIdsMock,
   readTelegramTopicGcClockMock,
   writeTelegramTopicGcClockMock,
@@ -234,6 +236,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   utimesSync,
@@ -4849,6 +4852,330 @@ describe("SessionService", () => {
           details: { kind: "snapshot_corrupt", version: 1 },
         });
         service.dispose();
+      });
+
+      describe("snapshot reads", () => {
+        const iso = (offsetMinutes: number) => new Date(at(offsetMinutes)).toISOString();
+        const tail = (entries: TranscriptEntry[], mtimeMinutes: number, startIndex = 0) =>
+          readClaudeConversationTailMock.mockResolvedValue({
+            entries,
+            state: "waiting",
+            totalEntries: startIndex + entries.length,
+            startIndex,
+            hasMore: false,
+            reader: { lastMtimeMs: at(mtimeMinutes) },
+          });
+        const untimedMessage = (role: "user" | "assistant", text: string): TranscriptEntry => ({
+          kind: "message",
+          role,
+          text,
+        });
+
+        async function readSetup(
+          overrides: Partial<SessionRecord> = {},
+          freshnessMinutes?: number,
+        ) {
+          if (freshnessMinutes !== undefined) {
+            const config = baseConfig();
+            loadConfigMock.mockReturnValue({
+              ...config,
+              projects: { api: { ...config.projects.api, snapshots: { freshnessMinutes } } },
+            });
+          }
+          const sessions = createSessionStore();
+          const session = runningSession(overrides);
+          sessions.set(session.id, session);
+          const { SessionService } = await loadSessionServiceModule();
+          const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+          vi.setSystemTime(T0);
+          await service.writeSnapshot(session.id, { content: "# Notes", final: false });
+          const read = (version: number | "latest" = "latest") =>
+            service.readSnapshot(session.id, version, { includeDone: false });
+          const firstWorkCache = (service as unknown as { firstWorkCache: Map<string, unknown> })
+            .firstWorkCache;
+          return { sessions, session, service, read, firstWorkCache };
+        }
+
+        it.each([
+          [
+            "text after the snapshot, then a tool past the window",
+            [userEntry("go", 0), textEntry(0.5), toolEntry(40)],
+            iso(0.5),
+            true,
+          ],
+          ["only text after the snapshot", [userEntry("go", 0), textEntry(0.5)], iso(0.5), false],
+          [
+            "a non-Spur tool in a reminder turn after Spur-only entries",
+            [
+              userEntry("go", 0),
+              userEntry(reminderText, 5),
+              textEntry(5.5),
+              toolEntry(6, { spurCall: true }),
+              toolEntry(8),
+            ],
+            iso(8),
+            false,
+          ],
+          [
+            "only reminder replies",
+            [
+              userEntry("go", 0),
+              userEntry(reminderText, 5),
+              toolEntry(6, { spurCall: true }),
+              textEntry(7),
+            ],
+            null,
+            false,
+          ],
+        ])("reports first work and staleness for %s", async (_name, entries, since, stale) => {
+          const { read, service } = await readSetup();
+          tail(entries, 41);
+
+          const { freshness } = await read();
+
+          expect(freshness.activitySince).toBe(since);
+          expect(freshness.stale).toBe(stale);
+          service.dispose();
+        });
+
+        it("follows the project's freshnessMinutes", async () => {
+          const { read, service } = await readSetup({}, 20);
+          tail([userEntry("go", 0), toolEntry(25)], 26);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(25), stale: true });
+          service.dispose();
+        });
+
+        it("finds no activity when the transcript was last written before the snapshot", async () => {
+          const { read, service } = await readSetup();
+          tail([userEntry("go", -10), toolEntry(-5)], -1);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+          expect(readAgentConversationMock).not.toHaveBeenCalled();
+          service.dispose();
+        });
+
+        it("counts commits from the recorded head and branch", async () => {
+          readWorktreeHeadMock.mockResolvedValue({ branch: "main", headSha: "abc", dirty: false });
+          const { read, session, service } = await readSetup();
+          countCommitsSinceMock.mockResolvedValue(3);
+
+          expect((await read()).freshness.commitsSince).toBe(3);
+          expect(countCommitsSinceMock).toHaveBeenCalledWith(session.worktreePath, "abc", "main");
+          service.dispose();
+        });
+
+        it("reports age in whole seconds", async () => {
+          const { read, service } = await readSetup();
+          vi.setSystemTime(new Date(T0.getTime() + 90_900));
+
+          expect((await read()).freshness.ageSeconds).toBe(90);
+          service.dispose();
+        });
+
+        it("rescans the full transcript when the tail starts above the snapshot", async () => {
+          const { read, service } = await readSetup();
+          tail([userEntry("go", 2), textEntry(3), toolEntry(40)], 41, 5);
+          readAgentConversationMock.mockResolvedValue([
+            userEntry("go", -5),
+            textEntry(1),
+            userEntry("again", 2),
+            textEntry(3),
+            toolEntry(40),
+          ]);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(1), stale: true });
+          expect(readAgentConversationMock).toHaveBeenCalledTimes(1);
+          service.dispose();
+        });
+
+        it("serves a cached first work without a repeat full read", async () => {
+          const { read, service, firstWorkCache, session } = await readSetup();
+          tail([userEntry("go", 2), textEntry(3), toolEntry(10)], 11, 5);
+          readAgentConversationMock.mockResolvedValue([
+            userEntry("go", -5),
+            textEntry(1),
+            userEntry("again", 2),
+            textEntry(3),
+            toolEntry(10),
+          ]);
+          await read();
+          expect(readAgentConversationMock).toHaveBeenCalledTimes(1);
+          expect(firstWorkCache.has(session.id)).toBe(true);
+
+          expect((await read()).freshness.activitySince).toBe(iso(1));
+          expect(readAgentConversationMock).toHaveBeenCalledTimes(1);
+          service.dispose();
+        });
+
+        it("skips every transcript read when the cached first work already makes it stale", async () => {
+          const { read, service } = await readSetup();
+          tail([userEntry("go", 0), toolEntry(31)], 32);
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(31), stale: true });
+          readClaudeConversationTailMock.mockClear();
+          readAgentConversationMock.mockClear();
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(31), stale: true });
+          expect(readClaudeConversationTailMock).not.toHaveBeenCalled();
+          expect(readAgentConversationMock).not.toHaveBeenCalled();
+          service.dispose();
+        });
+
+        it("keeps the cached first work when the transcript tail is gone", async () => {
+          const { read, service } = await readSetup();
+          tail([userEntry("go", 0), textEntry(5)], 6);
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(5), stale: false });
+          readClaudeConversationTailMock.mockResolvedValue(null);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(5), stale: false });
+          service.dispose();
+        });
+
+        it("rereads for a newer snapshot version", async () => {
+          const { read, service, session } = await readSetup();
+          tail([userEntry("go", 0), toolEntry(31)], 32);
+          await read();
+          vi.setSystemTime(new Date(at(35)));
+          await service.writeSnapshot(session.id, { content: "# Two", final: false });
+          readClaudeConversationTailMock.mockClear();
+          tail([userEntry("go", 0), toolEntry(31), textEntry(36)], 37);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(36), stale: false });
+          expect(readClaudeConversationTailMock).toHaveBeenCalled();
+          service.dispose();
+        });
+
+        it("reads archived sessions through no cached reader", async () => {
+          const { read, service, session, sessions, firstWorkCache } = await readSetup();
+          const snapshots = join(TEST_DATA_DIR, "sessions", session.id);
+          const archived = join(TEST_DATA_DIR, "sessions-archive", session.project, session.id);
+          mkdirSync(dirname(archived), { recursive: true });
+          renameSync(snapshots, archived);
+          sessions.delete(session.id);
+          readArchivedSessionMock.mockReturnValue(session);
+          tail([userEntry("go", 0), toolEntry(31)], 32);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(31), stale: true });
+          expect(readClaudeConversationTailMock).toHaveBeenCalledWith(
+            session.worktreePath,
+            undefined,
+            session.agentSessionId,
+          );
+          expect(firstWorkCache.has(session.id)).toBe(false);
+          service.dispose();
+        });
+
+        describe("codex freshness", () => {
+          // Only a read pinned to the owning thread sees the quiet rollout; an unpinned read
+          // finds the newer rollout of an unrelated session.
+          const ownRollout = {
+            entries: [userEntry("go", -2)],
+            totalEntries: 1,
+            startIndex: 0,
+            reader: { filePath: "/own.jsonl", cursor: { mtimeMs: at(-1) } },
+          };
+          const unrelatedRollout = {
+            entries: [userEntry("other", 30), toolEntry(40)],
+            totalEntries: 2,
+            startIndex: 0,
+            reader: { filePath: "/other.jsonl", cursor: { mtimeMs: at(41) } },
+          };
+          const pinTail = () =>
+            readCodexConversationTailMock.mockImplementation(
+              async (_dir: string, _reader: unknown, threadId?: string) =>
+                threadId === "thread-own" ? ownRollout : unrelatedRollout,
+            );
+
+          it.each(["live", "archived"] as const)(
+            "ignores an unrelated newer rollout for a %s session",
+            async (location) => {
+              const { read, service, session, sessions } = await readSetup({
+                agent: "codex",
+                agentSessionId: "thread-own",
+              });
+              if (location === "archived") {
+                const archived = join(
+                  TEST_DATA_DIR,
+                  "sessions-archive",
+                  session.project,
+                  session.id,
+                );
+                mkdirSync(dirname(archived), { recursive: true });
+                renameSync(join(TEST_DATA_DIR, "sessions", session.id), archived);
+                sessions.delete(session.id);
+                readArchivedSessionMock.mockReturnValue(session);
+              }
+              pinTail();
+
+              expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+              expect(readCodexConversationTailMock).toHaveBeenCalledWith(
+                expect.stringContaining(session.id),
+                undefined,
+                "thread-own",
+              );
+              service.dispose();
+            },
+          );
+
+          it("reads no rollout when the session has no codex thread id", async () => {
+            const { read, service } = await readSetup({ agent: "codex" });
+            pinTail();
+
+            expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+            expect(readCodexConversationTailMock).not.toHaveBeenCalled();
+            service.dispose();
+          });
+        });
+
+        it("uses the Cursor transcript write time, not record or dashboard activity", async () => {
+          const { read, service, session, sessions } = await readSetup({
+            agent: "cursor",
+            agentSessionId: "chat-1",
+            updatedAt: iso(20),
+          });
+          sessions.set(session.id, { ...session, updatedAt: iso(20) });
+          const cursorState = (mtimeMinutes: number) => ({
+            state: "waiting",
+            reader: { filePath: "/tmp/chat.jsonl", lastMtimeMs: at(mtimeMinutes) },
+            rateLimit: null,
+          });
+          readAgentConversationMock.mockResolvedValue([
+            untimedMessage("user", "go"),
+            untimedMessage("assistant", "done"),
+          ]);
+
+          readCursorJsonlStateMock.mockResolvedValue(cursorState(-1));
+          expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+          expect(readCursorJsonlStateMock).toHaveBeenCalled();
+          expect(readAgentConversationMock).not.toHaveBeenCalled();
+
+          readCursorJsonlStateMock.mockResolvedValue(cursorState(40));
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(40), stale: true });
+          service.dispose();
+        });
+
+        it("uses the OpenCode export's activity time", async () => {
+          const { read, service } = await readSetup({
+            agent: "opencode",
+            agentSessionId: "ses_1",
+            updatedAt: iso(20),
+          });
+          const opencodeState = (activityMinutes: number) => ({
+            state: { state: "waiting", reason: "idle", activityMs: at(activityMinutes) },
+          });
+          readAgentConversationMock.mockResolvedValue([
+            untimedMessage("user", "go"),
+            untimedMessage("assistant", "done"),
+          ]);
+
+          readOpenCodeStructuredStateMock.mockResolvedValue(opencodeState(-1));
+          expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+          expect(readOpenCodeStructuredStateMock).toHaveBeenCalled();
+
+          readOpenCodeStructuredStateMock.mockResolvedValue(opencodeState(5));
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(5), stale: false });
+          service.dispose();
+        });
       });
     });
 

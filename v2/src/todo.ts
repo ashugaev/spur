@@ -213,17 +213,31 @@ export function replayTodo(dataDir: string, sessionId: string): TodoProjection {
       undefined,
       true,
     );
-  const events = text
-    .slice(0, -1)
-    .split("\n")
-    .map((line, index) => {
-      try {
-        return parseEvent(JSON.parse(line) as unknown, sessionId, index + 1);
-      } catch (error) {
-        if (error instanceof TodoLedgerCorruptError) throw error;
-        throw new TodoLedgerCorruptError(sessionId, "ToDo ledger contains invalid JSON", index + 1);
-      }
-    });
+  return replayTodoLines(text.slice(0, -1).split("\n"), sessionId);
+}
+
+/**
+ * Projection of the ledger without writing, for readers that take no lock: a missing ledger is
+ * null, and bytes after the last newline (an append in flight) are ignored.
+ */
+export function readTodoIfPresent(dataDir: string, sessionId: string): TodoProjection | null {
+  const path = ledgerPath(dataDir, sessionId);
+  if (!existsSync(path)) return null;
+  const text = readFileSync(path, "utf8");
+  const complete = text.slice(0, text.lastIndexOf("\n") + 1);
+  if (!complete) return null;
+  return replayTodoLines(complete.slice(0, -1).split("\n"), sessionId);
+}
+
+function replayTodoLines(lines: readonly string[], sessionId: string): TodoProjection {
+  const events = lines.map((line, index) => {
+    try {
+      return parseEvent(JSON.parse(line) as unknown, sessionId, index + 1);
+    } catch (error) {
+      if (error instanceof TodoLedgerCorruptError) throw error;
+      throw new TodoLedgerCorruptError(sessionId, "ToDo ledger contains invalid JSON", index + 1);
+    }
+  });
   const eventIds = new Set<string>();
   const items: TodoItemProjection[] = [];
   const byId = new Map<string, TodoItemProjection>();
