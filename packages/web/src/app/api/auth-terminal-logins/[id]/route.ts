@@ -24,9 +24,12 @@ export async function DELETE(_request: Request, context: RouteContext) {
   const { id } = await context.params;
   try {
     return NextResponse.json(
-      await spurRequestJson<{ stopped: string }>(`/auth-terminal-logins/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-      }),
+      await spurRequestJson<{ stopped: string }>(
+        `/auth-terminal-logins/${encodeURIComponent(id)}`,
+        {
+          method: "DELETE",
+        },
+      ),
     );
   } catch (error) {
     return spurErrorResponse(error, "Failed to stop terminal sign-in");
