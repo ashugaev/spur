@@ -175,6 +175,28 @@ describe("AuthTerminalDialog", () => {
     );
   });
 
+  it("stops the terminal a restart creates when Close lands while it is in flight", async () => {
+    reply("POST /api/auth-terminal-logins", "not_signed_in", "exited");
+    responses[`DELETE /api/auth-terminal-logins/${ID}`] = () => ({ payload: { stopped: ID } });
+    render();
+    const restart = await screen.findByRole("button", { name: "Restart terminal" });
+    let release: () => void = () => undefined;
+    postGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    reply("POST /api/auth-terminal-logins", "running");
+    fireEvent.click(restart);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Close" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    const deletesBefore = calls.filter((call) => call.method === "DELETE").length;
+    release();
+
+    await waitFor(() =>
+      expect(calls.filter((call) => call.method === "DELETE").length).toBe(deletesBefore + 1),
+    );
+  });
+
   it("hides the embedded terminal's own header", async () => {
     reply("POST /api/auth-terminal-logins", "running");
     render();

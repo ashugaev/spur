@@ -144,11 +144,12 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
 
   const closing = stopMutation.isPending;
   const close = () => {
+    // Any start or restart still in flight stops its terminal when it resolves.
+    closedRef.current = true;
     if (terminalId) {
       stopMutation.mutate();
       return;
     }
-    closedRef.current = true;
     onClose();
   };
   useDialogFocus({ panelRef, initialRef: closeRef, onEscape: close, escapeBlocked: closing });
