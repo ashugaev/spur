@@ -6507,11 +6507,12 @@ export class SessionService {
         (entry) => !removeIds.has(entry.id),
       ),
     }));
-    this.protectDurableSpawns();
-    this.rollbackUnlaunchedHandoffCopies();
+    const sessions = listSessions(this.config.dataDir);
+    this.protectDurableSpawns(sessions);
+    this.rollbackUnlaunchedHandoffCopies(sessions);
     queueMicrotask(() => {
       if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverDurableSpawns());
-      if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverHandoffTodo());
+      if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverHandoffTodo(sessions));
     });
     this.resumeSessionDelivery();
   }
@@ -16926,8 +16927,8 @@ export class SessionService {
     }
   }
 
-  private protectDurableSpawns(): void {
-    for (const record of listSessions(this.config.dataDir).sort((a, b) =>
+  private protectDurableSpawns(sessions: readonly SessionRecord[]): void {
+    for (const record of [...sessions].sort((a, b) =>
       (a.spawnReceipt?.acceptedAt ?? a.createdAt).localeCompare(
         b.spawnReceipt?.acceptedAt ?? b.createdAt,
       ),
@@ -25589,8 +25590,8 @@ export class SessionService {
   // finish before boot reconciliation can flip an unlaunched successor to `stopped`, where it would
   // pass for a launched owner. `spawnsInFlight` keeps it off spawns this process is running, and
   // nothing else writes a spawning record's ledger, so no lifecycle lock is needed.
-  private rollbackUnlaunchedHandoffCopies(): void {
-    for (const successor of listSessions(this.config.dataDir)) {
+  private rollbackUnlaunchedHandoffCopies(sessions: readonly SessionRecord[]): void {
+    for (const successor of sessions) {
       // `agentLaunchId` is persisted before the launch prompt can be delivered: a record carrying
       // it may own live work, so it keeps its copies (a restorable stopped session after boot).
       if (
@@ -25613,17 +25614,29 @@ export class SessionService {
     }
   }
 
-  private async recoverHandoffTodo(): Promise<void> {
-    const all = listSessions(this.config.dataDir);
+  // `all` is the session list applyConfig already read; records are re-read under the lock.
+  private async recoverHandoffTodo(
+    all: readonly SessionRecord[] = listSessions(this.config.dataDir),
+  ): Promise<void> {
     const byWorkspace = new Map<string, SessionRecord[]>();
+    // Only a session that some ledger names in `handoffFrom` can be an interrupted handoff's
+    // source: one ledger read per session, no lock or record read for the rest.
+    const referenced = new Set<string>();
     for (const candidate of all) {
       const key = workspaceIdOf(candidate);
       const members = byWorkspace.get(key);
       if (members) members.push(candidate);
       else byWorkspace.set(key, [candidate]);
+      try {
+        for (const item of readTodoIfPresent(this.config.dataDir, candidate.id)?.items ?? []) {
+          if (item.handoffFrom) referenced.add(item.handoffFrom.sessionId);
+        }
+      } catch (error) {
+        if (!(error instanceof TodoLedgerCorruptError)) throw error;
+      }
     }
     for (const source of all) {
-      if (isTerminalSessionStatus(source.status)) continue;
+      if (isTerminalSessionStatus(source.status) || !referenced.has(source.id)) continue;
       try {
         await this.withWorkspaceLifecycleLocks(source.id, async () => {
           const current = readSession(this.config.dataDir, source.id);
