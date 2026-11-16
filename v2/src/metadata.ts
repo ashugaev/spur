@@ -1571,6 +1571,16 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
   const rateLimitClearFence = normalizeRateLimitClearFence(normalizedSession.rateLimitClearFence);
   const claudeStatusOwner = normalizeClaudeStatusOwner(normalizedSession.claudeStatusOwner);
+  const parsedAuth =
+    normalizedSession.auth === undefined
+      ? undefined
+      : authSessionSchema.safeParse(normalizedSession.auth);
+  if (parsedAuth && !parsedAuth.success) {
+    throw new InvalidSessionMetadataError(
+      `Invalid session metadata auth for ${normalizedSession.id}: ${parsedAuth.error.message}`,
+    );
+  }
+  const auth = parsedAuth?.data;
   // Records written before the rename carry the hold as launchUnconfirmedAt;
   // read it once here so an existing hold survives, and write only the new name.
   const legacyUnconfirmed = (normalizedSession as { launchUnconfirmedAt?: unknown })
@@ -1762,7 +1772,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
-    ...(normalizedSession.auth ? { auth: authSessionSchema.parse(normalizedSession.auth) } : {}),
+    ...(auth ? { auth } : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
     ...(normalizedSession.error &&

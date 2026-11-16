@@ -3016,6 +3016,18 @@ describe("listArchivedSessions", () => {
     expect(sessions.map((session) => session.id)).toEqual(["api-1"]);
   });
 
+  it("skips an archived record with malformed auth metadata and keeps the rest", async () => {
+    const dataDir = await newDataDir();
+    archiveRecords(dataDir, ["api-1", "api-2"]);
+    const path = join(dataDir, "sessions-archive", "api", "api-2.json");
+    const record = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    writeFileSync(path, JSON.stringify({ ...record, auth: { sessionId: 7 } }), "utf-8");
+
+    const sessions = listArchivedSessions(dataDir, () => true);
+
+    expect(sessions.map((session) => session.id)).toEqual(["api-1"]);
+  });
+
   it("runs the include predicate before parsing the file", async () => {
     const dataDir = await newDataDir();
     archiveRecords(dataDir, ["api-1", "api-2"]);
