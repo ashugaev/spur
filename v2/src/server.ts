@@ -156,6 +156,7 @@ import {
   type TodoActor,
   type TodoMutationRequest,
   type WriteSnapshotRequest,
+  type SessionLinkFilter,
   type SessionListView,
   type SessionView,
 } from "./types.js";
@@ -172,6 +173,8 @@ import {
   SnapshotCorruptError,
   SnapshotTooLargeError,
   WorkSnapshotRequiredError,
+  parseSnapshotIncludeDone,
+  parseSnapshotListQuery,
 } from "./snapshots.js";
 
 interface JsonError {
@@ -2594,7 +2597,14 @@ export async function startServer(
 
       const snapshotsSessionId = path.match(/^\/sessions\/([^/]+)\/snapshots$/)?.[1];
       if (method === "GET" && snapshotsSessionId) {
-        sendJson(response, 200, service.readSnapshots(decodeURIComponent(snapshotsSessionId)));
+        sendJson(
+          response,
+          200,
+          service.readSnapshots(
+            decodeURIComponent(snapshotsSessionId),
+            parseSnapshotListQuery(url.searchParams),
+          ),
+        );
         return;
       }
       if (method === "POST" && snapshotsSessionId) {
@@ -2627,10 +2637,31 @@ export async function startServer(
         sendJson(
           response,
           200,
-          service.readSnapshot(
+          await service.readSnapshot(
             decodeURIComponent(snapshotVersionMatch[1] ?? ""),
             requested === "latest" ? "latest" : Number(requested),
+            { includeDone: parseSnapshotIncludeDone(url.searchParams) },
           ),
+        );
+        return;
+      }
+
+      if (method === "GET" && path === "/snapshots/latest") {
+        let links: SessionLinkFilter[];
+        try {
+          links = parseSessionLinkFilters(url.searchParams.getAll("link"));
+        } catch (parseError) {
+          throw new InvalidSnapshotRequestError(
+            parseError instanceof Error ? parseError.message : "Invalid link",
+          );
+        }
+        if (links.length === 0) throw new InvalidSnapshotRequestError("link is required");
+        sendJson(
+          response,
+          200,
+          await service.latestSnapshotsByLink(links, {
+            includeDone: parseSnapshotIncludeDone(url.searchParams),
+          }),
         );
         return;
       }

@@ -1354,8 +1354,20 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "list_snapshots",
     "GET",
     "/sessions/{sessionId}/snapshots",
-    "List work snapshot metadata, ascending by version.",
-    { response: "WorkSnapshotMeta[]; content omitted.", source: "v2/src/snapshots.ts" },
+    "List work snapshot metadata, ascending by version unless order=desc; works for archived sessions.",
+    {
+      query: [
+        field("order", "string", "asc or desc.", false, "asc"),
+        field("limit", "integer", "Versions to return, 1..100; omitted returns all.", false),
+        field("before", "integer", "Exclusive upper version bound.", false),
+        field("after", "integer", "Exclusive lower version bound.", false),
+      ],
+      examples: [
+        { pathParams: { sessionId: "example-sessionId" }, query: { order: "desc", limit: "5" } },
+      ],
+      response: "WorkSnapshotMeta[]; content omitted; invalid query 400.",
+      source: "v2/src/snapshots.ts",
+    },
   ),
   operation(
     "write_snapshot",
@@ -1384,10 +1396,28 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "get_snapshot",
     "GET",
     "/sessions/{sessionId}/snapshots/{version}",
-    "Read one work snapshot; version is a positive integer or latest.",
+    "Read one work snapshot with freshness; version is a positive integer or latest; works for archived sessions.",
     {
+      query: [field("includeDone", "string", "1 adds the completed ToDo items as done.", false)],
       examples: [{ pathParams: { sessionId: "example-sessionId", version: "latest" } }],
-      response: "WorkSnapshot including content; 404 when none exists.",
+      response:
+        "WorkSnapshotRead: WorkSnapshot with content plus freshness {ageSeconds,activitySince,commitsSince,stale}; 404 when none exists.",
+      source: "v2/src/snapshots.ts",
+    },
+  ),
+  operation(
+    "get_latest_snapshots_by_link",
+    "GET",
+    "/snapshots/latest",
+    "Latest snapshot of every session whose links match, newest first, for live, completed and archived sessions.",
+    {
+      query: [
+        field("link", "string[]", "Repeatable S5 link label or label=URL; all must match.", true),
+        field("includeDone", "string", "1 adds the completed ToDo items as done.", false),
+      ],
+      examples: [{ query: { link: "pr=https://example.com/pull/42" } }],
+      response:
+        "LatestSnapshotEntry[] {sessionId,status,state,snapshot: WorkSnapshotRead}; state is last observed, null when never observed; no link 400.",
       source: "v2/src/snapshots.ts",
     },
   ),

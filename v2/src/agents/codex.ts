@@ -2161,8 +2161,11 @@ function extractCodexQuestionText(payload: Record<string, unknown>): {
  */
 export async function readCodexTranscriptEntries(
   sessionsDir: string,
+  threadId?: string,
 ): Promise<TranscriptEntry[] | null> {
-  const filePath = await findLatestCodexSessionFile({ sessionRootDir: sessionsDir });
+  const filePath = threadId
+    ? await findCodexThreadRolloutFile(sessionsDir, threadId)
+    : await findLatestCodexSessionFile({ sessionRootDir: sessionsDir });
   if (!filePath) {
     return null;
   }
@@ -2372,6 +2375,24 @@ function codexTranscriptFolder(limit: number): CodexLineFolder<CodexTranscriptFo
   };
 }
 
+// A thread's rollout inside one sessions dir; the global dir and other threads' files never match.
+async function findCodexThreadRolloutFile(
+  sessionsDir: string,
+  threadId: string,
+): Promise<string | null> {
+  let best: LatestRolloutFile | null = null;
+  for (const filePath of await collectJsonlFiles(sessionsDir)) {
+    try {
+      const { mtimeMs } = await stat(filePath);
+      if (best && mtimeMs <= best.mtimeMs) continue;
+      if ((await readThreadId(filePath)) === threadId) best = { filePath, mtimeMs };
+    } catch {
+      // Ignore inaccessible files.
+    }
+  }
+  return best?.filePath ?? null;
+}
+
 export interface CodexConversationReaderState {
   filePath: string;
   cursor: CodexJsonlCursor<CodexTranscriptFold>;
@@ -2382,17 +2403,22 @@ export interface CodexConversationReaderState {
  * rollout, equal to the tail of `readCodexTranscriptEntries`. An unchanged file
  * is not read; an append parses only the new bytes; a rewrite, rotation, or
  * a call whose output left the window re-reads the whole file.
+ * With threadId, reads only that thread's rollout in sessionsDir; without, the newest rollout
+ * across sessionsDir and the global dir.
  */
 export async function readCodexConversationTail(
   sessionsDir: string,
   reader: CodexConversationReaderState | undefined,
+  threadId?: string,
 ): Promise<{
   entries: TranscriptEntry[];
   totalEntries: number;
   startIndex: number;
   reader: CodexConversationReaderState;
 } | null> {
-  const filePath = await findLatestCodexSessionFile({ sessionRootDir: sessionsDir });
+  const filePath = threadId
+    ? await findCodexThreadRolloutFile(sessionsDir, threadId)
+    : await findLatestCodexSessionFile({ sessionRootDir: sessionsDir });
   if (!filePath) return null;
   let fingerprint: CodexRolloutFileFingerprint;
   try {
