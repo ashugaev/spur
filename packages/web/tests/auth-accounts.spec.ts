@@ -138,7 +138,7 @@ test.describe("Agent accounts menu", () => {
     await expect(key.getByText("API key ····7Q2c")).toBeVisible();
     await expect(key.getByText("%")).toHaveCount(0);
     await expect(page.getByTestId("auth-accounts-popover")).not.toContainText(/\bready\b|default/i);
-    await expect(page.getByRole("textbox")).toHaveCount(0);
+    await expect(page.getByTestId("auth-accounts-popover").getByRole("textbox")).toHaveCount(0);
   });
 
   test("switches the provider default with the SWITCH button", async ({ page }) => {

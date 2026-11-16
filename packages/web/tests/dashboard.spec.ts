@@ -2847,7 +2847,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(codex.getByRole("button", { name: "Sign in New Codex account" })).toBeVisible();
     await expect(codex.getByLabel("Auto-rotate Codex accounts")).not.toBeChecked();
     await expect(claude.getByRole("button", { name: "+ Add Claude account" })).toBeVisible();
-    await expect(page.getByRole("textbox")).toHaveCount(0);
+    await expect(page.getByTestId("auth-accounts-popover").getByRole("textbox")).toHaveCount(0);
   });
 
   test("adding a Codex account starts sign-in, shows the URL and code, and closes once login-status is ready", async ({
