@@ -107,6 +107,16 @@ export function loginErrorCopy(
         title: "API key rejected",
         cause: "The provider refused the key. Key not saved.",
       };
+    case "code_rejected":
+      return {
+        title: "Sign-in code rejected",
+        cause: login.error ?? "The provider refused the code. Try again.",
+      };
+    case "provider_blocked":
+      return {
+        title: "Sign-in blocked",
+        cause: `${login.error ?? "Provider blocked the sign-in request"}. Continue in terminal.`,
+      };
     case "not_confirmed":
       return {
         title: "Sign-in not confirmed",

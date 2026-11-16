@@ -297,6 +297,8 @@ export type AuthLoginErrorCode =
   | "input_rejected"
   | "expired"
   | "key_rejected"
+  | "code_rejected"
+  | "provider_blocked"
   | "not_confirmed"
   | "identity"
   | "failed";

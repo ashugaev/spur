@@ -48,7 +48,16 @@ const loginSchema = z.object({
   method: z.enum(["oauth", "device", "browser", "api_key", "import"]).optional(),
   stage: z.enum(["authorize", "submitted", "verifying"]).optional(),
   errorCode: z
-    .enum(["input_rejected", "expired", "key_rejected", "not_confirmed", "identity", "failed"])
+    .enum([
+      "input_rejected",
+      "expired",
+      "key_rejected",
+      "code_rejected",
+      "provider_blocked",
+      "not_confirmed",
+      "identity",
+      "failed",
+    ])
     .optional(),
   url: z.string().optional(),
   userCode: z.string().optional(),
