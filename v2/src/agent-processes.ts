@@ -517,13 +517,15 @@ export async function listDetachedSessionOwners(input: {
   const sessionIds = new Set<string>();
   for (const proc of snapshot.processes) {
     if (excluded.has(proc.pid)) continue;
-    const { sessionEnv, launchEnv, toolDirEnv } = await readSessionMarkers(proc.pid);
-    if (sessionEnv.status !== "ok" || !sessionEnv.value) continue;
-    if (launchEnv.status !== "ok" || !launchEnv.value) continue;
-    if (toolDirEnv.status !== "ok" || toolDirEnv.value !== input.toolDirFor(sessionEnv.value)) {
-      continue;
-    }
-    sessionIds.add(sessionEnv.value);
+    const markers = await readSessionMarkers(proc.pid);
+    const id = markers.sessionEnv.status === "ok" ? markers.sessionEnv.value : undefined;
+    if (!id) continue;
+    const expectation: MarkerExpectation = {
+      sessionId: id,
+      launch: { kind: "any-nonempty" },
+      toolDir: input.toolDirFor(id),
+    };
+    if (markersMatch(markers, expectation)) sessionIds.add(id);
   }
   return { status: "ok", sessionIds: [...sessionIds] };
 }

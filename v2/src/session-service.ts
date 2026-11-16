@@ -3961,6 +3961,8 @@ export class SessionService {
   private sessionGcRunning = false;
   private detachedOrphanSweepRunning = false;
   private detachedOrphanScanUnavailable = false;
+  // "<sessionId>:<kind>" owner failures already logged by the periodic sweep.
+  private readonly detachedOrphanLogged = new Set<string>();
   private telegramTopicGcRunning = false;
   private telegramTopicGcClaimAt: number | null = null;
   private backgroundLoopsStarted = false;
@@ -8778,7 +8780,7 @@ export class SessionService {
     }
     this.sessionGcTimer = setInterval(() => {
       void this.runSessionGcSweep();
-      void this.sweepDetachedOrphans("tick");
+      void this.trackBackgroundLoop(this.sweepDetachedOrphans("tick"));
       void this.runDiskBudgetSweep();
       this.runArtifactRetentionSweep();
       void this.runTelegramTopicGcSweep();
@@ -21626,15 +21628,27 @@ export class SessionService {
   // "absent". Never throws; survivors and unreadable inputs are logged only.
   private async terminateDetachedSessionProcesses(
     session: Pick<SessionRecord, "id">,
+    options?: { onlyOnTransition: true },
   ): Promise<DetachedSweepOutcome | null> {
+    // The periodic sweep retries every tick: a failure repeats its event only
+    // after the owner has been clear in between.
+    const shouldLog = (kind: string): boolean => {
+      if (!options) return true;
+      const key = `${session.id}:${kind}`;
+      if (this.detachedOrphanLogged.has(key)) return false;
+      this.detachedOrphanLogged.add(key);
+      return true;
+    };
     const tmuxServer = await readTmuxServerPid();
     if (tmuxServer.status === "unavailable") {
-      this.logEvent("session.agent_process.capture_unavailable", {
-        level: "warn",
-        sessionId: session.id,
-        message: `Session ${session.id}: tmux server pid unreadable; skipped detached process sweep`,
-        details: { reason: "detached_session", cause: "tmux_server_pid_unreadable" },
-      });
+      if (shouldLog("tmux")) {
+        this.logEvent("session.agent_process.capture_unavailable", {
+          level: "warn",
+          sessionId: session.id,
+          message: `Session ${session.id}: tmux server pid unreadable; skipped detached process sweep`,
+          details: { reason: "detached_session", cause: "tmux_server_pid_unreadable" },
+        });
+      }
       return null;
     }
     const outcome = await terminateDetachedSessionProcesses({
@@ -21642,14 +21656,16 @@ export class SessionService {
       sessionToolDir: slotToolDir(this.config.dataDir, session.id),
       tmuxServerPid: tmuxServer.status === "running" ? tmuxServer.pid : null,
     });
+    if (options && outcome.status === "clear") this.clearDetachedOrphanLatch(session.id);
     if (outcome.status === "unavailable") {
+      if (!shouldLog("unavailable")) return outcome;
       this.logEvent("session.agent_process.capture_unavailable", {
         level: "warn",
         sessionId: session.id,
         message: `Session ${session.id}: could not read the process table; skipped detached process sweep`,
         details: { reason: "detached_session" },
       });
-    } else if (outcome.status === "survivors") {
+    } else if (outcome.status === "survivors" && shouldLog("survivors")) {
       this.logEvent("session.agent_process.survivors", {
         level: "error",
         sessionId: session.id,
@@ -21658,6 +21674,12 @@ export class SessionService {
       });
     }
     return outcome;
+  }
+
+  private clearDetachedOrphanLatch(sessionId: string): void {
+    for (const key of this.detachedOrphanLogged) {
+      if (key.startsWith(`${sessionId}:`)) this.detachedOrphanLogged.delete(key);
+    }
   }
 
   private readOwnerRecord(sessionId: string): SessionRecord | null | "unreadable" {
@@ -21679,19 +21701,29 @@ export class SessionService {
     if (this.detachedOrphanSweepRunning || this.isDeliveryStopped()) return;
     this.detachedOrphanSweepRunning = true;
     try {
-      const tmuxServer = await readTmuxServerPid();
-      const owners =
-        tmuxServer.status === "unavailable"
-          ? ({ status: "unavailable" } as const)
-          : await listDetachedSessionOwners({
-              toolDirFor: (id) => slotToolDir(this.config.dataDir, id),
-              tmuxServerPid: tmuxServer.status === "running" ? tmuxServer.pid : null,
-            });
+      let owners: Awaited<ReturnType<typeof listDetachedSessionOwners>>;
+      try {
+        const tmuxServer = await readTmuxServerPid();
+        owners =
+          tmuxServer.status === "unavailable"
+            ? { status: "unavailable" }
+            : await listDetachedSessionOwners({
+                toolDirFor: (id) => slotToolDir(this.config.dataDir, id),
+                tmuxServerPid: tmuxServer.status === "running" ? tmuxServer.pid : null,
+              });
+      } catch {
+        owners = { status: "unavailable" };
+      }
       if (owners.status === "unavailable") {
         this.noteDetachedOrphanScanUnavailable();
         return;
       }
       this.detachedOrphanScanUnavailable = false;
+      for (const key of this.detachedOrphanLogged) {
+        if (!owners.sessionIds.includes(key.slice(0, key.lastIndexOf(":")))) {
+          this.detachedOrphanLogged.delete(key);
+        }
+      }
       for (const sessionId of owners.sessionIds) {
         if (this.isDeliveryStopped()) return;
         const prefilter = this.readOwnerRecord(sessionId);
@@ -21702,34 +21734,57 @@ export class SessionService {
         ) {
           continue;
         }
-        await this.withSessionLifecycleLocks([sessionId], async () => {
-          const record = this.readOwnerRecord(sessionId);
-          if (
-            !record ||
-            record === "unreadable" ||
-            !isTerminalSessionStatus(record.status) ||
-            this.reopensInFlight.has(sessionId) ||
-            this.isInRestoreWarmup(sessionId) ||
-            process.env.SPUR_SESSION === sessionId
-          ) {
-            return;
-          }
-          const outcome = await this.terminateDetachedSessionProcesses({ id: sessionId });
-          if (outcome?.status === "clear" && outcome.matched > 0) {
-            this.logEvent("session.agent_process.detached_reaped", {
-              level: "info",
+        try {
+          await this.reapDetachedOrphanOwner(sessionId, context);
+        } catch (error) {
+          if (!this.detachedOrphanLogged.has(`${sessionId}:error`)) {
+            this.detachedOrphanLogged.add(`${sessionId}:error`);
+            this.logEvent("session.agent_process.capture_unavailable", {
+              level: "warn",
               sessionId,
-              message: `Session ${sessionId}: reaped ${outcome.matched} orphaned detached process(es)`,
-              details: { sessionId, context, matched: outcome.matched },
+              message: `Session ${sessionId}: detached orphan sweep failed`,
+              details: {
+                reason: "detached_orphan_sweep",
+                error: error instanceof Error ? error.message : String(error),
+              },
             });
           }
-        });
+        }
       }
-    } catch {
-      this.noteDetachedOrphanScanUnavailable();
     } finally {
       this.detachedOrphanSweepRunning = false;
     }
+  }
+
+  private async reapDetachedOrphanOwner(
+    sessionId: string,
+    context: "boot" | "tick",
+  ): Promise<void> {
+    await this.withSessionLifecycleLocks([sessionId], async () => {
+      const record = this.readOwnerRecord(sessionId);
+      if (
+        !record ||
+        record === "unreadable" ||
+        !isTerminalSessionStatus(record.status) ||
+        this.reopensInFlight.has(sessionId) ||
+        this.isInRestoreWarmup(sessionId) ||
+        process.env.SPUR_SESSION === sessionId
+      ) {
+        return;
+      }
+      const outcome = await this.terminateDetachedSessionProcesses(
+        { id: sessionId },
+        { onlyOnTransition: true },
+      );
+      if (outcome?.status === "clear" && outcome.matched > 0) {
+        this.logEvent("session.agent_process.detached_reaped", {
+          level: "info",
+          sessionId,
+          message: `Session ${sessionId}: reaped ${outcome.matched} orphaned detached process(es)`,
+          details: { sessionId, context, matched: outcome.matched },
+        });
+      }
+    });
   }
 
   private noteDetachedOrphanScanUnavailable(): void {
