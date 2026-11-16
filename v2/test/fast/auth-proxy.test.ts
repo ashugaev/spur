@@ -143,8 +143,11 @@ describe("authorization proxy private control", () => {
       error: "Rejected",
     };
     await expect(proxy!.loginStatus("a")).resolves.toEqual(next);
-    for (const errorCode of ["code_rejected", "provider_blocked"]) {
-      next = { accountId: "a", status: "failed", errorCode, error: "Provider blocked (HTTP 403)" };
+    for (const [errorCode, error] of [
+      ["code_rejected", "Provider rejected the sign-in code (HTTP 400)"],
+      ["provider_blocked", "Provider blocked the sign-in request (HTTP 403)"],
+    ] as const) {
+      next = { accountId: "a", status: "failed", errorCode, error };
       await expect(proxy!.loginStatus("a")).resolves.toEqual(next);
     }
     next = { accountId: "a", status: "busy" };

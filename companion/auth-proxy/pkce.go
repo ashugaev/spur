@@ -214,12 +214,12 @@ func (f *claudeFlow) exchange(ctx context.Context, client *http.Client, code, st
 		return nil, exchangeTransportError(ctx)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, exchangeStatusError(resp.StatusCode)
+	}
 	raw, err := readOAuthBody(resp)
 	if err != nil {
 		return nil, errors.New("token exchange response unreadable")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, exchangeStatusError(resp.StatusCode)
 	}
 	var tokens claudeTokens
 	if err = json.Unmarshal(raw, &tokens); err != nil || tokens.AccessToken == "" {
@@ -394,12 +394,12 @@ func (f *codexFlow) exchange(ctx context.Context, client *http.Client, code stri
 		return nil, exchangeTransportError(ctx)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, exchangeStatusError(resp.StatusCode)
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, errors.New("token exchange response unreadable")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, exchangeStatusError(resp.StatusCode)
 	}
 	var tokens codexTokens
 	if err = json.Unmarshal(raw, &tokens); err != nil || tokens.AccessToken == "" {

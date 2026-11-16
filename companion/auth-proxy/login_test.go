@@ -998,3 +998,40 @@ func TestCancelDismissesFinishedFailedAttempt(t *testing.T) {
 		t.Fatalf("after cancel: %+v", got)
 	}
 }
+
+type brokenBodyTransport struct{ status int }
+
+type erroringBody struct{}
+
+func (erroringBody) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+func (erroringBody) Close() error             { return nil }
+
+func (b brokenBodyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: b.status, Header: http.Header{}, Body: erroringBody{}, Request: r}, nil
+}
+
+// A non-200 is classified by status before the body is read, so an unreadable error body still reports its class.
+func TestPKCEExchangeStatusCheckedBeforeBody(t *testing.T) {
+	for _, p := range []provider{claude, codex} {
+		var flow browserFlow
+		var err error
+		if p == claude {
+			flow, err = newClaudeFlow()
+		} else {
+			flow, err = newCodexFlow()
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		client := oauthHTTPClient(brokenBodyTransport{http.StatusForbidden})
+		if p == claude {
+			_, err = flow.(*claudeFlow).exchange(context.Background(), client, "CODE", flow.(*claudeFlow).state)
+		} else {
+			_, err = flow.(*codexFlow).exchange(context.Background(), client, "CODE")
+		}
+		code, msg := failureOf(err)
+		if code != errProviderBlocked || msg != "Provider blocked the sign-in request (HTTP 403)" {
+			t.Fatalf("%s: %q %q", p, code, msg)
+		}
+	}
+}
