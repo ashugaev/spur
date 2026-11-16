@@ -324,6 +324,53 @@ describe("AuthAccountsMenu", () => {
       expect(screen.queryByTestId("auth-accounts-popover")).toBeTruthy();
     });
 
+    const leaveForBody = () =>
+      fireEvent.focusOut(screen.getByTestId("auth-accounts-popover"), {
+        relatedTarget: document.body,
+      });
+    const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    it("releases the blur guard after trash then Cancel", async () => {
+      const claude = await openMenu();
+      claude.getByRole("button", { name: "Remove home@x.com" }).focus();
+      fireEvent.click(claude.getByRole("button", { name: "Remove home@x.com" }));
+      fireEvent.click(claude.getByRole("button", { name: "Cancel" }));
+      await settle(20);
+
+      leaveForBody();
+
+      await waitFor(() => expect(screen.queryByTestId("auth-accounts-popover")).toBeNull());
+    });
+
+    it("releases the blur guard after a successful remove and its refetch", async () => {
+      const claude = await openMenu();
+      fireEvent.click(claude.getByRole("button", { name: "Remove home@x.com" }));
+      fireEvent.click(claude.getByRole("button", { name: "Remove" }));
+      await waitFor(() => expect(screen.queryByTestId("auth-account-claude-home")).toBeNull());
+      await settle(150);
+
+      leaveForBody();
+
+      await waitFor(() => expect(screen.queryByTestId("auth-accounts-popover")).toBeNull());
+    });
+
+    it("releases the blur guard when the refetch after a remove fails", async () => {
+      const claude = await openMenu();
+      routes["GET /api/auth-accounts"] = () => ({ status: 502, payload: { error: "down" } });
+      fireEvent.click(claude.getByRole("button", { name: "Remove home@x.com" }));
+      fireEvent.click(claude.getByRole("button", { name: "Remove" }));
+      await waitFor(() =>
+        expect(
+          calls.filter((call) => call.method === "GET" && call.url === "/api/auth-accounts"),
+        ).toHaveLength(2),
+      );
+      await settle(150);
+
+      leaveForBody();
+
+      await waitFor(() => expect(screen.queryByTestId("auth-accounts-popover")).toBeNull());
+    });
+
     it("moves focus to the Add button when the last row is removed", async () => {
       const claude = await openMenu();
       fireEvent.click(claude.getByRole("button", { name: "Remove API key ····7Q2c" }));
