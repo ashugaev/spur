@@ -23753,6 +23753,8 @@ describe("SessionService", () => {
         { id: "acc-2", label: "New Claude account", authenticated: false },
       ]);
       expect(batched?.claudeAccounts).toEqual(single.claudeAccounts);
+      // Session list and detail paths never start provider usage reads.
+      expect(authProxyGetUsageMock).not.toHaveBeenCalled();
       service.dispose();
     });
 

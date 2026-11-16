@@ -246,8 +246,10 @@ func (c *control) handle(ctx context.Context, req controlRequest) {
 		}
 		// Provider HTTP runs off the serve loop so other control traffic is not stalled.
 		go func() {
-			defer c.usageBusy.Store(false)
-			reply(c, req.ID, c.readUsage(ctx, p.AccountIDs), nil)
+			result := c.readUsage(ctx, p.AccountIDs)
+			// Free the slot before replying: the daemon sends its next chunk as soon as it reads this reply.
+			c.usageBusy.Store(false)
+			reply(c, req.ID, result, nil)
 		}()
 	case "registerSession":
 		var p registerParams

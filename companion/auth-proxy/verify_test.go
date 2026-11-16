@@ -311,3 +311,16 @@ func TestGetUsageBodyReadAfterCancel(t *testing.T) {
 		t.Fatalf("expired: %+v", got)
 	}
 }
+
+// TestGetUsageSequentialChunks sends the next getUsage the moment the previous reply is read: the
+// busy flag is already free, so none is rejected as overlapping.
+func TestGetUsageSequentialChunks(t *testing.T) {
+	d, fake := signedInUsageDriver(t)
+	fake.arm(usageReply(200, nil, `{}`))
+	for i := range 40 {
+		result, response := d.usage("oauth-claude")
+		if !response.OK || len(result.Usage) != 1 || result.Usage[0].Status != "ok" {
+			t.Fatalf("chunk %d: %+v %+v", i, response.Error, result)
+		}
+	}
+}

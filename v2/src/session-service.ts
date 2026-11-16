@@ -4424,6 +4424,11 @@ export class SessionService {
       dataDir: this.config.dataDir,
       fetchUsage: (accountIds) => this.authProxy.getUsage(accountIds),
       now: () => Date.now(),
+      onSaveError: (error) =>
+        this.logEvent("auth.quota.cache_error", {
+          level: "warn",
+          message: `Account quota cache failed: ${error instanceof Error ? error.message : String(error)}`,
+        }),
     });
     this.authAlerts = new AuthAlerts({
       dataDir: this.config.dataDir,
@@ -25287,12 +25292,17 @@ export class SessionService {
 
   /** Legacy Claude shape: the display name rides as label; identity and quota stay out. */
   async listClaudeAccounts() {
-    return (await this.listAuthorizationAccounts("claude")).accounts.map(
-      ({ displayName, identity: _identity, quota: _quota, ...account }) => ({
-        ...account,
-        label: displayName,
-      }),
-    );
+    return (await this.listAuthorizationAccounts("claude")).accounts.map((account) => ({
+      id: account.id,
+      provider: account.provider,
+      label: account.displayName,
+      createdAt: account.createdAt,
+      authenticated: account.authenticated,
+      status: account.status,
+      limited: account.limited,
+      ...(account.cooldownUntil ? { cooldownUntil: account.cooldownUntil } : {}),
+      ...(account.credential ? { credential: account.credential } : {}),
+    }));
   }
 
   /** A new account has no identity yet, so its label is the placeholder display name. */

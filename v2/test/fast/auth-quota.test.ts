@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -40,10 +40,12 @@ describe("AuthQuota", () => {
   let calls: string[][];
   let answer: (ids: string[]) => Promise<UsageEntry[]>;
 
+  const onSaveError = vi.fn();
   const create = (): AuthQuota =>
     new AuthQuota({
       dataDir,
       now: () => clock,
+      onSaveError,
       fetchUsage: (ids) => {
         calls.push(ids);
         return answer(ids);
@@ -271,6 +273,22 @@ describe("AuthQuota", () => {
     quota.read([{ ...claude("a"), status: "pending" }]);
     quota.read([claude("a")]);
     await vi.waitFor(() => expect(calls).toHaveLength(2));
+  });
+
+  it("survives a failing cache write: reports once, keeps the hold in memory and never throws", async () => {
+    // A directory where the cache file belongs makes every write fail.
+    mkdirSync(join(dataDir, "auth-quota.json"));
+    const quota = create();
+    expect(() => quota.read([claude("a")])).not.toThrow();
+    await settle();
+    await vi.waitFor(() => expect(onSaveError).toHaveBeenCalledTimes(1));
+    expect(quota.read([claude("a")]).get("a")?.leftPercent).toBe(60);
+    clock += 60_000;
+    quota.read([claude("a")]);
+    expect(calls).toHaveLength(1);
+    // A prune write that fails does not throw into the read either.
+    expect(() => quota.read([])).not.toThrow();
+    expect(onSaveError).toHaveBeenCalledTimes(1);
   });
 
   it("returns no quota for zero windows", () => {

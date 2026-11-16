@@ -88,12 +88,15 @@ function parseBody(provider: "claude" | "codex", body: string): QuotaWindow[] | 
 export class AuthQuota {
   private entries: Record<string, Entry> | undefined;
   private refreshing = false;
+  private saveFailing = false;
 
   constructor(
     private readonly options: {
       dataDir: string;
       fetchUsage: (accountIds: string[]) => Promise<UsageEntry[]>;
       now: () => number;
+      /** Called once per run of failed writes; the in-memory entries keep holding meanwhile. */
+      onSaveError: (error: unknown) => void;
     },
   ) {}
 
@@ -112,14 +115,23 @@ export class AuthQuota {
     return this.entries;
   }
 
+  /** Best effort: a failed write never fails a read or a refresh, and is reported once per run of failures. */
   private save(): void {
-    mkdirSync(this.options.dataDir, { recursive: true });
-    const temporary = `${this.path}.tmp.${process.pid}.${randomUUID()}`;
-    writeFileSync(temporary, `${JSON.stringify({ schema: 1, entries: this.load() }, null, 2)}\n`, {
-      mode: 0o600,
-    });
-    renameSync(temporary, this.path);
-    chmodSync(this.path, 0o600);
+    try {
+      mkdirSync(this.options.dataDir, { recursive: true });
+      const temporary = `${this.path}.tmp.${process.pid}.${randomUUID()}`;
+      writeFileSync(
+        temporary,
+        `${JSON.stringify({ schema: 1, entries: this.load() }, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      renameSync(temporary, this.path);
+      chmodSync(this.path, 0o600);
+      this.saveFailing = false;
+    } catch (error) {
+      if (!this.saveFailing) this.options.onSaveError(error);
+      this.saveFailing = true;
+    }
   }
 
   /** Cached quota per account id. accounts must be every store account, not a provider subset. */
@@ -144,9 +156,11 @@ export class AuthQuota {
     });
     if (due.length > 0 && !this.refreshing) {
       this.refreshing = true;
-      void this.refresh(due).finally(() => {
-        this.refreshing = false;
-      });
+      void this.refresh(due)
+        .catch((error: unknown) => this.options.onSaveError(error))
+        .finally(() => {
+          this.refreshing = false;
+        });
     }
 
     const served = new Map<string, AuthQuotaSummary>();
