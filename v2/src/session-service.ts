@@ -25572,10 +25572,10 @@ export class SessionService {
     }
   }
 
-  // Synchronous on purpose: it must finish before boot reconciliation can flip an unlaunched
-  // successor to `stopped`, where it would pass for a launched owner. No spawn of this process
-  // owns a session outside `spawnsInFlight`, and nothing else writes a spawning record's ledger,
-  // so no lifecycle lock is needed.
+  // Runs from applyConfig: at start and on every config reload. Synchronous on purpose: it must
+  // finish before boot reconciliation can flip an unlaunched successor to `stopped`, where it would
+  // pass for a launched owner. `spawnsInFlight` keeps it off spawns this process is running, and
+  // nothing else writes a spawning record's ledger, so no lifecycle lock is needed.
   private rollbackUnlaunchedHandoffCopies(): void {
     for (const successor of listSessions(this.config.dataDir)) {
       if (successor.status !== "spawning" || this.spawnsInFlight.has(successor.id)) continue;
