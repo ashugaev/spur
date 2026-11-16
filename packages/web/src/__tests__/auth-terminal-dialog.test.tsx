@@ -136,7 +136,9 @@ describe("AuthTerminalDialog", () => {
     expect(screen.queryByRole("button", { name: "Continue in terminal" })).toBeNull();
   });
 
-  it("reaches the waiting state and polls the status under StrictMode", async () => {
+  // jsdom does not reproduce the browser stranding (the old mutation start passes this too);
+  // this guards the replayed mount effect against a second POST and a missing status poll.
+  it("posts once, reaches the waiting state and polls the status under StrictMode", async () => {
     reply("POST /api/auth-terminal-logins", "running");
     reply(`GET /api/auth-terminal-logins/${ID}`, "running");
     render({ accountId: "claude-work" }, true);
@@ -152,6 +154,7 @@ describe("AuthTerminalDialog", () => {
         ),
       { timeout: 5_000 },
     );
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
   }, 10_000);
 
   it("stops a terminal whose start resolves after the dialog was closed", async () => {
