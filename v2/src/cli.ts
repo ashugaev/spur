@@ -4205,12 +4205,8 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Read the archive complete keeps: show, get a file, or find by link.");
   const closeoutPath = (sessionId: string): string =>
     `/sessions/${encodeURIComponent(sessionId)}/closeout`;
-  const closeoutVersionQuery = (versionArg: string | undefined): string => {
-    if (versionArg === undefined) return "";
-    const version = versionArg.trim();
-    if (!/^[1-9][0-9]*$/.test(version)) throw new Error("version must be a positive integer");
-    return `?version=${version}`;
-  };
+  const closeoutVersionQuery = (versionArg: string | undefined): string =>
+    versionArg === undefined ? "" : `?version=${encodeURIComponent(versionArg.trim())}`;
   const closeoutLines = (manifest: CloseoutManifestView): string[] => [
     `version ${manifest.version} of ${manifest.versions.join(",")} completed ${manifest.completedAt} snapshot ${manifest.snapshotVersion ?? "-"} head ${manifest.headSha ?? "-"}`,
     ...(manifest.error ? [`error ${manifest.error}`] : []),

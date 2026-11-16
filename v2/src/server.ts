@@ -165,7 +165,7 @@ import {
   TodoOpenWorkError,
   TodoTransitionConflictError,
 } from "./todo.js";
-import { CloseoutCorruptError } from "./closeout-archive.js";
+import { CLOSEOUT_VERSION, CloseoutCorruptError } from "./closeout-archive.js";
 import { parseArtifactRelativePath } from "./session-artifacts.js";
 import {
   InvalidSnapshotRequestError,
@@ -523,7 +523,7 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
 function parseCloseoutVersion(params: URLSearchParams): number | undefined | null {
   const raw = params.get("version");
   if (raw === null) return undefined;
-  return /^[1-9][0-9]*$/.test(raw) ? Number(raw) : null;
+  return CLOSEOUT_VERSION.test(raw) ? Number(raw) : null;
 }
 
 function sendError(response: ServerResponse, statusCode: number, message: string): void {

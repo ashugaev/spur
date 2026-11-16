@@ -34,7 +34,7 @@ export const CLOSEOUT_WALK_MAX_ENTRIES = 20000;
 const MANIFEST_FILE = "manifest.json";
 const FILES_DIR = "files";
 const TMP_PREFIX = ".tmp-";
-const VERSION_DIR = /^[1-9][0-9]*$/;
+export const CLOSEOUT_VERSION = /^[1-9][0-9]*$/;
 const GLOB_MAGIC = /[*?[\]{}]/;
 const DAY_MS = 86_400_000;
 
@@ -235,7 +235,7 @@ function fileSizeHint(fullPath: string): number {
 export function listCloseoutVersions(dir: string): number[] {
   try {
     return readdirSync(dir)
-      .filter((name) => VERSION_DIR.test(name))
+      .filter((name) => CLOSEOUT_VERSION.test(name))
       .map(Number)
       .sort((a, b) => a - b);
   } catch {

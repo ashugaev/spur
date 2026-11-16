@@ -110,9 +110,6 @@ describe("closeout CLI", { timeout: 30_000 }, () => {
       "/sessions/api-1/closeout/files/work/a.txt?version=1",
       "/tmp/spur.yaml",
     );
-    await expect(run(["closeout", "show", "api-1", "0"])).rejects.toThrow(
-      "version must be a positive integer",
-    );
   });
 
   it("get encodes segments and writes --out or stdout", async () => {
