@@ -4792,6 +4792,68 @@ describe("SessionService", () => {
           service.dispose();
         });
 
+        describe("codex freshness", () => {
+          // Only a read pinned to the owning thread sees the quiet rollout; an unpinned read
+          // finds the newer rollout of an unrelated session.
+          const ownRollout = {
+            entries: [userEntry("go", -2)],
+            totalEntries: 1,
+            startIndex: 0,
+            reader: { filePath: "/own.jsonl", cursor: { mtimeMs: at(-1) } },
+          };
+          const unrelatedRollout = {
+            entries: [userEntry("other", 30), toolEntry(40)],
+            totalEntries: 2,
+            startIndex: 0,
+            reader: { filePath: "/other.jsonl", cursor: { mtimeMs: at(41) } },
+          };
+          const pinTail = () =>
+            readCodexConversationTailMock.mockImplementation(
+              async (_dir: string, _reader: unknown, threadId?: string) =>
+                threadId === "thread-own" ? ownRollout : unrelatedRollout,
+            );
+
+          it.each(["live", "archived"] as const)(
+            "ignores an unrelated newer rollout for a %s session",
+            async (location) => {
+              const { read, service, session, sessions } = await readSetup({
+                agent: "codex",
+                agentSessionId: "thread-own",
+              });
+              if (location === "archived") {
+                const archived = join(
+                  TEST_DATA_DIR,
+                  "sessions-archive",
+                  session.project,
+                  session.id,
+                );
+                mkdirSync(dirname(archived), { recursive: true });
+                renameSync(join(TEST_DATA_DIR, "sessions", session.id), archived);
+                sessions.delete(session.id);
+                readArchivedSessionMock.mockReturnValue(session);
+              }
+              pinTail();
+
+              expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+              expect(readCodexConversationTailMock).toHaveBeenCalledWith(
+                expect.stringContaining(session.id),
+                undefined,
+                "thread-own",
+              );
+              service.dispose();
+            },
+          );
+
+          it("reads no rollout when the session has no codex thread id", async () => {
+            const { read, service } = await readSetup({ agent: "codex" });
+            pinTail();
+
+            expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+            expect(readCodexConversationTailMock).not.toHaveBeenCalled();
+            service.dispose();
+          });
+        });
+
         it("uses the Cursor transcript write time, not record or dashboard activity", async () => {
           const { read, service, session, sessions } = await readSetup({
             agent: "cursor",

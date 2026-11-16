@@ -125,6 +125,7 @@ import {
   findLatestCodexSessionFile,
   readCodexConversationTail,
   readCodexRolloutState,
+  readCodexTranscriptEntries,
   type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
@@ -20665,7 +20666,13 @@ export class SessionService {
         const result = run(slice.entries, slice.startIndex === 0);
         if (result.complete) return result.workMs;
       }
-      fullEntries ??= this.readFullConversationEntries(session);
+      fullEntries ??=
+        session.agent === "codex" && session.agentSessionId
+          ? readCodexTranscriptEntries(
+              this.codexSessionsDir(session.id),
+              session.agentSessionId,
+            ).then((entries) => entries ?? [])
+          : this.readFullConversationEntries(session);
       return run(await fullEntries, true).workMs;
     };
     let firstWorkMs = cachedFirstMs;
@@ -20692,27 +20699,29 @@ export class SessionService {
     session: SessionRecord,
     location: SnapshotLocation,
   ): Promise<{ entries: TranscriptEntry[]; startIndex: number; mtimeMs: number } | null> {
-    if (location === "live") {
-      const claude = session.agent === "claude";
-      const tail = await (claude
-        ? this.readConversationSerialized(session)
-        : this.readCodexConversationSerialized(session));
-      // The serialized read leaves its reader in the map; the reader carries the file's write time.
-      const mtimeMs = claude
-        ? this.conversationReaders.get(session.id)?.lastMtimeMs
-        : this.codexConversationReaders.get(session.id)?.cursor.mtimeMs;
-      return tail && mtimeMs !== undefined ? { ...tail, mtimeMs } : null;
-    }
-    if (session.agent === "claude") {
-      const result = await readClaudeConversationTail(
-        session.worktreePath,
-        undefined,
+    if (session.agent === "codex") {
+      // Pinned to the owning thread's rollout: the shared reader also follows the newest
+      // rollout in the global dir. It reuses a live cursor but never stores one.
+      if (!session.agentSessionId) return null;
+      const result = await readCodexConversationTail(
+        this.codexSessionsDir(session.id),
+        location === "live" ? this.codexConversationReaders.get(session.id) : undefined,
         session.agentSessionId,
       );
-      return result && { ...result, mtimeMs: result.reader.lastMtimeMs };
+      return result && { ...result, mtimeMs: result.reader.cursor.mtimeMs };
     }
-    const result = await readCodexConversationTail(this.codexSessionsDir(session.id), undefined);
-    return result && { ...result, mtimeMs: result.reader.cursor.mtimeMs };
+    if (location === "live") {
+      const tail = await this.readConversationSerialized(session);
+      // The serialized read leaves its reader in the map; the reader carries the file's write time.
+      const mtimeMs = this.conversationReaders.get(session.id)?.lastMtimeMs;
+      return tail && mtimeMs !== undefined ? { ...tail, mtimeMs } : null;
+    }
+    const result = await readClaudeConversationTail(
+      session.worktreePath,
+      undefined,
+      session.agentSessionId,
+    );
+    return result && { ...result, mtimeMs: result.reader.lastMtimeMs };
   }
 
   private async untimedTranscriptActivityMs(session: SessionRecord): Promise<number | null> {
