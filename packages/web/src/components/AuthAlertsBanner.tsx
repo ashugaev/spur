@@ -16,7 +16,7 @@ function flowTarget(alert: AuthAlert): SignInTarget {
   return alert.kind === "managed"
     ? {
         kind: "account",
-        account: { id: alert.accountId, provider: alert.provider, label: alert.label },
+        account: { id: alert.accountId, provider: alert.provider, displayName: alert.label },
       }
     : { kind: "host", provider: alert.provider };
 }

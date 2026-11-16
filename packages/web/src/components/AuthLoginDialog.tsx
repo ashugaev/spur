@@ -17,13 +17,14 @@ import { TerminalIconButton } from "@/components/TerminalIconButton";
 import { INPUT_CLASS, PRIMARY_BUTTON_CLASS, SECONDARY_BUTTON_CLASS } from "@/design/classes";
 import { useDialogFocus } from "@/hooks/useDialogFocus";
 import {
-  authAccountName,
+  accountIdentityLine,
+  authProviderName,
   invalidateAuthQueries,
   isAuthLogin,
   postAuthJson,
+  useAuthAccounts,
 } from "@/lib/auth-accounts";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
-import { getAgentDisplayName } from "@/lib/agents";
 import type { AuthAccountSummary, AuthLogin, AuthProvider } from "@/lib/types";
 
 const LOGIN_POLL_INTERVAL_MS = 3_000;
@@ -81,14 +82,25 @@ type View =
 type Begin = { method: SignInMethod };
 type Dismissal = "close" | "terminal" | "back";
 
+/** The account a sign-in targets; identity fields are present once it has signed in. */
+export type SignInAccount = Pick<AuthAccountSummary, "id" | "provider" | "displayName"> &
+  Partial<Pick<AuthAccountSummary, "identity" | "credential" | "createdAt">>;
+
 interface AuthLoginDialogProps {
-  account: Pick<AuthAccountSummary, "id" | "label" | "provider">;
+  account: SignInAccount;
+  /** True for an account added from this flow: the title reads "Add <Provider> account". */
+  isNew?: boolean;
   onClose: () => void;
   /** Called once the in-UI attempt is cancelled; the caller opens the terminal. */
   onContinueInTerminal: () => void;
 }
 
-export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: AuthLoginDialogProps) {
+export function AuthLoginDialog({
+  account,
+  isNew = false,
+  onClose,
+  onContinueInTerminal,
+}: AuthLoginDialogProps) {
   const queryClient = useQueryClient();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -99,7 +111,6 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
   // Each attempt reads its own status cache, so a settled attempt never leaks into the next.
   const [attempt, setAttempt] = useState(0);
   const [pasted, setPasted] = useState("");
-  const [label, setLabel] = useState(account.label ?? "");
   const [apiKey, setApiKey] = useState("");
   // The submitted key lives here only until the request starts, never in mutation variables.
   const sentKeyRef = useRef("");
@@ -116,7 +127,7 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
           ? await postAuthJson(
               `${accountPath}/api-key`,
               "POST",
-              { label: label.trim(), apiKey: sentKey },
+              { apiKey: sentKey },
               "Failed to save API key",
             )
           : await postAuthJson(
@@ -154,6 +165,8 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
       query.state.data?.status === "pending" ? LOGIN_POLL_INTERVAL_MS : false,
   });
   const login = attempt > 0 ? statusQuery.data : undefined;
+  // Read only once signed in: the verified line names the identity the sign-in produced.
+  const accountsQuery = useAuthAccounts(login?.status === "ready");
 
   const inputMutation = useMutation<unknown, Error, string>({
     mutationFn: (input) =>
@@ -241,11 +254,11 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
     begin({ method: "api_key" });
   };
 
-  const name = getAgentDisplayName(account.provider);
-  const title =
-    method === "api_key" && view !== "picker"
-      ? `Add ${name} API key`
-      : `Sign in ${name} · ${authAccountName(account)}`;
+  const name = authProviderName(account.provider);
+  const title = isNew ? `Add ${name} account` : `Sign in ${name} · ${account.displayName}`;
+  // The identity arrives with the refetch after the verified sign-in.
+  const signedInAccount = accountsQuery.data?.accounts.find((entry) => entry.id === account.id);
+  const signedInLine = signedInAccount?.identity ? accountIdentityLine(signedInAccount) : null;
   const actionError = cancelMutation.error ?? inputMutation.error;
   const errorCopy = loginErrorCopy(login, method, beginMutation.error?.message ?? null);
   const url = login?.url;
@@ -382,19 +395,9 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
           {view === "api-key" ? (
             <>
               <label className="flex flex-col gap-1">
-                <span className="uppercase tracking-[0.08em]">Label (required)</span>
-                <input
-                  ref={label.trim() ? undefined : inputRef}
-                  className={`min-w-0 ${INPUT_CLASS}`}
-                  type="text"
-                  value={label}
-                  onChange={(event) => setLabel(event.target.value)}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
                 <span className="uppercase tracking-[0.08em]">API key</span>
                 <input
-                  ref={label.trim() ? inputRef : undefined}
+                  ref={inputRef}
                   autoComplete="off"
                   className={`min-w-0 ${INPUT_CLASS}`}
                   spellCheck={false}
@@ -403,7 +406,7 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
                   onChange={(event) => setApiKey(event.target.value)}
                 />
               </label>
-              <span>Shown as API key in Accounts. Key never displayed again.</span>
+              <span>Shown by its last 4 characters in Accounts. Key never displayed again.</span>
             </>
           ) : null}
 
@@ -502,7 +505,8 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
                 className="flex items-center gap-2 font-bold text-[var(--color-status-ready)]"
                 role="status"
               >
-                <span aria-hidden="true">✓</span>Signed in · verified
+                <span aria-hidden="true">✓</span>
+                {signedInLine ? `Signed in as ${signedInLine}` : "Signed in"}
               </div>
               <Checklist
                 items={[
@@ -549,7 +553,7 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
               <button
                 key="save"
                 className={PRIMARY_BUTTON_CLASS}
-                disabled={busy || !label.trim() || !apiKey.trim()}
+                disabled={busy || !apiKey.trim()}
                 type="button"
                 onClick={submitKey}
               >

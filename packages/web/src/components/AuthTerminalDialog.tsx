@@ -2,14 +2,22 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { SignInAccount } from "@/components/AuthLoginDialog";
 import { BusyContent } from "@/components/BusyContent";
+import { CheckIcon } from "@/components/icons/CheckIcon";
 import { DirectTerminal } from "@/components/DirectTerminal";
 import { WaitLine } from "@/components/AuthLoginParts";
 import { IconCloseButton } from "@/components/IconCloseButton";
 import { PRIMARY_BUTTON_CLASS, SECONDARY_BUTTON_CLASS } from "@/design/classes";
 import { useDialogFocus } from "@/hooks/useDialogFocus";
-import { getAgentDisplayName } from "@/lib/agents";
-import { invalidateAuthQueries, isTerminalLogin, postAuthJson } from "@/lib/auth-accounts";
+import {
+  accountIdentityLine,
+  authProviderName,
+  invalidateAuthQueries,
+  isTerminalLogin,
+  postAuthJson,
+  useAuthAccounts,
+} from "@/lib/auth-accounts";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import type { AuthProvider, TerminalLogin, TerminalLoginReason } from "@/lib/types";
 
@@ -34,14 +42,20 @@ type PollResult = TerminalLogin | "gone";
 interface AuthTerminalDialogProps {
   target: { accountId: string } | { host: AuthProvider };
   provider: AuthProvider;
-  /** Account label, or "host" for the daemon user's own credentials. */
-  label: string;
+  /** The account being signed in; absent for the daemon user's own (host) credentials. */
+  account?: SignInAccount;
   onClose: () => void;
 }
 
 /** Native CLI sign-in in a daemon terminal; success shows only on a verified `ready`. */
-export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTerminalDialogProps) {
+export function AuthTerminalDialog({
+  target,
+  provider,
+  account,
+  onClose,
+}: AuthTerminalDialogProps) {
   const queryClient = useQueryClient();
+  const accountsQuery = useAuthAccounts(account !== undefined);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const startedOnMount = useRef(false);
@@ -155,7 +169,14 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
   useDialogFocus({ panelRef, initialRef: closeRef, onEscape: close, escapeBlocked: closing });
 
   const running = status === "running" && !ended && !restarting;
-  const name = getAgentDisplayName(provider);
+  const name = authProviderName(provider);
+  // The refetched account carries the identity a first sign-in just produced.
+  const current = accountsQuery.data?.accounts.find((entry) => entry.id === account?.id) ?? account;
+  const identityLine = !current
+    ? `${name} host`
+    : current.identity || current.credential
+      ? accountIdentityLine(current)
+      : current.displayName;
 
   return (
     <div
@@ -169,16 +190,22 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
         className={`max-h-[calc(100dvh-2rem)] overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)] ${
           running || restarting
             ? "w-[min(44rem,calc(100vw-2rem))]"
-            : "w-[min(26rem,calc(100vw-2rem))]"
+            : "w-[min(28rem,calc(100vw-2rem))]"
         }`}
       >
-        <div className="mb-3 flex items-center gap-2">
-          <h2
-            className="min-w-0 flex-1 font-bold uppercase text-[var(--color-text-primary)] [overflow-wrap:anywhere]"
-            id="auth-terminal-dialog-title"
-          >
-            Sign in {name} · {label} · Terminal
-          </h2>
+        <div className="mb-2 flex items-start gap-2">
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="uppercase text-[var(--color-text-secondary)]">
+              Sign in · {name} · terminal
+            </span>
+            <h2
+              className="truncate font-bold normal-case tracking-normal text-[var(--color-text-primary)]"
+              id="auth-terminal-dialog-title"
+              title={identityLine}
+            >
+              {identityLine}
+            </h2>
+          </div>
           <IconCloseButton
             disabled={closing}
             idleTextClass="text-[var(--color-text-secondary)]"
@@ -188,7 +215,13 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
         </div>
 
         {running && login ? (
-          <div className="mb-2.5 h-[min(24rem,55dvh)] bg-[var(--color-terminal-bg)]">
+          <p className="mb-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
+            Finish sign-in in the terminal. Success shows after Spur verifies the account.
+          </p>
+        ) : null}
+
+        {running && login ? (
+          <div className="mb-2.5 h-[min(24rem,55dvh)] border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
             <DirectTerminal
               agent={provider}
               agentInputEnabled={false}
@@ -200,7 +233,7 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
 
         <div
           aria-live="polite"
-          className="flex items-start gap-2 border border-[var(--color-border-default)] px-2.5 py-2 normal-case tracking-normal text-[var(--color-text-secondary)]"
+          className="flex items-start gap-2 py-1 normal-case tracking-normal text-[var(--color-text-secondary)]"
           data-testid="auth-terminal-status"
           role="status"
         >
@@ -209,8 +242,11 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
           ) : restarting ? (
             <WaitLine live={false}>Opening terminal…</WaitLine>
           ) : status === "ready" ? (
-            <span className="font-bold text-[var(--color-status-ready)]">
-              ✓ Signed in · verified by test request
+            <span className="flex min-w-0 items-center gap-2 font-bold text-[var(--color-status-ready)]">
+              <CheckIcon className="h-3 w-3 shrink-0" />
+              <span className="truncate" title={identityLine}>
+                Signed in as {identityLine}
+              </span>
             </span>
           ) : ended ? (
             <>
@@ -230,9 +266,7 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
           ) : (
             <span className="flex flex-col gap-1">
               <WaitLine live={false}>
-                {login
-                  ? "Waiting for terminal sign-in… success shows after Spur verifies the account."
-                  : "Opening terminal…"}
+                {login ? "Waiting for sign-in…" : "Opening terminal…"}
               </WaitLine>
               {login?.reason && RUNNING_NOTE[login.reason] ? (
                 <span>{RUNNING_NOTE[login.reason]}</span>

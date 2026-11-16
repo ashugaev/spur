@@ -3077,7 +3077,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 onClick={() => actionDialogs.openSwitchAuth(session)}
                 title="Switch credentials in place — the live process rereads the new account on its next request"
               >
-                Switch auth
+                Switch account
               </button>
             ) : null}
             {canPause(session) ? (

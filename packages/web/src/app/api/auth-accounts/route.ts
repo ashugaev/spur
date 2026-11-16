@@ -15,14 +15,10 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json().catch(() => ({}))) as {
-      provider?: unknown;
-      label?: unknown;
-    };
-    const label = typeof body.label === "string" ? body.label.trim() : "";
+    const body = (await request.json().catch(() => ({}))) as { provider?: unknown };
     const result = await spurRequestJson<{ account: AuthAccountSummary }>(
       "/auth-accounts",
-      spurJsonInit("POST", { provider: body.provider, ...(label ? { label } : {}) }),
+      spurJsonInit("POST", { provider: body.provider }),
     );
     return NextResponse.json(result, { status: 201 });
   } catch (error) {

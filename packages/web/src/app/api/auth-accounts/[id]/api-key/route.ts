@@ -11,14 +11,13 @@ interface RouteContext {
 export async function POST(request: Request, context: RouteContext) {
   const { id } = await context.params;
   const body = await readRequestRecord(request);
-  const label = typeof body?.label === "string" ? body.label.trim() : "";
-  if (!body || !label || typeof body.apiKey !== "string" || !body.apiKey) {
-    return NextResponse.json({ error: "Supply a label and an apiKey" }, { status: 400 });
+  if (!body || typeof body.apiKey !== "string" || !body.apiKey) {
+    return NextResponse.json({ error: "Supply an apiKey" }, { status: 400 });
   }
   try {
     const result = await spurRequestJson<AuthLogin>(
       `/auth-accounts/${encodeURIComponent(id)}/api-key`,
-      spurJsonInit("POST", { label, apiKey: body.apiKey }),
+      spurJsonInit("POST", { apiKey: body.apiKey }),
     );
     return NextResponse.json(result);
   } catch (error) {

@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactNode, StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthTerminalDialog } from "@/components/AuthTerminalDialog";
+import type { SignInAccount } from "@/components/AuthLoginDialog";
 import type { TerminalLogin } from "@/lib/types";
 
 vi.mock("@/components/DirectTerminal", () => ({
@@ -52,9 +53,17 @@ function terminal(
   };
 }
 
+const ACCOUNT: SignInAccount = {
+  id: "claude-work",
+  provider: "claude",
+  displayName: "alek@x.com",
+  identity: { email: "alek@x.com", organizationName: "Intelas" },
+};
+
 function render(
   target: { accountId: string } | { host: "claude" | "codex" } = { accountId: "claude-work" },
   strict = false,
+  account: SignInAccount | undefined = "host" in target ? undefined : ACCOUNT,
 ) {
   // Strict runs use the app's own query defaults: the stranding bug only showed with them.
   const client = new QueryClient({
@@ -68,7 +77,12 @@ function render(
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
   return rtlRender(
-    <AuthTerminalDialog label="work" provider="claude" target={target} onClose={onClose} />,
+    <AuthTerminalDialog
+      {...(account ? { account } : {})}
+      provider="claude"
+      target={target}
+      onClose={onClose}
+    />,
     { wrapper: strict ? StrictWrapper(Wrapper) : Wrapper },
   );
 }
@@ -122,16 +136,20 @@ describe("AuthTerminalDialog", () => {
 
     expect((await screen.findByTestId("direct-terminal")).textContent).toBe(ID);
     expect(screen.getByTestId("direct-terminal").getAttribute("data-input")).toBe("false");
-    expect(calls[0]).toEqual({
+    expect(calls.find((call) => call.method === "POST")).toEqual({
       url: "/api/auth-terminal-logins",
       method: "POST",
       body: { accountId: "claude-work" },
     });
     expect(screen.getByTestId("auth-terminal-status").textContent).toContain(
-      "Waiting for terminal sign-in…",
+      "Waiting for sign-in…",
     );
     expect(screen.queryByText(/Signed in/)).toBeNull();
-    expect(screen.getByRole("dialog", { name: /Sign in claude · work · Terminal/ })).toBeTruthy();
+    // Kicker, identity line and hint; no command bar from the daemon yet and no old "/login" text.
+    const dialog = screen.getByRole("dialog", { name: "alek@x.com · Intelas" });
+    expect(dialog.textContent).toContain("Sign in · Claude · terminal");
+    expect(screen.getByText(/Finish sign-in in the terminal/)).toBeTruthy();
+    expect(dialog.textContent).not.toContain("claude /login");
     // No terminal icon inside the terminal dialog.
     expect(screen.queryByRole("button", { name: "Continue in terminal" })).toBeNull();
   });
@@ -145,7 +163,7 @@ describe("AuthTerminalDialog", () => {
 
     expect(await screen.findByTestId("direct-terminal")).toBeTruthy();
     expect(screen.getByTestId("auth-terminal-status").textContent).toContain(
-      "Waiting for terminal sign-in…",
+      "Waiting for sign-in…",
     );
     await waitFor(
       () =>
@@ -221,12 +239,25 @@ describe("AuthTerminalDialog", () => {
     await screen.findByTestId("direct-terminal");
 
     expect(
-      await screen.findByText(/Signed in · verified by test request/, {}, { timeout: 6_000 }),
+      await screen.findByText("Signed in as alek@x.com · Intelas", {}, { timeout: 6_000 }),
     ).toBeTruthy();
     expect(screen.queryByTestId("direct-terminal")).toBeNull();
     expect(screen.getByRole("button", { name: "Done" })).toBeTruthy();
     expect(screen.queryByText("Not signed in")).toBeNull();
   }, 10_000);
+
+  it("shows the primary line alone when the account has no secondary, and the host name for host", async () => {
+    reply("POST /api/auth-terminal-logins", "running");
+    const { unmount } = render({ accountId: "claude-work" }, false, {
+      ...ACCOUNT,
+      identity: { email: "solo@x.com" },
+    });
+    expect(await screen.findByRole("dialog", { name: "solo@x.com" })).toBeTruthy();
+    unmount();
+
+    render({ host: "claude" });
+    expect(await screen.findByRole("dialog", { name: "Claude host" })).toBeTruthy();
+  });
 
   it("shows verifying without the terminal once the daemon tests the credential", async () => {
     reply("POST /api/auth-terminal-logins", "verifying");

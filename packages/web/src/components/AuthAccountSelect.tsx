@@ -2,7 +2,7 @@
 
 import { INPUT_CLASS } from "@/design/classes";
 import type { AgentName } from "@/lib/agents";
-import { authAccountOptionLabel, isAuthProvider, useAuthAccounts } from "@/lib/auth-accounts";
+import { autoAccount, isAuthProvider, useAuthAccounts } from "@/lib/auth-accounts";
 
 interface AuthAccountSelectProps {
   agent: AgentName;
@@ -15,7 +15,7 @@ const SELECT_CLASS = `min-w-24 flex-1 ${INPUT_CLASS}`;
 
 /**
  * Spawn-time account picker. Loading and load failure render a disabled
- * placeholder; a loaded agent with no managed accounts renders nothing.
+ * placeholder; a loaded agent with no identified accounts renders nothing.
  */
 export function AuthAccountSelect({ agent, value, onChange }: AuthAccountSelectProps) {
   const managed = isAuthProvider(agent);
@@ -25,29 +25,33 @@ export function AuthAccountSelect({ agent, value, onChange }: AuthAccountSelectP
     return (
       <select
         aria-busy={query.isPending || undefined}
-        aria-label="Spawn auth"
+        aria-label="Spawn account"
         className={SELECT_CLASS}
         disabled
         value=""
       >
-        <option value="">{query.isError ? "Auth · unavailable" : "Auth"}</option>
+        <option value="">{query.isError ? "Account · unavailable" : "Account"}</option>
       </select>
     );
   }
-  const accounts = query.data.accounts.filter((account) => account.provider === agent);
+  const providerAccounts = query.data.accounts.filter((account) => account.provider === agent);
+  const accounts = providerAccounts.filter((account) => account.identity !== undefined);
   if (accounts.length === 0) return null;
+  const auto = autoAccount(providerAccounts, query.data.pools[agent]);
 
   return (
     <select
-      aria-label="Spawn auth"
+      aria-label="Spawn account"
       className={SELECT_CLASS}
       onChange={(event) => onChange(event.target.value || null)}
       value={value ?? ""}
     >
-      <option value="">Auth · Auto</option>
+      <option value="">
+        {auto ? `Account · Auto (now ${auto.displayName})` : "Account · Auto"}
+      </option>
       {accounts.map((account) => (
         <option disabled={!account.authenticated} key={account.id} value={account.id}>
-          {`Auth · ${authAccountOptionLabel(account)}`}
+          {`Account · ${account.displayName}${account.authenticated ? "" : " — signed out"}`}
         </option>
       ))}
     </select>

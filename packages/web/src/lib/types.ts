@@ -255,10 +255,38 @@ export type AuthProvider = "claude" | "codex";
 
 export type AuthAccountStatus = "ready" | "sign_in_required" | "pending" | "error";
 
+export interface AuthIdentity {
+  email?: string;
+  organizationName?: string;
+  organizationId?: string;
+  plan?: string;
+  /** Last 4 characters of an API key. */
+  keyHint?: string;
+}
+
+export interface AuthQuotaWindow {
+  label: string;
+  usedPercent: number;
+  remainingPercent: number;
+  resetsAt: string | null;
+}
+
+export interface AuthQuota {
+  leftPercent: number;
+  resetsAt: string | null;
+  windows: AuthQuotaWindow[];
+  fetchedAt: string;
+}
+
 export interface AuthAccountSummary {
   id: string;
   provider: AuthProvider;
-  label?: string;
+  /** Provider identity of the signed-in credential; never a secret. */
+  identity?: AuthIdentity;
+  /** The one server-computed name every surface shows. */
+  displayName: string;
+  /** Cached quota; ready OAuth accounts only. */
+  quota?: AuthQuota;
   createdAt: string;
   authenticated: boolean;
   status: AuthAccountStatus;

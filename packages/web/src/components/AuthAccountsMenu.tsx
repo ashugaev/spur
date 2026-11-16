@@ -4,35 +4,28 @@ import { useCallback, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { AccountsIcon } from "@/components/icons/AccountsIcon";
+import { CheckIcon } from "@/components/icons/CheckIcon";
 import { Spinner } from "@/components/icons/Spinner";
-import { AuthSignInFlow } from "@/components/AuthSignInFlow";
+import { TrashIcon } from "@/components/icons/TrashIcon";
+import { AuthSignInFlow, type SignInTarget } from "@/components/AuthSignInFlow";
 import { BusyContent } from "@/components/BusyContent";
-import {
-  CHECKBOX_CLASS,
-  DANGER_BUTTON_CLASS,
-  INPUT_CLASS,
-  SECONDARY_BUTTON_CLASS,
-} from "@/design/classes";
-import { getAgentDisplayName } from "@/lib/agents";
+import { CHECKBOX_CLASS, DANGER_BUTTON_CLASS, SECONDARY_BUTTON_CLASS } from "@/design/classes";
 import {
   AUTH_ACCOUNTS_QUERY_KEY,
   AUTH_PROVIDERS,
-  AUTH_STATUS_LABEL,
-  authAccountName,
-  authLimitLabel,
+  accountLines,
+  authProviderName,
   postAuthJson,
+  quotaText,
   useAuthAccounts,
 } from "@/lib/auth-accounts";
 import type { AuthAccountSummary, AuthPool, AuthProvider } from "@/lib/types";
 
-const STATUS_COLOR: Record<AuthAccountSummary["status"], string> = {
-  ready: "text-[var(--color-status-ready)]",
-  sign_in_required: "text-[var(--color-status-attention)]",
-  pending: "text-[var(--color-status-attention)]",
-  error: "text-[var(--color-status-error)]",
-};
-
 const NOTE_CLASS = "normal-case tracking-normal";
+const ROW_CLASS = `grid grid-cols-[minmax(0,1fr)_auto_5rem_1.75rem] items-center gap-x-2 border-b border-[var(--color-border-subtle)] py-1.5 last:border-b-0 ${NOTE_CLASS}`;
+const SIGN_IN_BUTTON_CLASS = `${SECONDARY_BUTTON_CLASS} border-[var(--color-status-attention)]! text-[var(--color-chip-warn-text)]!`;
+
+type SignInRequest = Extract<SignInTarget, { kind: "account" }>;
 
 function ProviderSection({
   provider,
@@ -43,14 +36,13 @@ function ProviderSection({
   provider: AuthProvider;
   accounts: AuthAccountSummary[];
   pool: AuthPool | undefined;
-  onSignIn: (account: AuthAccountSummary) => void;
+  onSignIn: (request: SignInRequest) => void;
 }) {
   const queryClient = useQueryClient();
-  const [label, setLabel] = useState("");
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   // One error per section: each action clears it on start, sets it on failure.
   const [lastError, setLastError] = useState<string | null>(null);
-  const name = getAgentDisplayName(provider);
+  const name = authProviderName(provider);
   const refresh = () => queryClient.invalidateQueries({ queryKey: AUTH_ACCOUNTS_QUERY_KEY });
   const errorHandlers = {
     onMutate: () => setLastError(null),
@@ -88,147 +80,177 @@ function ProviderSection({
     },
   });
 
-  const addMutation = useMutation<AuthAccountSummary, Error, string>({
-    mutationFn: async (nextLabel) => {
+  const addMutation = useMutation<{ id: string; createdAt: string }, Error>({
+    mutationFn: async () => {
       const result = (await postAuthJson(
         "/api/auth-accounts",
         "POST",
-        { provider, ...(nextLabel ? { label: nextLabel } : {}) },
+        { provider },
         `Failed to add ${name} account`,
-      )) as { account?: AuthAccountSummary };
-      if (!result.account) throw new Error(`Failed to add ${name} account`);
-      return result.account;
+      )) as { account?: { id?: unknown; createdAt?: unknown } };
+      const { id, createdAt } = result.account ?? {};
+      if (typeof id !== "string" || typeof createdAt !== "string") {
+        throw new Error(`Failed to add ${name} account`);
+      }
+      return { id, createdAt };
     },
     ...errorHandlers,
-    onSuccess: (account) => {
-      setLabel("");
-      onSignIn(account);
-    },
+    onSuccess: ({ id, createdAt }) =>
+      onSignIn({
+        kind: "account",
+        isNew: true,
+        account: { id, provider, displayName: `New ${name} account`, createdAt },
+      }),
     onSettled: () => void refresh(),
   });
 
-  const readyCount = accounts.filter((account) => account.authenticated).length;
   const defaultId = pool?.defaultAccountId ?? null;
   const rotating = poolMutation.isPending && "autoRotate" in (poolMutation.variables ?? {});
   const busy = poolMutation.isPending || removeMutation.isPending || addMutation.isPending;
 
   return (
-    <section className="flex flex-col gap-1.5" data-testid={`auth-section-${provider}`}>
+    <section className="flex flex-col gap-1" data-testid={`auth-section-${provider}`}>
       <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-1">
-        <span className="uppercase text-[var(--color-text-secondary)]">{name} accounts</span>
-        <span className="font-bold uppercase text-[var(--color-text-primary)]">
-          {readyCount} ready
-        </span>
+        <span className="font-bold uppercase text-[var(--color-text-primary)]">{name}</span>
+        <label
+          className={`flex items-center gap-2 ${NOTE_CLASS} text-[var(--color-text-secondary)]`}
+          title="Switch to the next account when this one hits its limit"
+        >
+          <input
+            aria-busy={rotating || undefined}
+            aria-label={`Auto-rotate ${name} accounts`}
+            checked={pool?.autoRotate ?? false}
+            className={CHECKBOX_CLASS}
+            disabled={busy}
+            type="checkbox"
+            onChange={(event) => poolMutation.mutate({ autoRotate: event.target.checked })}
+          />
+          Auto-rotate
+          {rotating ? <Spinner className="h-3 w-3" strokeWidth={1.5} /> : null}
+        </label>
       </div>
-      <label className={`flex items-center gap-2 ${NOTE_CLASS} text-[var(--color-text-secondary)]`}>
-        <input
-          aria-busy={rotating || undefined}
-          aria-label={`Auto-rotate ${name} accounts`}
-          checked={pool?.autoRotate ?? false}
-          className={CHECKBOX_CLASS}
-          disabled={busy}
-          type="checkbox"
-          onChange={(event) => poolMutation.mutate({ autoRotate: event.target.checked })}
-        />
-        Auto-rotate on quota limit
-        {rotating ? <Spinner className="h-3 w-3" strokeWidth={1.5} /> : null}
-      </label>
       {accounts.length === 0 ? (
         <div className={`${NOTE_CLASS} text-[var(--color-text-tertiary)]`}>No {name} accounts.</div>
       ) : (
-        <ul className="flex max-h-48 flex-col gap-1.5 overflow-y-auto">
+        <ul className="flex flex-col">
           {accounts.map((account) => {
-            const accountLabel = authAccountName(account);
-            const isDefault = account.id === defaultId;
-            const limit = authLimitLabel(account, " · ");
+            const lines = accountLines(account);
+            const quota = quotaText(account);
+            const inUse = account.id === defaultId && account.status === "ready";
             const confirming = confirmRemoveId === account.id;
             const removing = removeMutation.isPending && removeMutation.variables === account.id;
-            return (
-              <li
-                key={account.id}
-                className={`flex flex-wrap items-center justify-between gap-x-2 gap-y-1 ${NOTE_CLASS}`}
-                data-testid={`auth-account-${account.id}`}
-              >
-                <span className="flex min-w-0 flex-1 flex-col sm:flex-row sm:items-center sm:gap-2">
-                  <span className="truncate font-bold text-[var(--color-text-primary)]">
-                    {accountLabel}
-                  </span>
-                  <span className="flex flex-wrap items-center gap-x-2">
-                    <span className={STATUS_COLOR[account.status]}>
-                      {AUTH_STATUS_LABEL[account.status]}
+            if (confirming) {
+              return (
+                <li
+                  key={account.id}
+                  className={`flex items-center justify-between gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-hover-overlay)] px-1 py-1.5 last:border-b-0 ${NOTE_CLASS}`}
+                  data-testid={`auth-account-${account.id}`}
+                >
+                  <span aria-label="Confirm remove" className="flex min-w-0 flex-col" role="group">
+                    <b
+                      className="truncate text-[var(--color-text-primary)]"
+                      title={account.displayName}
+                    >
+                      Remove {account.displayName}?
+                    </b>
+                    <span className="text-[var(--color-text-secondary)]">
+                      Its sign-in is deleted from Spur.
                     </span>
-                    {limit ? (
-                      <span className="text-[var(--color-status-attention)]">{limit}</span>
-                    ) : null}
-                    {account.credential === "api_key" ? (
-                      <span className="uppercase text-[var(--color-text-tertiary)]">api key</span>
-                    ) : null}
-                    {isDefault ? (
-                      <span className="uppercase text-[var(--color-text-tertiary)]">default</span>
-                    ) : null}
                   </span>
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    <button
+                      className={SECONDARY_BUTTON_CLASS}
+                      disabled={removing}
+                      type="button"
+                      onClick={() => setConfirmRemoveId(null)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      aria-busy={removing || undefined}
+                      aria-label={removing ? "Removing account" : undefined}
+                      className={DANGER_BUTTON_CLASS}
+                      disabled={busy}
+                      type="button"
+                      onClick={() => removeMutation.mutate(account.id)}
+                    >
+                      <BusyContent busy={removing}>Remove</BusyContent>
+                    </button>
+                  </span>
+                </li>
+              );
+            }
+            return (
+              <li key={account.id} className={ROW_CLASS} data-testid={`auth-account-${account.id}`}>
+                <span className="flex min-w-0 flex-col">
+                  <span
+                    className={`truncate font-bold ${
+                      account.identity
+                        ? "text-[var(--color-text-primary)]"
+                        : "text-[var(--color-text-secondary)]"
+                    }`}
+                    title={lines.primary}
+                  >
+                    {lines.primary}
+                  </span>
+                  {lines.secondary ? (
+                    <span
+                      className="truncate text-[var(--color-text-secondary)]"
+                      title={lines.secondary}
+                    >
+                      {lines.secondary}
+                    </span>
+                  ) : null}
                 </span>
-                <span className="flex shrink-0 items-center gap-1">
-                  {confirming ? (
-                    <>
-                      <button
-                        aria-busy={removing || undefined}
-                        aria-label={
-                          removing
-                            ? "Removing account"
-                            : `Confirm remove ${name} account ${accountLabel}`
-                        }
-                        className={DANGER_BUTTON_CLASS}
-                        disabled={busy}
-                        type="button"
-                        onClick={() => removeMutation.mutate(account.id)}
-                      >
-                        <BusyContent busy={removing}>Confirm</BusyContent>
-                      </button>
-                      <button
-                        className={SECONDARY_BUTTON_CLASS}
-                        disabled={removing}
-                        type="button"
-                        onClick={() => setConfirmRemoveId(null)}
-                      >
-                        Keep
-                      </button>
-                    </>
+                <span
+                  className="flex flex-col items-end text-[var(--color-text-secondary)]"
+                  title={quota?.title || undefined}
+                >
+                  {quota ? <span>{quota.left}</span> : null}
+                  {quota?.resets ? <span>{quota.resets}</span> : null}
+                </span>
+                <span className="flex justify-center">
+                  {account.status !== "ready" ? (
+                    <button
+                      aria-label={`Sign in ${account.displayName}`}
+                      className={SIGN_IN_BUTTON_CLASS}
+                      disabled={busy}
+                      type="button"
+                      onClick={() => onSignIn({ kind: "account", account })}
+                    >
+                      Sign in
+                    </button>
+                  ) : inUse ? (
+                    <span
+                      aria-label="In use"
+                      className="text-[var(--color-text-primary)]"
+                      role="img"
+                      title="In use: new and Auto sessions run on this account"
+                    >
+                      <CheckIcon className="h-3 w-3" />
+                    </span>
                   ) : (
-                    <>
-                      {account.authenticated ? (
-                        <button
-                          aria-label={`Make ${name} account ${accountLabel} default`}
-                          className={SECONDARY_BUTTON_CLASS}
-                          disabled={busy || isDefault}
-                          type="button"
-                          onClick={() => poolMutation.mutate({ defaultAccountId: account.id })}
-                        >
-                          Default
-                        </button>
-                      ) : (
-                        <button
-                          aria-label={`Sign in ${name} account ${accountLabel}`}
-                          className={SECONDARY_BUTTON_CLASS}
-                          disabled={busy}
-                          type="button"
-                          onClick={() => onSignIn(account)}
-                        >
-                          Sign in
-                        </button>
-                      )}
-                      <button
-                        aria-label={`Remove ${name} account ${accountLabel}`}
-                        className={DANGER_BUTTON_CLASS}
-                        disabled={busy}
-                        type="button"
-                        onClick={() => setConfirmRemoveId(account.id)}
-                      >
-                        Remove
-                      </button>
-                    </>
+                    <button
+                      aria-label={`Switch ${name} to ${account.displayName}`}
+                      className={SECONDARY_BUTTON_CLASS}
+                      disabled={busy}
+                      type="button"
+                      onClick={() => poolMutation.mutate({ defaultAccountId: account.id })}
+                    >
+                      Switch
+                    </button>
                   )}
                 </span>
+                <button
+                  aria-label={`Remove ${account.displayName}`}
+                  className="flex h-7 w-7 items-center justify-center text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={busy}
+                  title="Remove"
+                  type="button"
+                  onClick={() => setConfirmRemoveId(account.id)}
+                >
+                  <TrashIcon className="h-3.5 w-3.5" />
+                </button>
               </li>
             );
           })}
@@ -239,28 +261,16 @@ function ProviderSection({
           {lastError}
         </div>
       ) : null}
-      <div className="flex items-center gap-2">
-        <input
-          aria-label={`New ${name} account label`}
-          className={`min-w-0 flex-1 ${NOTE_CLASS} ${INPUT_CLASS}`}
-          disabled={busy}
-          placeholder="Label (optional)"
-          type="text"
-          value={label}
-          onChange={(event) => setLabel(event.target.value)}
-        />
-        <button
-          aria-busy={addMutation.isPending || undefined}
-          aria-label={addMutation.isPending ? "Adding account" : `Add ${name} account`}
-          className={SECONDARY_BUTTON_CLASS}
-          data-testid={`add-account-${provider}`}
-          disabled={busy}
-          type="button"
-          onClick={() => addMutation.mutate(label.trim())}
-        >
-          <BusyContent busy={addMutation.isPending}>Add</BusyContent>
-        </button>
-      </div>
+      <button
+        aria-busy={addMutation.isPending || undefined}
+        className={`self-start py-1 ${NOTE_CLASS} text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50`}
+        data-testid={`add-account-${provider}`}
+        disabled={busy}
+        type="button"
+        onClick={() => addMutation.mutate()}
+      >
+        + Add {name} account
+      </button>
     </section>
   );
 }
@@ -268,8 +278,8 @@ function ProviderSection({
 /** Footer menu over every managed provider account and its global pool. */
 export function AuthAccountsMenu() {
   const popover = useFooterPopover();
-  const [signIn, setSignIn] = useState<AuthAccountSummary | null>(null);
-  const accountsQuery = useAuthAccounts(popover.open || signIn !== null);
+  const [signIn, setSignIn] = useState<SignInRequest | null>(null);
+  const accountsQuery = useAuthAccounts(popover.open || signIn !== null, { poll: popover.open });
   const closeSignIn = useCallback(() => setSignIn(null), []);
 
   return (
@@ -338,9 +348,7 @@ export function AuthAccountsMenu() {
           )}
         </div>
       ) : null}
-      {signIn ? (
-        <AuthSignInFlow target={{ kind: "account", account: signIn }} onClose={closeSignIn} />
-      ) : null}
+      {signIn ? <AuthSignInFlow target={signIn} onClose={closeSignIn} /> : null}
     </div>
   );
 }

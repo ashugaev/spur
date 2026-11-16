@@ -6,7 +6,7 @@ const MANAGED_ALERT: AuthAlert = {
   kind: "managed",
   provider: "claude",
   accountId: "claude-work",
-  label: "work",
+  label: "alek@x.com",
   since: "2026-01-01T00:00:00.000Z",
   sessionsWaiting: 2,
 };
@@ -69,8 +69,8 @@ async function mockClaudeLogin(page: Page, onInput: (body: unknown) => AuthLogin
 
 async function openManagedDialog(page: Page) {
   await page.goto("/");
-  await page.getByRole("button", { name: "Sign in work" }).click();
-  const dialog = page.getByRole("dialog", { name: /Sign in claude · work/i });
+  await page.getByRole("button", { name: "Sign in alek@x.com" }).click();
+  const dialog = page.getByRole("dialog", { name: "Sign in Claude · alek@x.com" });
   await expect(dialog).toBeVisible();
   return dialog;
 }
@@ -112,23 +112,19 @@ test.describe("Sign-in alerts and dialogs", () => {
     await expect(managed).toContainText("managed account · 2 sessions waiting");
     await expect(host).toContainText("host credentials");
 
-    await managed.getByRole("button", { name: "Sign in work" }).click();
+    await managed.getByRole("button", { name: "Sign in alek@x.com" }).click();
     await expect(page.getByRole("radiogroup", { name: "Sign-in method" })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toBeHidden();
 
     await host.getByRole("button", { name: "Sign in Codex host" }).click();
-    await expect(
-      page.getByRole("dialog", { name: /Sign in codex · host · Terminal/i }),
-    ).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Codex host" })).toBeVisible();
     expect(terminalPosts).toEqual([{ host: "codex" }]);
     await page.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByRole("dialog")).toBeHidden();
 
     await managed.getByRole("button", { name: "Continue in terminal" }).click();
-    await expect(
-      page.getByRole("dialog", { name: /Sign in claude · work · Terminal/i }),
-    ).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "alek@x.com" })).toBeVisible();
     expect(terminalPosts.at(-1)).toEqual({ accountId: "claude-work" });
   });
 
@@ -151,13 +147,13 @@ test.describe("Sign-in alerts and dialogs", () => {
     await submit.click();
 
     await expect(dialog.getByText("Verifying sign-in…")).toBeVisible();
-    await expect(dialog.getByText(/Signed in · verified/)).toHaveCount(0);
+    await expect(dialog.getByText("Signed in")).toHaveCount(0);
     expect(inputs).toEqual([{ input: "http://localhost:54545/callback?code=abc&state=def" }]);
     // Next poll (3s) reports ready.
     await page.route("/api/auth-accounts/claude-work/login-status", (route) =>
       route.fulfill(json({ accountId: "claude-work", status: "ready" })),
     );
-    await expect(dialog.getByText(/Signed in · verified/)).toBeVisible({ timeout: 10_000 });
+    await expect(dialog.getByText("Signed in")).toBeVisible({ timeout: 10_000 });
     await expect(dialog.getByRole("button", { name: "Continue in terminal" })).toHaveCount(0);
     await dialog.getByRole("button", { name: "Done" }).click();
     await expect(page.getByRole("dialog")).toBeHidden();
@@ -181,7 +177,7 @@ test.describe("Sign-in alerts and dialogs", () => {
     await expect(dialog.getByRole("alert")).toContainText("Sign-in not confirmed");
     await expect(dialog.getByRole("button", { name: "Try again" })).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Continue in terminal" })).toHaveCount(2);
-    await expect(dialog.getByText(/Signed in · verified/)).toHaveCount(0);
+    await expect(dialog.getByText("Signed in")).toHaveCount(0);
   });
 
   test("S8 the header icon cancels the attempt, then opens the terminal for the same account", async ({
@@ -206,9 +202,7 @@ test.describe("Sign-in alerts and dialogs", () => {
 
     await dialog.getByRole("button", { name: "Continue in terminal" }).click();
 
-    await expect(
-      page.getByRole("dialog", { name: /Sign in claude · work · Terminal/i }),
-    ).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "alek@x.com" })).toBeVisible();
     expect(order).toEqual(["cancel", 'terminal {"accountId":"claude-work"}']);
   });
 
@@ -233,7 +227,7 @@ test.describe("Sign-in alerts and dialogs", () => {
       .getByRole("button", { name: "Continue in terminal" })
       .click();
 
-    const dialog = page.getByRole("dialog", { name: /Terminal/i });
+    const dialog = page.getByRole("dialog", { name: "alek@x.com" });
     await expect(dialog.getByText("Not signed in")).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Restart terminal" })).toBeVisible();
     await expect(dialog.getByText(/Signed in/)).toHaveCount(0);
@@ -252,7 +246,7 @@ test.describe("Sign-in alerts and dialogs", () => {
       .getByRole("button", { name: "Continue in terminal" })
       .click();
 
-    await expect(page.getByText(/Signed in · verified by test request/)).toBeVisible();
+    await expect(page.getByText(/Signed in as alek@x.com/)).toBeVisible();
   });
 });
 
@@ -291,7 +285,7 @@ test.describe("Sign-in at 390px", () => {
     expect(await noOverflow()).toBe(true);
 
     await page.getByRole("button", { name: "Sign in team" }).click();
-    const dialog = page.getByRole("dialog", { name: /Sign in codex · team/i });
+    const dialog = page.getByRole("dialog", { name: "Sign in Codex · team" });
     await dialog.getByRole("button", { name: "Continue", exact: true }).click();
     await expect(dialog.getByTestId("auth-login-user-code")).toHaveText("IXP1-UC8L0");
     await expect(dialog.getByRole("button", { name: "Continue in terminal" })).toBeVisible();

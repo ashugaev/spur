@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthLoginDialog } from "@/components/AuthLoginDialog";
 import type { AuthLogin } from "@/lib/types";
 
-const CLAUDE = { id: "claude-new", provider: "claude", label: "work" } as const;
-const CODEX = { id: "codex-new", provider: "codex", label: "team" } as const;
+const CLAUDE = { id: "claude-new", provider: "claude", displayName: "New Claude account" } as const;
+const CODEX = { id: "codex-new", provider: "codex", displayName: "New Codex account" } as const;
 
 interface Call {
   url: string;
@@ -25,7 +25,7 @@ function pending(extra: Partial<AuthLogin> = {}, accountId = CLAUDE.id): AuthLog
 
 let client: QueryClient;
 
-function render(account: typeof CLAUDE | typeof CODEX = CLAUDE) {
+function render(account: typeof CLAUDE | typeof CODEX = CLAUDE, isNew = false) {
   client = new QueryClient({
     defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
   });
@@ -35,6 +35,7 @@ function render(account: typeof CLAUDE | typeof CODEX = CLAUDE) {
   return rtlRender(
     <AuthLoginDialog
       account={account}
+      isNew={isNew}
       onClose={onClose}
       onContinueInTerminal={onContinueInTerminal}
     />,
@@ -182,7 +183,7 @@ describe("AuthLoginDialog link and paste", () => {
       input: "abc#def",
     });
     expect(screen.getByTestId("auth-login-checklist")).toBeTruthy();
-    expect(screen.queryByText(/Signed in · verified/)).toBeNull();
+    expect(screen.queryByText("Signed in")).toBeNull();
     expect(terminalIcon()).toBeTruthy();
   });
 
@@ -254,26 +255,31 @@ describe("AuthLoginDialog API key", () => {
     render(CLAUDE);
     fireEvent.click(screen.getByRole("radio", { name: /API key/ }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByText("Label (required)");
+    await screen.findByLabelText("API key");
   }
 
-  it("keeps Save disabled until label and key are both set, with a masked key field", async () => {
+  it("has no label field; Save needs only a non-blank masked key", async () => {
     await openKeyForm();
-    const label = screen.getByLabelText("Label (required)") as HTMLInputElement;
     const key = screen.getByLabelText("API key") as HTMLInputElement;
     const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
 
     expect(key.type).toBe("password");
-    expect(label.value).toBe("work");
+    expect(screen.queryByText(/Label/)).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
     expect(terminalIcon()).toBeTruthy();
-    fireEvent.change(label, { target: { value: " " } });
-    fireEvent.change(key, { target: { value: "sk-ant-key-12345" } });
     expect(save.disabled).toBe(true);
-    fireEvent.change(label, { target: { value: "ci" } });
-    fireEvent.change(key, { target: { value: "" } });
+    fireEvent.change(key, { target: { value: "  " } });
     expect(save.disabled).toBe(true);
     fireEvent.change(key, { target: { value: "sk-ant-key-12345" } });
     expect(save.disabled).toBe(false);
+  });
+
+  it("titles a new account Add <Provider> account and an existing one with its display name", () => {
+    const { unmount } = render(CLAUDE, true);
+    expect(screen.getByRole("dialog", { name: "Add Claude account" })).toBeTruthy();
+    unmount();
+    render(CODEX);
+    expect(screen.getByRole("dialog", { name: "Sign in Codex · New Codex account" })).toBeTruthy();
   });
 
   it("saves, then reports a rejected key with the key field cleared", async () => {
@@ -281,13 +287,11 @@ describe("AuthLoginDialog API key", () => {
       payload: { accountId: CLAUDE.id, status: "failed", errorCode: "key_rejected" },
     }));
     await openKeyForm();
-    fireEvent.change(screen.getByLabelText("Label (required)"), { target: { value: "ci-key" } });
     fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-ant-key-12345" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     expect((await screen.findByRole("alert")).textContent).toContain("API key rejected");
     expect(callsTo("POST", "/api/auth-accounts/claude-new/api-key")[0]?.body).toEqual({
-      label: "ci-key",
       apiKey: "sk-ant-key-12345",
     });
     // The key never rests in the mutation cache or in cached query data.
@@ -309,7 +313,6 @@ describe("AuthLoginDialog API key", () => {
     ).not.toContain("sk-ant-key-12345");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(((await screen.findByLabelText("API key")) as HTMLInputElement).value).toBe("");
-    expect((screen.getByLabelText("Label (required)") as HTMLInputElement).value).toBe("ci-key");
   });
 });
 
@@ -329,10 +332,10 @@ describe("AuthLoginDialog verification", () => {
     expect(await screen.findByText("Verifying sign-in…")).toBeTruthy();
     expect(screen.getByText("Key received")).toBeTruthy();
     expect(screen.queryByText("Key accepted")).toBeNull();
-    expect(screen.queryByText(/Signed in · verified/)).toBeNull();
+    expect(screen.queryByText("Signed in")).toBeNull();
     status = { accountId: CLAUDE.id, status: "ready" };
 
-    expect(await screen.findByText(/Signed in · verified/, {}, { timeout: 6_000 })).toBeTruthy();
+    expect(await screen.findByText("Signed in", {}, { timeout: 6_000 })).toBeTruthy();
   }, 10_000);
 
   it("shows verified with Done and no terminal icon, then closes on Done", async () => {
@@ -342,10 +345,33 @@ describe("AuthLoginDialog verification", () => {
     render(CLAUDE);
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
-    expect(await screen.findByText(/Signed in · verified/)).toBeTruthy();
+    expect(await screen.findByText("Signed in")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Continue in terminal" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the signed-in identity once the refetched account has one", async () => {
+    route("GET", "/api/auth-accounts", () => ({
+      payload: {
+        pools: {},
+        accounts: [
+          {
+            id: CLAUDE.id,
+            provider: "claude",
+            displayName: "alek@x.com",
+            identity: { email: "alek@x.com", organizationName: "Intelas" },
+          },
+        ],
+      },
+    }));
+    route("POST", "/api/auth-accounts/claude-new/login", () => ({
+      payload: { accountId: CLAUDE.id, status: "ready" },
+    }));
+    render(CLAUDE);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByText("Signed in as alek@x.com · Intelas")).toBeTruthy();
   });
 
   it("closes itself 3 seconds after verified", async () => {
@@ -356,7 +382,7 @@ describe("AuthLoginDialog verification", () => {
       }));
       render(CLAUDE);
       fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-      await screen.findByText(/Signed in · verified/);
+      await screen.findByText("Signed in");
       expect(onClose).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(3_000);

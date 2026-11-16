@@ -2798,17 +2798,22 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
             {
               id: "acc-ready-01",
               provider: "claude",
-              label: "Work",
+              identity: { email: "alek@x.com", organizationName: "Intelas" },
+              displayName: "alek@x.com",
               createdAt: "2026-01-01T00:00:00.000Z",
               authenticated: true,
               status: "ready",
+              limited: false,
+              credential: "oauth",
             },
             {
               id: "abcdef1234567890",
               provider: "codex",
+              displayName: "New Codex account",
               createdAt: "2026-01-01T00:00:00.000Z",
               authenticated: false,
               status: "sign_in_required",
+              limited: false,
             },
           ],
           pools: {
@@ -2831,18 +2836,18 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await trigger.click();
     const claude = page.getByTestId("auth-section-claude");
     const codex = page.getByTestId("auth-section-codex");
-    await expect(claude).toContainText("1 ready");
-    await expect(claude.getByTestId("auth-account-acc-ready-01")).toContainText("default");
-    await expect(claude.getByLabel("Auto-rotate claude accounts")).toBeChecked();
-    await expect(codex).toContainText("0 ready");
-    // No label falls back to the first 8 chars of the id.
-    await expect(codex.getByTestId("auth-account-abcdef1234567890")).toContainText(
-      "sign in required",
-    );
+    await expect(claude).toContainText("Claude");
+    await expect(codex).toContainText("Codex");
+    await expect(claude.getByTestId("auth-account-acc-ready-01")).toContainText("alek@x.com");
     await expect(
-      codex.getByRole("button", { name: "Sign in codex account abcdef12" }),
+      claude.getByTestId("auth-account-acc-ready-01").getByRole("img", { name: "In use" }),
     ).toBeVisible();
-    await expect(codex.getByLabel("Auto-rotate codex accounts")).not.toBeChecked();
+    await expect(claude.getByLabel("Auto-rotate Claude accounts")).toBeChecked();
+    await expect(page.getByTestId("auth-accounts-popover")).not.toContainText(/\bready\b/i);
+    await expect(codex.getByRole("button", { name: "Sign in New Codex account" })).toBeVisible();
+    await expect(codex.getByLabel("Auto-rotate Codex accounts")).not.toBeChecked();
+    await expect(claude.getByRole("button", { name: "+ Add Claude account" })).toBeVisible();
+    await expect(page.getByRole("textbox")).toHaveCount(0);
   });
 
   test("adding a Codex account starts sign-in, shows the URL and code, and closes once login-status is ready", async ({
@@ -2854,11 +2859,18 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     const account = {
       id: "new-1",
       provider: "codex",
-      label: "New",
       createdAt: "2026-01-01T00:00:00.000Z",
-      authenticated: false,
-      status: "sign_in_required",
     };
+    const signedIn = {
+      ...account,
+      identity: { email: "new@x.com", plan: "Plus" },
+      displayName: "new@x.com",
+      authenticated: true,
+      status: "ready",
+      limited: false,
+      credential: "oauth",
+    };
+    let addBody: unknown = null;
     const pending = {
       accountId: "new-1",
       status: "pending",
@@ -2868,6 +2880,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
 
     await page.route("/api/auth-accounts", (route) => {
       if (route.request().method() === "POST") {
+        addBody = route.request().postDataJSON();
         void route.fulfill({
           status: 201,
           contentType: "application/json",
@@ -2878,7 +2891,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ accounts: [], pools: {} }),
+        body: JSON.stringify({ accounts: loginStatusCalls > 1 ? [signedIn] : [], pools: {} }),
       });
     });
     await page.route("/api/auth-accounts/new-1/login", (route) => {
@@ -2904,8 +2917,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await page.getByRole("button", { name: "Manage agent accounts" }).click();
     await page.getByTestId("add-account-codex").click();
 
-    const loginDialog = page.getByRole("dialog", { name: /Sign in codex/ });
+    const loginDialog = page.getByRole("dialog", { name: "Add Codex account" });
     await expect(loginDialog).toBeVisible();
+    expect(addBody).toEqual({ provider: "codex" });
     // The picker opens first; nothing starts until a method is chosen.
     await expect(loginDialog.getByRole("radio", { name: /Device code/ })).toBeChecked();
     await loginDialog.getByRole("button", { name: "Continue", exact: true }).click();
@@ -2916,7 +2930,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(loginDialog.getByTestId("auth-login-user-code")).toHaveText("ABCD-1234");
 
     // Polling login-status (every 3s) flips to ready: verified shows, then the dialog closes.
-    await expect(loginDialog.getByText(/Signed in · verified/)).toBeVisible({ timeout: 10_000 });
+    await expect(loginDialog.getByText("Signed in as new@x.com · Plus")).toBeVisible({
+      timeout: 10_000,
+    });
     await expect(loginDialog).toBeHidden({ timeout: 10_000 });
   });
 });

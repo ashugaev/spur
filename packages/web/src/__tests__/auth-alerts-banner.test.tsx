@@ -17,7 +17,7 @@ const MANAGED: AuthAlert = {
   kind: "managed",
   provider: "claude",
   accountId: "claude-work",
-  label: "work",
+  label: "alek@x.com",
   since: "2026-01-01T00:00:00.000Z",
   sessionsWaiting: 2,
 };
@@ -91,9 +91,11 @@ describe("AuthAlertsBanner", () => {
     render();
 
     const managed = within(await screen.findByTestId("auth-alert-managed:claude-work"));
-    expect(managed.getByText(/claude · work signed out/)).toBeTruthy();
+    expect(managed.getByText(/claude · alek@x.com signed out/)).toBeTruthy();
     expect(managed.getByText(/managed account · 2 sessions waiting/)).toBeTruthy();
-    expect(managed.getByRole("button", { name: "Sign in work" })).toBeTruthy();
+    expect(managed.getByRole("button", { name: "Sign in alek@x.com" })).toBeTruthy();
+    // The row names the account by its display name, never an id.
+    expect(managed.queryByText(/claude-work/)).toBeNull();
     expect(managed.getByRole("button", { name: "Continue in terminal" })).toBeTruthy();
     const host = within(screen.getByTestId("auth-alert-host:codex"));
     expect(host.getByText(/Codex host login expired or rejected/)).toBeTruthy();
@@ -120,9 +122,11 @@ describe("AuthAlertsBanner", () => {
   it("opens the guided dialog for a managed account", async () => {
     render();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in work" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in alek@x.com" }));
 
-    const dialog = within(await screen.findByRole("dialog", { name: /Sign in claude · work/ }));
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Sign in Claude · alek@x.com" }),
+    );
     expect(dialog.getByRole("radiogroup", { name: "Sign-in method" })).toBeTruthy();
   });
 

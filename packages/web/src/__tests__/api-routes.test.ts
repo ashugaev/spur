@@ -4884,7 +4884,7 @@ describe("Spur web API routes", () => {
       expect(((await response.json()) as { error: string }).error).toBe("daemon down");
     });
 
-    it("POST /api/auth-accounts forwards provider and trimmed label with 201", async () => {
+    it("POST /api/auth-accounts forwards the provider only, even when a label is sent", async () => {
       mockedSpurRequestJson.mockResolvedValue({ account: { id: "acc-9" } });
 
       const response = await addAuthAccount(
@@ -4899,7 +4899,7 @@ describe("Spur web API routes", () => {
         "/auth-accounts",
         expect.objectContaining({
           method: "POST",
-          body: JSON.stringify({ provider: "codex", label: "Work" }),
+          body: JSON.stringify({ provider: "codex" }),
         }),
       );
     });
@@ -4996,7 +4996,7 @@ describe("Spur web API routes", () => {
       );
     });
 
-    it("POST /api/auth-accounts/:id/api-key forwards label and key, keeps the daemon status", async () => {
+    it("POST /api/auth-accounts/:id/api-key forwards only the key, keeps the daemon status", async () => {
       mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("rejected", 400));
 
       const response = await saveAuthApiKey(
@@ -5010,12 +5010,12 @@ describe("Spur web API routes", () => {
       expect(response.status).toBe(400);
       expect(mockedSpurRequestJson).toHaveBeenCalledWith(
         "/auth-accounts/acc-1/api-key",
-        expect.objectContaining({ body: JSON.stringify({ label: "ci", apiKey: "sk-test-key" }) }),
+        expect.objectContaining({ body: JSON.stringify({ apiKey: "sk-test-key" }) }),
       );
       expect(JSON.stringify(await response.json())).not.toContain("sk-test-key");
     });
 
-    it.each([{ label: "ci" }, { apiKey: "sk-test-key" }, { label: " ", apiKey: "sk-test-key" }])(
+    it.each([{ label: "ci" }, { apiKey: "" }])(
       "POST /api/auth-accounts/:id/api-key rejects %j before the daemon",
       async (sent) => {
         const response = await saveAuthApiKey(

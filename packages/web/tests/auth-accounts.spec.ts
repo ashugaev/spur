@@ -10,30 +10,52 @@ import type { AuthAccountSummary, AuthAccountsResponse } from "../src/lib/types"
 
 const PROJECTS = [{ id: "my-project", name: "my-project" }];
 
-function account(overrides: Partial<AuthAccountSummary> & { id: string }): AuthAccountSummary {
+function account(
+  overrides: Partial<AuthAccountSummary> & { id: string; displayName: string },
+): AuthAccountSummary {
   return {
     provider: "claude",
     createdAt: "2026-01-01T00:00:00.000Z",
     authenticated: true,
     status: "ready",
     limited: false,
+    credential: "oauth",
     ...overrides,
   };
 }
 
 const ACCOUNTS: AuthAccountsResponse = {
   accounts: [
-    account({ id: "claude-work", label: "Work" }),
+    account({
+      id: "claude-work",
+      displayName: "alek@x.com",
+      identity: { email: "alek@x.com", organizationName: "Intelas" },
+      quota: {
+        leftPercent: 62,
+        resetsAt: null,
+        windows: [
+          { label: "5h", usedPercent: 38, remainingPercent: 62, resetsAt: "2026-01-01T18:40:00Z" },
+        ],
+        fetchedAt: "2026-01-01T12:00:00.000Z",
+      },
+    }),
     account({
       id: "claude-home",
-      label: "Home",
+      displayName: "home@x.com",
+      identity: { email: "home@x.com", organizationName: "Personal" },
       limited: true,
       cooldownUntil: "2026-01-01T14:05:00.000Z",
     }),
     account({
+      id: "claude-key",
+      displayName: "API key ····7Q2c",
+      credential: "api_key",
+      identity: { keyHint: "7Q2c" },
+    }),
+    account({
       id: "codex-new",
       provider: "codex",
-      label: "Fresh",
+      displayName: "New Codex account",
       authenticated: false,
       status: "sign_in_required",
     }),
@@ -98,15 +120,85 @@ test.describe("Agent accounts menu", () => {
     await expect(popover.getByTestId("auth-section-claude")).toBeVisible();
   });
 
-  test("badges a limited account with its cooldown end", async ({ page }) => {
+  test("shows identity and quota per account without status words", async ({ page }) => {
     await mockSessions(page, []);
     await mockAccounts(page);
     await page.goto("/");
     await openMenu(page);
 
+    const work = page.getByTestId("auth-account-claude-work");
+    await expect(work.getByText("alek@x.com")).toBeVisible();
+    await expect(work.getByText("Intelas")).toBeVisible();
+    await expect(work.getByText("62% left")).toBeVisible();
+    await expect(work.getByRole("img", { name: "In use" })).toBeVisible();
     const home = page.getByTestId("auth-account-claude-home");
-    await expect(home.getByText(/^limited · until \d{2}:\d{2}$/)).toBeVisible();
-    await expect(page.getByTestId("auth-account-claude-work").getByText(/limited/)).toHaveCount(0);
+    await expect(home.getByText("0% left")).toBeVisible();
+    await expect(home.getByText(/^resets \d{2}:\d{2}$/)).toBeVisible();
+    const key = page.getByTestId("auth-account-claude-key");
+    await expect(key.getByText("API key ····7Q2c")).toBeVisible();
+    await expect(key.getByText("%")).toHaveCount(0);
+    await expect(page.getByTestId("auth-accounts-popover")).not.toContainText(/\bready\b|default/i);
+    await expect(page.getByRole("textbox")).toHaveCount(0);
+  });
+
+  test("switches the provider default with the SWITCH button", async ({ page }) => {
+    await mockSessions(page, []);
+    await mockAccounts(page);
+    let poolBody: unknown = null;
+    await page.route("/api/auth-pools/claude", async (route) => {
+      poolBody = route.request().postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ pool: {} }),
+      });
+    });
+    await page.goto("/");
+    await openMenu(page);
+
+    await page.getByRole("button", { name: "Switch Claude to home@x.com" }).click();
+
+    await expect.poll(() => poolBody).toEqual({ defaultAccountId: "claude-home" });
+  });
+
+  test("adding an account and closing its dialog deletes the new account", async ({ page }) => {
+    await mockSessions(page, []);
+    await mockAccounts(page);
+    await page.route("/api/auth-accounts", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          account: { id: "claude-added", provider: "claude", createdAt: "2026-01-01T12:00:00Z" },
+        }),
+      });
+    });
+    await page.route("/api/auth-accounts/claude-added/login-status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ accountId: "claude-added", status: "sign-in-required" }),
+      });
+    });
+    const deletes: string[] = [];
+    await page.route("/api/auth-accounts/claude-added", async (route) => {
+      deletes.push(route.request().method());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ removed: "claude-added" }),
+      });
+    });
+    await page.goto("/");
+    await openMenu(page);
+
+    await page.getByRole("button", { name: "+ Add Claude account" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add Claude account" });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+
+    await expect.poll(() => deletes).toEqual(["DELETE"]);
   });
 
   test("removes an account only after confirmation", async ({ page }) => {
@@ -125,16 +217,17 @@ test.describe("Agent accounts menu", () => {
     await openMenu(page);
 
     const home = page.getByTestId("auth-account-claude-home");
-    await home.getByRole("button", { name: "Remove claude account Home" }).click();
-    await home.getByRole("button", { name: "Keep" }).click();
+    await home.getByRole("button", { name: "Remove home@x.com" }).click();
+    await expect(home.getByText("Remove home@x.com?")).toBeVisible();
+    await home.getByRole("button", { name: "Cancel" }).click();
     expect(deletes).toEqual([]);
 
-    await home.getByRole("button", { name: "Remove claude account Home" }).click();
-    await home.getByRole("button", { name: "Confirm remove claude account Home" }).click();
+    await home.getByRole("button", { name: "Remove home@x.com" }).click();
+    await home.getByRole("button", { name: "Remove", exact: true }).click();
     await expect.poll(() => deletes).toEqual(["DELETE"]);
   });
 
-  test("cancelling sign-in returns the row to sign in required", async ({ page }) => {
+  test("cancelling sign-in leaves the signed-out row with its Sign in button", async ({ page }) => {
     await mockSessions(page, []);
     let codexStatus: AuthAccountSummary["status"] = "sign_in_required";
     await mockAccounts(page, () => ({
@@ -175,18 +268,19 @@ test.describe("Agent accounts menu", () => {
     await openMenu(page);
 
     const row = page.getByTestId("auth-account-codex-new");
-    await row.getByRole("button", { name: "Sign in codex account Fresh" }).click();
-    const dialog = page.getByRole("dialog", { name: /Sign in codex/ });
+    await row.getByRole("button", { name: "Sign in New Codex account" }).click();
+    const dialog = page.getByRole("dialog", { name: /Sign in Codex/ });
     await expect(dialog).toBeVisible();
     await dialog.getByRole("button", { name: "Continue", exact: true }).click();
-    await expect(row).toContainText("signing in");
+    await expect(dialog.getByText("Waiting for the device code…")).toBeVisible();
     await page.keyboard.press("Escape");
 
     await expect(dialog).toBeHidden();
     expect(inputs).toEqual([{ cancel: true }]);
     // Well under the 30s accounts cache window: the cancel itself refetches.
-    await expect(row).toContainText("sign in required", { timeout: 5_000 });
-    await expect(row).not.toContainText("signing in");
+    await expect(row.getByRole("button", { name: "Sign in New Codex account" })).toBeVisible({
+      timeout: 5_000,
+    });
   });
 
   test("stays inside a 320px viewport", async ({ page }) => {
@@ -208,7 +302,7 @@ test.describe("Agent accounts menu", () => {
   });
 });
 
-test.describe("Spawn auth picker", () => {
+test.describe("Spawn account picker", () => {
   test("sends the picked account and offers limited accounts", async ({ page }) => {
     await mockSessions(page, [], PROJECTS);
     await mockAccounts(page);
@@ -232,10 +326,11 @@ test.describe("Spawn auth picker", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
 
-    const picker = page.getByRole("combobox", { name: "Spawn auth" });
+    const picker = page.getByRole("combobox", { name: "Spawn account" });
     await expect(
-      picker.getByRole("option", { name: /^Auth · Home \(limited until/ }),
-    ).toBeEnabled();
+      picker.getByRole("option", { name: "Account · Auto (now alek@x.com)" }),
+    ).toBeAttached();
+    await expect(picker.getByRole("option", { name: "Account · home@x.com" })).toBeEnabled();
     await picker.selectOption("claude-home");
 
     const textarea = page.locator("textarea").last();
@@ -255,11 +350,36 @@ test.describe("Spawn auth picker", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
 
-    await expect(page.getByRole("combobox", { name: "Spawn auth" })).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Spawn account" })).toHaveCount(0);
+  });
+
+  test("never offers an account without an identity", async ({ page }) => {
+    await mockSessions(page, [], PROJECTS);
+    await mockAccounts(page, () => ({
+      status: 200,
+      body: {
+        accounts: [
+          account({
+            id: "codex-new",
+            provider: "codex",
+            displayName: "New Codex account",
+            authenticated: false,
+            status: "sign_in_required",
+          }),
+        ],
+        pools: {},
+      },
+    }));
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+
+    await expect(page.getByRole("combobox", { name: "Spawn account" })).toHaveCount(0);
+    await expect(page.getByText("New Codex account")).toHaveCount(0);
   });
 });
 
-test.describe("Session switch auth", () => {
+test.describe("Session switch account", () => {
   test("switches a pinned session back to Auto", async ({ page }) => {
     const session = makeWorkingSession({
       id: "auth-switch-1",
@@ -292,11 +412,13 @@ test.describe("Session switch auth", () => {
     });
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: "Switch auth" }).click();
-    const dialog = page.getByRole("dialog", { name: /Switch claude account/ });
-    await expect(dialog.getByTestId("switch-auth-current")).toContainText("Now: Work (pinned)");
-    await dialog.getByTestId("switch-auth-account").selectOption("");
-    await dialog.getByRole("button", { name: "Switch" }).click();
+    await page.getByRole("button", { name: "Switch account" }).click();
+    const dialog = page.getByRole("dialog", { name: "Switch Claude account" });
+    const group = dialog.getByRole("radiogroup", { name: "Switch Claude account" });
+    await expect(group.getByRole("img", { name: "current" })).toBeVisible();
+    await expect(group.getByRole("radio", { name: /home@x.com/ })).toBeEnabled();
+    await group.getByRole("radio", { name: /Auto/ }).check();
+    await dialog.getByRole("button", { name: "Switch", exact: true }).click();
 
     await expect.poll(() => switchBody).toEqual({ accountId: null });
     await expect(dialog).toBeHidden();
