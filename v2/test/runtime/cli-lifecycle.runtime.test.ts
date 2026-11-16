@@ -2959,8 +2959,7 @@ projects:
 
     await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) =>
-        value.includes(`Completed ${spawned.id}.`) && value.includes("No sessions."),
+      accept: (value) => value.includes(`Closed ${spawned.id}.`) && value.includes("No sessions."),
     });
 
     const listed = await pollUntil(
@@ -4470,7 +4469,7 @@ projects:
     });
 
     expect(detachedPane).toContain(
-      "Enter attach  l logs  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
+      "Enter attach  l logs  p pause  c close  r restore  k kill  Ctrl+G detach  Esc quit",
     );
   });
 

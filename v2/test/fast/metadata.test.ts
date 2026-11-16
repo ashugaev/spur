@@ -77,6 +77,7 @@ import type {
   SessionRecord,
   SubmitAckBaseline,
   TelegramChoice,
+  WorkItemLifecycleRecord,
 } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -118,7 +119,7 @@ it("round-trips pending spawn ownership and rejects stale checkpoints and malfor
     number: 1,
     title: "task",
     repo: "repo",
-    autoComplete: false,
+    autoClose: false,
     createdAt: work.createdAt,
     state: "pending",
     spawnWorkId: "work",
@@ -413,6 +414,112 @@ describe("github poll-disabled registry", () => {
 });
 
 describe("work-item lifecycle registry", () => {
+  const lifecycleBase = {
+    externalId: "acme/api#7",
+    url: "https://github.com/acme/api/pull/7",
+    number: 7,
+    title: "Review me",
+    repo: "acme/api",
+    createdAt: "2026-05-11T10:00:00.000Z",
+  };
+  it.each([
+    [{}, true],
+    [{ autoComplete: true }, true],
+    [{ autoComplete: false }, false],
+    [{ autoComplete: "false" }, true],
+    [{ autoClose: true }, true],
+    [{ autoClose: false }, false],
+    [{ autoClose: true, autoComplete: true }, true],
+    [{ autoClose: false, autoComplete: false }, false],
+    [{ autoClose: false, autoComplete: true }, false],
+    [{ autoClose: true, autoComplete: false }, false],
+    [{ autoClose: "false", autoComplete: false }, false],
+    [{ autoClose: false, autoComplete: "true" }, false],
+    [{ autoClose: null, autoComplete: "false" }, true],
+  ] as const)("decodes policy %j as %s without rewriting", async (policy, autoClose) => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "work-item-lifecycle", "api");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "pr-watch.json");
+    const bytes = JSON.stringify({
+      records: [{ ...lifecycleBase, sessionId: "api-a1b2", ...policy }],
+    });
+    await writeFile(path, bytes);
+    expect(
+      readWorkItemLifecycles(dataDir, "api", "pr-watch").get(lifecycleBase.externalId),
+    ).toEqual({
+      ...lifecycleBase,
+      sessionId: "api-a1b2",
+      state: "running",
+      autoClose,
+    });
+    expect(readFileSync(path, "utf8")).toBe(bytes);
+  });
+
+  it("preserves false in every lifecycle state through record and delete for legacy readers", async () => {
+    const dataDir = await newDataDir();
+    const records: WorkItemLifecycleRecord[] = [
+      {
+        ...lifecycleBase,
+        externalId: "pending",
+        autoClose: false,
+        state: "pending",
+        spawnWorkId: "owned-work",
+      },
+      {
+        ...lifecycleBase,
+        externalId: "running",
+        autoClose: false,
+        state: "running",
+        sessionId: "api-a1b2",
+      },
+      {
+        ...lifecycleBase,
+        externalId: "failed",
+        autoClose: false,
+        state: "failed",
+        error: "spawn failed",
+      },
+      {
+        ...lifecycleBase,
+        externalId: "completed",
+        autoClose: false,
+        state: "completed",
+        sessionId: "api-a1b2",
+        completedAt: "2026-05-11T11:00:00.000Z",
+      },
+    ];
+    const path = join(dataDir, "source-state", "work-item-lifecycle", "api", "pr-watch.json");
+    const assertSurvivors = () => {
+      expect([...readWorkItemLifecycles(dataDir, "api", "pr-watch").values()]).toEqual(
+        [...records].sort((left, right) => left.externalId.localeCompare(right.externalId)),
+      );
+      const disk = JSON.parse(readFileSync(path, "utf8")) as {
+        records: Array<{ externalId: string; autoComplete?: unknown; autoClose?: unknown }>;
+      };
+      expect(disk.records.every((record) => !Object.hasOwn(record, "autoClose"))).toBe(true);
+      // Old binaries recognize only autoComplete and default absent/malformed values to true.
+      const legacy = disk.records.map((record) => ({
+        id: record.externalId,
+        autoComplete: typeof record.autoComplete === "boolean" ? record.autoComplete : true,
+      }));
+      expect(legacy).toEqual(
+        [...records]
+          .sort((left, right) => left.externalId.localeCompare(right.externalId))
+          .map((record) => ({ id: record.externalId, autoComplete: false })),
+      );
+    };
+    for (const record of records) recordWorkItemLifecycle(dataDir, "api", "pr-watch", record);
+    assertSurvivors();
+    recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
+      ...lifecycleBase,
+      autoClose: true,
+      state: "pending",
+    });
+    deleteWorkItemLifecycle(dataDir, "api", "pr-watch", lifecycleBase.externalId);
+    assertSurvivors();
+  });
+
   it("round-trips lifecycle records", async () => {
     const dataDir = await newDataDir();
     recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
@@ -424,7 +531,7 @@ describe("work-item lifecycle registry", () => {
       title: "Review me",
       repo: "acme/api",
       createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
+      autoClose: true,
     });
 
     expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
@@ -436,7 +543,7 @@ describe("work-item lifecycle registry", () => {
       title: "Review me",
       repo: "acme/api",
       createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
+      autoClose: true,
     });
   });
 
@@ -475,7 +582,7 @@ describe("work-item lifecycle registry", () => {
       title: "Review me",
       repo: "acme/api",
       createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
+      autoClose: true,
     });
   });
 
@@ -490,7 +597,7 @@ describe("work-item lifecycle registry", () => {
       title: "Review me",
       repo: "acme/api",
       createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
+      autoClose: true,
     });
 
     deleteWorkItemLifecycle(dataDir, "api", "pr-watch", "acme/api#7");

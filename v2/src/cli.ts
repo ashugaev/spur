@@ -1962,7 +1962,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c close, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
@@ -2498,7 +2498,7 @@ async function runInteractiveSessionList(
       sessions = sessions.filter((entry) => entry.id !== completed.id);
       setSelectedSession(null);
       clearPendingConfirmations();
-      statusMessage = brandLine(`Completed ${completed.id}.`);
+      statusMessage = brandLine(`Closed ${completed.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       statusMessage = brandLine(message);
@@ -3908,14 +3908,14 @@ export function createProgram(cliEntrypoint: string): Command {
 
   program
     .command("complete")
-    .description("Mark a session complete and clean up its runtime artifacts.")
+    .description("Close a session and clean up its runtime artifacts.")
     .argument("<sessionId>", "Session id")
     .option(
       "--pr-action <action>",
       "Handle open PR before cleanup (leave_open or close)",
       parsePrActionOption,
     )
-    .option("--skip-pr-check", "Complete without any GitHub PR check (no gh calls)")
+    .option("--skip-pr-check", "Close without any GitHub PR check (no gh calls)")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -3928,9 +3928,9 @@ export function createProgram(cliEntrypoint: string): Command {
       }
       await outputResult({
         json: Boolean(options.json),
-        label: "completing session",
+        label: "closing session",
         action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath, body),
-        success: (session) => `Completed ${session.id}.`,
+        success: (session) => `Closed ${session.id}.`,
         render: renderSessionCard,
       });
     });
@@ -4302,7 +4302,7 @@ export function createProgram(cliEntrypoint: string): Command {
 
   program
     .command("reopen")
-    .description("Restart a completed session in place, keeping its id and history.")
+    .description("Restart a closed session in place, keeping its id and history.")
     .argument("<sessionId>", "Session id")
     .option(
       "--force",

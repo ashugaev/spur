@@ -367,7 +367,7 @@ function spawnDeskGroupConfig(options?: { thirdBlock?: boolean }) {
   };
 }
 
-function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
+function workItemSpawnConfig(options?: { prompt?: string; autoClose?: boolean }) {
   return {
     dataDir: DATA_DIR,
     projects: {
@@ -388,7 +388,7 @@ function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean
                   prompt: options?.prompt ?? "Take {{url}} from {{repo}}.",
                 },
               ],
-              autoComplete: options?.autoComplete ?? true,
+              autoClose: options?.autoClose ?? true,
             },
           },
         },
@@ -469,7 +469,7 @@ function workItemReadOnlyFanoutSpawnConfig() {
   };
 }
 
-function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
+function sentrySpawnConfig(options?: { prompt?: string; autoClose?: boolean }) {
   return {
     dataDir: "/tmp/spur-data",
     projects: {
@@ -496,7 +496,7 @@ function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }
                   prompt: options?.prompt ?? "Triage {{url}} from {{repo}}.",
                 },
               ],
-              autoComplete: options?.autoComplete ?? true,
+              autoClose: options?.autoClose ?? true,
             },
           },
         },
@@ -740,7 +740,7 @@ function runningWorkItemLifecycle(
     title: "Fix the bug",
     repo: "acme/api",
     createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
-    autoComplete: true,
+    autoClose: true,
     state: "running",
     ...options,
   };
@@ -5696,7 +5696,7 @@ describe("startConfiguredTriggers", () => {
           number: 42,
           title: "Fix the bug",
           repo: "acme/api",
-          autoComplete: true,
+          autoClose: true,
         }),
       );
     } finally {
@@ -5786,7 +5786,7 @@ describe("startConfiguredTriggers", () => {
         expect.objectContaining({
           externalId: "acme/api#42",
           state: "running",
-          autoComplete: false,
+          autoClose: false,
         }),
       );
     } finally {
@@ -5824,7 +5824,7 @@ describe("startConfiguredTriggers", () => {
           externalId: "acme/web#WEB-7",
           state: "running",
           sessionId: "api-9",
-          autoComplete: true,
+          autoClose: true,
         }),
       );
     } finally {
@@ -5855,7 +5855,7 @@ describe("startConfiguredTriggers", () => {
                 handle: {
                   source: "check",
                   event: "script:item.new",
-                  spawn: { blocks: [{ prompt: "{{branch}} {{id}}" }], autoComplete: true },
+                  spawn: { blocks: [{ prompt: "{{branch}} {{id}}" }], autoClose: true },
                 },
               },
             },
@@ -5899,7 +5899,7 @@ describe("startConfiguredTriggers", () => {
             externalId: "script:check#a",
             state: "running",
             sessionId: "api-9",
-            autoComplete: true,
+            autoClose: true,
           }),
         );
       } finally {
@@ -6521,16 +6521,13 @@ describe("startConfiguredTriggers", () => {
       });
       const records = useWorkItemLifecycleStore([
         runningWorkItemLifecycle({
-          autoComplete: retainedPolicy,
+          autoClose: retainedPolicy,
           createdAt: new Date(Date.now() - ageMs).toISOString(),
         }),
       ]);
-      const triggerConfig = workItemSpawnConfig({ autoComplete: configured === true });
+      const triggerConfig = workItemSpawnConfig({ autoClose: configured === true });
       if (configured === "absent") {
-        Reflect.deleteProperty(
-          triggerConfig.projects.api.triggers["pick-up"].spawn,
-          "autoComplete",
-        );
+        Reflect.deleteProperty(triggerConfig.projects.api.triggers["pick-up"].spawn, "autoClose");
       }
       const { startConfiguredTriggers } = await loadTriggersModule();
       const controller = startConfiguredTriggers({
@@ -6842,7 +6839,7 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("logs spawn.failed when autoComplete=true is configured on a non-work-item event", async () => {
+  it("logs spawn.failed when autoClose=true is configured on a non-work-item event", async () => {
     const spawnMock = vi.fn();
     const cronAutoCompleteConfig = {
       dataDir: "/tmp/spur-data",
@@ -6861,7 +6858,7 @@ describe("startConfiguredTriggers", () => {
                     prompt: "ship the task",
                   },
                 ],
-                autoComplete: true,
+                autoClose: true,
               },
             },
           },

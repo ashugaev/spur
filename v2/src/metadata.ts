@@ -738,7 +738,8 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         title: raw.title,
         repo: raw.repo,
         createdAt: raw.createdAt,
-        autoComplete: typeof raw.autoComplete === "boolean" ? raw.autoComplete : true,
+        // Either explicit false wins; absent/malformed legacy policy historically enables closing.
+        autoClose: raw.autoClose !== false && raw.autoComplete !== false,
       };
       const state = isWorkItemLifecycleState(raw.state) ? raw.state : "running";
       if (state === "pending") {
@@ -2681,6 +2682,19 @@ export function readWorkItemLifecycles(
   return existsSync(path) ? readWorkItemLifecycleFile(path) : new Map();
 }
 
+function writeWorkItemLifecycles(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  records: Map<string, WorkItemLifecycleRecord>,
+): void {
+  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
+    records: [...records.values()]
+      .sort((left, right) => left.externalId.localeCompare(right.externalId))
+      .map(({ autoClose, ...record }) => ({ ...record, autoComplete: autoClose })),
+  });
+}
+
 export function recordWorkItemLifecycle(
   dataDir: string,
   projectId: string,
@@ -2689,11 +2703,7 @@ export function recordWorkItemLifecycle(
 ): void {
   const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
   records.set(record.externalId, record);
-  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
-    records: [...records.values()].sort((left, right) =>
-      left.externalId.localeCompare(right.externalId),
-    ),
-  });
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
 }
 
 export function deleteWorkItemLifecycle(
@@ -2704,11 +2714,7 @@ export function deleteWorkItemLifecycle(
 ): void {
   const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
   if (!records.delete(externalId)) return;
-  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
-    records: [...records.values()].sort((left, right) =>
-      left.externalId.localeCompare(right.externalId),
-    ),
-  });
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
 }
 
 export function readPendingSendBatches(dataDir: string): Map<string, PersistedPendingBatch> {

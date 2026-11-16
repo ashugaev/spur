@@ -113,7 +113,7 @@ type DeliveryOutcome =
   | { status: "failed"; error: string };
 
 type WorkItemLifecycleBaseDraft = WorkItemEventData & {
-  autoComplete: boolean;
+  autoClose: boolean;
   createdAt: string;
 };
 
@@ -179,11 +179,11 @@ function isSendTriggerAllowed(
 
 function createWorkItemLifecycleBase(
   workItemData: WorkItemEventData,
-  autoComplete: boolean,
+  autoClose: boolean,
 ): WorkItemLifecycleBaseDraft {
   return {
     ...workItemData,
-    autoComplete,
+    autoClose,
     createdAt: new Date().toISOString(),
   };
 }
@@ -232,7 +232,7 @@ async function shouldClaimWorkItemSpawn(
   triggerId: string,
   sourceId: string,
   workItemData: WorkItemEventData,
-  autoComplete: boolean,
+  autoClose: boolean,
   spawnWorkId?: string,
 ): Promise<WorkItemSuppressed | null> {
   const existing = readWorkItemLifecycles(dataDir, projectId, sourceId).get(
@@ -278,7 +278,7 @@ async function shouldClaimWorkItemSpawn(
   }
 
   recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-    ...createWorkItemLifecycleBase(workItemData, autoComplete),
+    ...createWorkItemLifecycleBase(workItemData, autoClose),
     state: "pending",
     ...(spawnWorkId !== undefined ? { spawnWorkId } : {}),
   });
@@ -293,7 +293,7 @@ async function runSpawnTrigger(
   sourceId: string,
   eventName: string,
   blocks: TriggerSpawnBlockConfig[],
-  autoComplete: boolean | undefined,
+  autoClose: boolean | undefined,
   restrictWrites: boolean | undefined,
   allowedTriggers: string[] | undefined,
   deskGroup: boolean | undefined,
@@ -324,7 +324,7 @@ async function runSpawnTrigger(
     WORK_ITEM_NEW_EVENT_NAMES.has(eventName) && isWorkItemEventData(eventData) ? eventData : null;
 
   try {
-    if (autoComplete && !workItemData) {
+    if (autoClose && !workItemData) {
       throw new Error(`Cannot auto-complete ${eventName}: incompatible work-item payload`);
     }
     if (workItemData && work.nextBlockIndex > 0) {
@@ -342,7 +342,7 @@ async function runSpawnTrigger(
         triggerId,
         sourceId,
         workItemData,
-        autoComplete === true,
+        autoClose === true,
         work.workId,
       );
       if (suppressed) {
@@ -445,7 +445,7 @@ async function runSpawnTrigger(
         if (!queue.save()) return;
         if (workItemData) {
           recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-            ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+            ...createWorkItemLifecycleBase(workItemData, autoClose === true),
             state: "running",
             sessionId: session.id,
           });
@@ -488,7 +488,7 @@ async function runSpawnTrigger(
         if (!queue.save()) return;
         if (workItemData && work.lastSessionId === undefined) {
           recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-            ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+            ...createWorkItemLifecycleBase(workItemData, autoClose === true),
             state: "failed",
             error: message,
           });
@@ -532,7 +532,7 @@ async function runSpawnTrigger(
       (claim === undefined || (claim.state === "pending" && claim.spawnWorkId === work.workId))
     ) {
       recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-        ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+        ...createWorkItemLifecycleBase(workItemData, autoClose === true),
         state: "failed",
         error: message,
       });
@@ -551,7 +551,7 @@ async function runSpawnTrigger(
   }
 }
 
-async function runWorkItemAutoCompleteTrigger(
+async function runWorkItemAutoCloseTrigger(
   dataDir: string,
   service: SessionService,
   projectId: string,
@@ -563,7 +563,7 @@ async function runWorkItemAutoCompleteTrigger(
   const now = Date.now();
 
   for (const lifecycle of lifecycles.values()) {
-    if (lifecycle.state !== "running" || !lifecycle.autoComplete) {
+    if (lifecycle.state !== "running" || !lifecycle.autoClose) {
       continue;
     }
     const createdAt = Date.parse(lifecycle.createdAt);
@@ -875,9 +875,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const tickFlushQueued = new Set<string>();
   const routeLeases = new Map<string, string>();
   const loggedSuppressions = new Map<string, Set<string>>();
-  const autoCompleteChecks: Array<() => void> = [];
+  const autoCloseChecks: Array<() => void> = [];
   let flushTimer: NodeJS.Timeout | null = null;
-  let autoCompleteTimer: NodeJS.Timeout | null = null;
+  let autoCloseTimer: NodeJS.Timeout | null = null;
   let stopped = false;
   const interactiveFlushTimers = new Set<NodeJS.Timeout>();
 
@@ -1623,7 +1623,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       work.sourceId,
       work.eventName,
       trigger.spawn.blocks,
-      trigger.spawn.autoComplete,
+      trigger.spawn.autoClose,
       trigger.spawn.restrictWrites,
       trigger.spawn.allowedTriggers,
       trigger.spawnDeskGroup,
@@ -2235,11 +2235,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
       unsubscribers.push(unsubscribe);
 
-      if (!isSendTrigger(trigger) && trigger.spawn.autoComplete === true) {
-        autoCompleteChecks.push(() => {
+      if (!isSendTrigger(trigger) && trigger.spawn.autoClose === true) {
+        autoCloseChecks.push(() => {
           const queueKey = `${projectId}:${triggerId}:${trigger.source}:work-item-auto-complete`;
           enqueue(queueKey, async () => {
-            await runWorkItemAutoCompleteTrigger(
+            await runWorkItemAutoCloseTrigger(
               deps.config.dataDir,
               deps.sessionService,
               projectId,
@@ -2253,13 +2253,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
   }
 
-  if (autoCompleteChecks.length > 0) {
-    for (const check of autoCompleteChecks) {
+  if (autoCloseChecks.length > 0) {
+    for (const check of autoCloseChecks) {
       check();
     }
-    autoCompleteTimer = setInterval(() => {
+    autoCloseTimer = setInterval(() => {
       if (stopped) return;
-      for (const check of autoCompleteChecks) {
+      for (const check of autoCloseChecks) {
         check();
       }
     }, WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS);
@@ -2294,9 +2294,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       }
       for (const timer of interactiveFlushTimers) clearTimeout(timer);
       interactiveFlushTimers.clear();
-      if (autoCompleteTimer) {
-        clearInterval(autoCompleteTimer);
-        autoCompleteTimer = null;
+      if (autoCloseTimer) {
+        clearInterval(autoCloseTimer);
+        autoCloseTimer = null;
       }
       for (let index = unsubscribers.length - 1; index >= 0; index -= 1) {
         try {

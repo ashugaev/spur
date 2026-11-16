@@ -59,9 +59,9 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 
 ## list
 
-`spur list [--json] [--all] [--link <label[=URL]>...]` — `--all` adds completed; repeated `--link` uses AND; both require `--json`; TTY selector (`Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill); `v2/src/cli.ts`, [GET /sessions](daemon-api.md#session-routes).
+`spur list [--json] [--all] [--link <label[=URL]>...]` — `--all` adds closed sessions; repeated `--link` uses AND; both require `--json`; TTY selector (`Enter` attach, `l` log, `p` pause, `c` close, `r` restore, `k` kill); `v2/src/cli.ts`, [GET /sessions](daemon-api.md#session-routes).
 `spur transitions [--since <cursor>] [--link <label[=URL]>...] [--limit <n>] [--kinds status,state] [--json]` — poll lifecycle facts, cursor envelope in JSON, repeated links use AND; `v2/src/cli.ts`, [feed contract](daemon-api.md#session-routes).
-`spur pause <sessionId> [--json]` keeps the worktree; `spur complete|kill <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]`; kill-only `--force` skips dirty-worktree/unpushed-commit confirmation; `v2/src/cli.ts`.
+`spur pause <sessionId> [--json]` keeps the worktree; `spur complete|kill <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]` closes sessions; kill-only `--force` skips dirty-worktree/unpushed-commit confirmation; `v2/src/cli.ts`.
 `spur restore <sessionId> [--force] [--json]`, `spur reopen <sessionId> [--force] [--json]` (in place, prompt not resent) — `--force` bypasses the foreign-live-process refusal; token-budget refusal: [configuration](configuration.md#field-reference). A restore/reopen that clears both gates also clears the session's durable GitHub poll-disable ([configuration.md#automatic-reminders](configuration.md#automatic-reminders)); one refused by either gate leaves it untouched.
 `spur respawn <sessionId> [--reasoning-effort <level>] [--force] [--json]` — fresh id; same-agent reasoning override inherited; `v2/src/cli.ts`.
 `spur handoff <sessionId> --agent <name> [--model <id>] [--reasoning-effort <level>] [--notes <text>] [--json]` — same workspace; provider/model effort validation in `v2/src/session-service.ts`.

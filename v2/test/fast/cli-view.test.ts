@@ -72,6 +72,7 @@ describe("cli-view.describeSession", () => {
     expect(live).toContain("Completed");
     const closed = render(session({ state: "stopped", status: "completed", runtimeAlive: false }));
     expect(closed).toContain("Closed");
+    expect(describeSession(session({ status: "completed" }))).toContain("marked closed");
   });
 
   it("labels shared workspaces without implying a broken worktree", () => {
@@ -316,7 +317,7 @@ describe("cli-view.renderInteractiveSessionList", () => {
 
     expect(output).toContain("Esc quit");
     expect(output).toContain("p pause");
-    expect(output).toContain("c complete");
+    expect(output).toContain("c close");
     expect(output).toContain("l logs");
     expect(output).toContain("Ctrl+G detach");
     expect(output).not.toContain("q/Esc quit");

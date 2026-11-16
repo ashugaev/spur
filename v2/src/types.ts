@@ -295,7 +295,7 @@ export interface AvailableBacklogItem {
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
 
 interface WorkItemLifecycleBase extends WorkItemEventData {
-  autoComplete: boolean;
+  autoClose: boolean;
   createdAt: string;
 }
 
@@ -630,7 +630,7 @@ export interface TriggerSpawnBlockConfig {
 
 export interface TriggerSpawnConfig {
   blocks: TriggerSpawnBlockConfig[];
-  autoComplete?: boolean;
+  autoClose?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
 }

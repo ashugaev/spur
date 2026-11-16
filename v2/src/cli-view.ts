@@ -243,7 +243,7 @@ export function describeSession(session: SessionListItemView): string {
   } else if (session.status === "paused") {
     facts.push("paused by user");
   } else if (session.status === "completed") {
-    facts.push("marked complete");
+    facts.push("marked closed");
     facts.push("hidden from list");
   } else if (session.state === "working") {
     facts.push("processing");
@@ -528,7 +528,7 @@ export function renderInteractiveSessionList(args: {
     ...detailLines,
     "",
     dimText(
-      "↑↓ move  Enter attach  l logs  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
+      "↑↓ move  Enter attach  l logs  p pause  c close  r restore  k kill  Ctrl+G detach  Esc quit",
     ),
   );
   if (args.statusMessage) {
