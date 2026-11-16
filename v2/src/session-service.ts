@@ -133,11 +133,13 @@ import {
 import {
   findLatestSessionFile as findLatestClaudeSessionFile,
   DEFAULT_CLAUDE_MODEL,
+  claudeCommand,
 } from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
   CODEX_HOME_DIR,
   codexArgsSelectProvider,
+  codexCommand,
   codexHookHomePath,
   codexUsesCustomProvider,
   findLatestCodexSessionFile,
@@ -166,7 +168,20 @@ import {
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
-import { readFreshSessionQuota, type QuotaSourceResult } from "./usage-report.js";
+import {
+  readFreshSessionQuota,
+  readHostCredentialSources,
+  type QuotaSourceResult,
+  type UsageReportDeps,
+} from "./usage-report.js";
+import {
+  AuthAlerts,
+  failedEventDetails,
+  observeHostSource,
+  type AuthAlert,
+  type ManagedBreakage,
+} from "./auth-alerts.js";
+import { AuthTerminalLogins, type TerminalLogin } from "./auth-terminal-login.js";
 import {
   ACTIVITY_WINDOW_MS,
   CONVERSATION_PAGE_ENTRIES,
@@ -3803,6 +3818,8 @@ export class SessionService {
   private readonly preflightUsageStore: PreflightUsageStore;
   private readonly authAccounts: AuthAccounts;
   private readonly authProxy: AuthProxy;
+  private readonly authAlerts: AuthAlerts;
+  private readonly authTerminals: AuthTerminalLogins;
   private authSnapshot: { at: number; run: Promise<AuthProxyState> } | undefined;
   readonly bootstrapConfigPath: string;
   readonly startedAt: string;
@@ -4321,6 +4338,37 @@ export class SessionService {
       authProxyBinaryPath,
       (rotation) => void this.recordAuthRotation(rotation),
     );
+    this.authAlerts = new AuthAlerts({
+      dataDir: this.config.dataDir,
+      onOpened: (entry) =>
+        this.logEvent("session.auth.failed", {
+          level: "warn",
+          message: `${entry.provider} sign-in is broken`,
+          details: failedEventDetails(entry),
+        }),
+    });
+    this.authTerminals = new AuthTerminalLogins({
+      dataDir: this.config.dataDir,
+      homeDir: homedir(),
+      createTmuxCommandSession,
+      killTmuxSession: (name) => killTmuxSession(name),
+      tmuxPaneDead: (name, options) => tmuxPaneDead(name, options),
+      accountProvider: (accountId) => this.requireAuthorizationAccount(accountId).provider,
+      cancelLogin: (accountId) => this.authProxy.cancelLogin(accountId),
+      importNativeLogin: (accountId, provider) =>
+        this.authProxy.importNativeLogin(accountId, provider),
+      loginStatus: (accountId) => this.authProxy.loginStatus(accountId),
+      hostProbe: async (provider) => {
+        this.authSnapshot = undefined;
+        return (
+          (await readHostCredentialSources(this.usageReportDeps(), true)).find(
+            (source) => source.provider === provider,
+          ) ?? null
+        );
+      },
+      agentCommand: (provider) => (provider === "claude" ? claudeCommand() : codexCommand()),
+      now: () => Date.now(),
+    });
     this.preflightUsageStore = new PreflightUsageStore(this.config.dataDir);
     void this.preflightUsageStore.prune();
     // Before any classification: a restart mid-command must already know
@@ -4402,6 +4450,7 @@ export class SessionService {
     }
     this.spawnCompletions.clear();
     this.authProxy.dispose();
+    this.authTerminals.dispose();
     // Settles every queued lookup as skipped:cancelled so a prCheckRuns drain
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
@@ -7217,19 +7266,20 @@ export class SessionService {
   private async freshQuotaForClear(session: SessionRecord): Promise<QuotaSourceResult | null> {
     // Host credentials do not describe a managed session's proxy account; clear needs --force.
     if (session.auth) return null;
+    return readFreshSessionQuota(this.usageReportDeps(), session);
+  }
+
+  private usageReportDeps(): UsageReportDeps {
     const nowMs = Date.now();
     const todayStart = new Date(nowMs);
     todayStart.setHours(0, 0, 0, 0);
-    return readFreshSessionQuota(
-      {
-        fetch: globalThis.fetch,
-        homeDir: homedir(),
-        dataDir: this.config.dataDir,
-        nowMs,
-        todayStartMs: todayStart.getTime(),
-      },
-      session,
-    );
+    return {
+      fetch: globalThis.fetch,
+      homeDir: homedir(),
+      dataDir: this.config.dataDir,
+      nowMs,
+      todayStartMs: todayStart.getTime(),
+    };
   }
 
   async clearRateLimit(
@@ -7380,6 +7430,7 @@ export class SessionService {
   }
 
   async recoverManagedAuthorization(): Promise<void> {
+    await this.authTerminals.sweep(this.authAccounts.read().accounts.map((account) => account.id));
     await this.authProxy.recover();
   }
 
@@ -24726,6 +24777,55 @@ export class SessionService {
 
   authorizationLoginStatus(accountId: string): Promise<AuthLogin> {
     return this.authProxy.loginStatus(accountId);
+  }
+
+  async listAuthAlerts(): Promise<{ alerts: AuthAlert[] }> {
+    const state = this.authAccounts.read();
+    let managed: ManagedBreakage[] | null = [];
+    if (state.accounts.length > 0) {
+      try {
+        managed = (await this.readAuthorizationState()).accounts.flatMap((entry) => {
+          const account = state.accounts.find((candidate) => candidate.id === entry.id);
+          return entry.brokenAt && account
+            ? [
+                {
+                  accountId: account.id,
+                  provider: account.provider,
+                  label: account.label?.trim() || account.id,
+                  brokenAt: entry.brokenAt,
+                },
+              ]
+            : [];
+        });
+      } catch {
+        managed = null;
+      }
+    }
+    const host = (await readHostCredentialSources(this.usageReportDeps())).map((source) => ({
+      provider: source.provider,
+      observation: observeHostSource(source),
+    }));
+    const { alerts } = await this.authAlerts.evaluate(
+      { managed, host, sessions: listSessions(this.config.dataDir) },
+      new Date(),
+    );
+    return { alerts };
+  }
+
+  startTerminalLogin(
+    target: { accountId: string } | { host: AuthProvider },
+  ): Promise<TerminalLogin> {
+    this.authSnapshot = undefined;
+    return this.authTerminals.start(target);
+  }
+
+  getTerminalLogin(id: string): TerminalLogin {
+    return this.authTerminals.get(id);
+  }
+
+  async stopTerminalLogin(id: string): Promise<void> {
+    this.authSnapshot = undefined;
+    await this.authTerminals.stop(id);
   }
 
   async listClaudeAccounts() {

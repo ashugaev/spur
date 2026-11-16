@@ -13,6 +13,7 @@ import {
 import { parseAgentName } from "./agents/index.js";
 import { z } from "zod";
 import { AuthorizationError, authProviderSchema } from "./auth-accounts.js";
+import { authLoginMethodSchema } from "./auth-proxy.js";
 import { agentPaneChildFallbackEnabled } from "./agents/executable.js";
 import {
   AgentModelError,
@@ -1476,7 +1477,59 @@ export async function startServer(
 
       const managedLoginId = path.match(/^\/auth-accounts\/([^/]+)\/login$/)?.[1];
       if (method === "POST" && managedLoginId) {
-        sendJson(response, 200, await service.startAuthorizationLogin(managedLoginId));
+        const body = z
+          .object({ method: authLoginMethodSchema.optional() })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) {
+          throw new AuthorizationError("method must be oauth, device or browser", 400);
+        }
+        sendJson(
+          response,
+          200,
+          await service.startAuthorizationLogin(managedLoginId, body.data.method),
+        );
+        return;
+      }
+      const managedApiKeyId = path.match(/^\/auth-accounts\/([^/]+)\/api-key$/)?.[1];
+      if (method === "POST" && managedApiKeyId) {
+        const body = z
+          .object({ label: z.string().trim().min(1), apiKey: z.string() })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Supply a label and an apiKey string", 400);
+        sendJson(
+          response,
+          200,
+          await service.setAuthorizationApiKey(managedApiKeyId, body.data.label, body.data.apiKey),
+        );
+        return;
+      }
+      if (method === "GET" && path === "/auth-alerts") {
+        sendJson(response, 200, await service.listAuthAlerts());
+        return;
+      }
+      if (method === "POST" && path === "/auth-terminal-logins") {
+        const body = z
+          .union([
+            z.object({ accountId: z.string().min(1) }).strict(),
+            z.object({ host: authProviderSchema }).strict(),
+          ])
+          .safeParse(await readJsonBody(request));
+        if (!body.success) {
+          throw new AuthorizationError("Supply accountId or host (claude or codex)", 400);
+        }
+        sendJson(response, 200, await service.startTerminalLogin(body.data));
+        return;
+      }
+      const terminalLoginId = path.match(/^\/auth-terminal-logins\/([^/]+)$/)?.[1];
+      if (method === "GET" && terminalLoginId) {
+        sendJson(response, 200, service.getTerminalLogin(terminalLoginId));
+        return;
+      }
+      if (method === "DELETE" && terminalLoginId) {
+        await service.stopTerminalLogin(terminalLoginId);
+        sendJson(response, 200, { stopped: terminalLoginId });
         return;
       }
       const managedLoginInputId = path.match(/^\/auth-accounts\/([^/]+)\/login-input$/)?.[1];
