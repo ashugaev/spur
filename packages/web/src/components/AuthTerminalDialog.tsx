@@ -45,6 +45,7 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
   const panelRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const startedOnMount = useRef(false);
+  const closedRef = useRef(false);
   // Plain state, not a mutation: a mutation observer detaches when StrictMode replays the mount effect.
   const [started, setStarted] = useState<TerminalLogin | undefined>(undefined);
   const [startError, setStartError] = useState<string | null>(null);
@@ -62,6 +63,16 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
         "Failed to start terminal sign-in",
       );
       if (!isTerminalLogin(result)) throw new Error("Failed to start terminal sign-in");
+      if (closedRef.current) {
+        // Closed while the start was in flight: stop the terminal it just created.
+        await postAuthJson(
+          `/api/auth-terminal-logins/${encodeURIComponent(result.id)}`,
+          "DELETE",
+          undefined,
+          "Failed to stop terminal sign-in",
+        );
+        return;
+      }
       // A restart reuses the id: seed the new state so the settled poll resumes.
       queryClient.setQueryData(["auth-terminal-login", result.id], result);
       setStarted(result);
@@ -132,7 +143,14 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
   }, [status, queryClient]);
 
   const closing = stopMutation.isPending;
-  const close = () => (terminalId ? stopMutation.mutate() : onClose());
+  const close = () => {
+    if (terminalId) {
+      stopMutation.mutate();
+      return;
+    }
+    closedRef.current = true;
+    onClose();
+  };
   useDialogFocus({ panelRef, initialRef: closeRef, onEscape: close, escapeBlocked: closing });
 
   const running = status === "running" && !ended && !restarting;

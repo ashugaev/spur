@@ -34,6 +34,8 @@ interface Call {
 }
 
 let calls: Call[];
+// Holds every POST response until resolved; null answers immediately.
+let postGate: Promise<void> | null;
 let responses: Record<string, () => { status?: number; payload: unknown }>;
 const onClose = vi.fn();
 
@@ -54,8 +56,13 @@ function render(
   target: { accountId: string } | { host: "claude" | "codex" } = { accountId: "claude-work" },
   strict = false,
 ) {
+  // Strict runs use the app's own query defaults: the stranding bug only showed with them.
   const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+    defaultOptions: {
+      queries: strict
+        ? { staleTime: 5_000, gcTime: 300_000, retry: 1, refetchOnWindowFocus: false }
+        : { retry: false, refetchOnWindowFocus: false },
+    },
   });
   const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -83,6 +90,7 @@ function reply(key: string, status: TerminalLogin["status"], reason?: TerminalLo
 beforeEach(() => {
   calls = [];
   responses = {};
+  postGate = null;
   onClose.mockReset();
   vi.stubGlobal(
     "fetch",
@@ -90,6 +98,7 @@ beforeEach(() => {
       const url = String(input);
       const method = init?.method ?? "GET";
       calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if (method === "POST" && postGate) await postGate;
       const handler = responses[`${method} ${url}`];
       const { status = 200, payload } = handler
         ? handler()
@@ -144,6 +153,24 @@ describe("AuthTerminalDialog", () => {
       { timeout: 5_000 },
     );
   }, 10_000);
+
+  it("stops a terminal whose start resolves after the dialog was closed", async () => {
+    let release: () => void = () => undefined;
+    postGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    reply("POST /api/auth-terminal-logins", "running");
+    responses[`DELETE /api/auth-terminal-logins/${ID}`] = () => ({ payload: { stopped: ID } });
+    render();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    release();
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith(ID))).toBe(true),
+    );
+  });
 
   it("hides the embedded terminal's own header", async () => {
     reply("POST /api/auth-terminal-logins", "running");
