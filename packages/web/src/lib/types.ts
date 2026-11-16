@@ -265,6 +265,7 @@ export interface AuthAccountSummary {
   limited: boolean;
   /** ISO end of the cooldown; present only while cooling. */
   cooldownUntil?: string;
+  credential?: "oauth" | "api_key";
 }
 
 export interface AuthPool {
@@ -281,11 +282,60 @@ export interface AuthAccountsResponse {
 /** Daemon login state; `url`/`userCode`/`prompt` drive the sign-in step. */
 export interface AuthLogin {
   accountId: string;
-  status: "ready" | "sign-in-required" | "pending" | "failed";
+  status: "ready" | "sign-in-required" | "pending" | "failed" | "busy";
+  method?: "oauth" | "device" | "browser" | "api_key" | "import";
+  stage?: "authorize" | "submitted" | "verifying";
+  errorCode?: AuthLoginErrorCode;
   url?: string;
   userCode?: string;
   prompt?: string;
   error?: string;
+}
+
+export type AuthLoginErrorCode =
+  | "input_rejected"
+  | "expired"
+  | "key_rejected"
+  | "not_confirmed"
+  | "identity"
+  | "failed";
+
+/** One broken managed account or host login from GET /auth-alerts. */
+export interface AuthAlert {
+  id: string;
+  kind: "managed" | "host";
+  provider: AuthProvider;
+  accountId?: string;
+  label: string;
+  since: string;
+  sessionsWaiting?: number;
+}
+
+export interface AuthAlertsResponse {
+  alerts: AuthAlert[];
+}
+
+export type TerminalLoginTarget =
+  | { accountId: string; provider: AuthProvider }
+  | { host: AuthProvider };
+
+export type TerminalLoginReason =
+  | "exited"
+  | "timed_out"
+  | "stopped"
+  | "identity"
+  | "not_confirmed"
+  | "failed"
+  | "another_sign_in_pending"
+  | "companion_unavailable";
+
+/** Native-CLI sign-in running in a daemon tmux session; `id` equals `tmuxSession`. */
+export interface TerminalLogin {
+  id: string;
+  target: TerminalLoginTarget;
+  tmuxSession: string;
+  status: "running" | "verifying" | "ready" | "not_signed_in";
+  reason?: TerminalLoginReason;
 }
 
 /** Managed authorization binding of one session. */

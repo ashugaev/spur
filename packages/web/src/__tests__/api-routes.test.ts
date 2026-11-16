@@ -107,6 +107,13 @@ import { DELETE as removeAuthAccount } from "@/app/api/auth-accounts/[id]/route"
 import { POST as startAuthLogin } from "@/app/api/auth-accounts/[id]/login/route";
 import { POST as submitAuthLoginInput } from "@/app/api/auth-accounts/[id]/login-input/route";
 import { GET as readAuthLoginStatus } from "@/app/api/auth-accounts/[id]/login-status/route";
+import { POST as saveAuthApiKey } from "@/app/api/auth-accounts/[id]/api-key/route";
+import { GET as listAuthAlerts } from "@/app/api/auth-alerts/route";
+import { POST as startTerminalLogin } from "@/app/api/auth-terminal-logins/route";
+import {
+  DELETE as stopTerminalLogin,
+  GET as readTerminalLogin,
+} from "@/app/api/auth-terminal-logins/[id]/route";
 import { PATCH as updateAuthPool } from "@/app/api/auth-pools/[provider]/route";
 import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/route";
 import { GET as getCronJobs } from "@/app/api/cron/route";
@@ -4954,6 +4961,127 @@ describe("Spur web API routes", () => {
 
       expect(response.status).toBe(400);
       expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    });
+
+    it("POST /api/auth-accounts/:id/login forwards the chosen method", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ accountId: "acc-1", status: "pending" });
+
+      await startAuthLogin(
+        new Request("http://localhost:3000/api/auth-accounts/acc-1/login", {
+          method: "POST",
+          body: JSON.stringify({ method: "browser", extra: 1 }),
+        }),
+        { params: Promise.resolve({ id: "acc-1" }) },
+      );
+
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/auth-accounts/acc-1/login",
+        expect.objectContaining({ body: JSON.stringify({ method: "browser" }) }),
+      );
+    });
+
+    it("POST /api/auth-accounts/:id/api-key forwards label and key, keeps the daemon status", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("rejected", 400));
+
+      const response = await saveAuthApiKey(
+        new Request("http://localhost:3000/api/auth-accounts/acc-1/api-key", {
+          method: "POST",
+          body: JSON.stringify({ label: " ci ", apiKey: "sk-test-key" }),
+        }),
+        { params: Promise.resolve({ id: "acc-1" }) },
+      );
+
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/auth-accounts/acc-1/api-key",
+        expect.objectContaining({ body: JSON.stringify({ label: "ci", apiKey: "sk-test-key" }) }),
+      );
+      expect(JSON.stringify(await response.json())).not.toContain("sk-test-key");
+    });
+
+    it.each([{ label: "ci" }, { apiKey: "sk-test-key" }, { label: " ", apiKey: "sk-test-key" }])(
+      "POST /api/auth-accounts/:id/api-key rejects %j before the daemon",
+      async (sent) => {
+        const response = await saveAuthApiKey(
+          new Request("http://localhost:3000/api/auth-accounts/acc-1/api-key", {
+            method: "POST",
+            body: JSON.stringify(sent),
+          }),
+          { params: Promise.resolve({ id: "acc-1" }) },
+        );
+
+        expect(response.status).toBe(400);
+        expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+      },
+    );
+
+    it("GET /api/auth-alerts proxies the daemon alerts", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ alerts: [] });
+
+      const response = await listAuthAlerts();
+
+      expect(await response.json()).toEqual({ alerts: [] });
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/auth-alerts");
+    });
+
+    it.each([
+      [{ accountId: "acc-1", extra: 1 }, { accountId: "acc-1" }],
+      [{ host: "codex" }, { host: "codex" }],
+    ])("POST /api/auth-terminal-logins forwards the target %j", async (sent, forwarded) => {
+      mockedSpurRequestJson.mockResolvedValue({ id: "auth-login-acc-1", status: "running" });
+
+      const response = await startTerminalLogin(
+        new Request("http://localhost:3000/api/auth-terminal-logins", {
+          method: "POST",
+          body: JSON.stringify(sent),
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/auth-terminal-logins",
+        expect.objectContaining({ method: "POST", body: JSON.stringify(forwarded) }),
+      );
+    });
+
+    it("POST /api/auth-terminal-logins rejects an empty target", async () => {
+      const response = await startTerminalLogin(
+        new Request("http://localhost:3000/api/auth-terminal-logins", {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+      );
+
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/auth-terminal-logins/:id keeps the daemon 404", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("unknown", 404));
+
+      const response = await readTerminalLogin(
+        new Request("http://localhost:3000/api/auth-terminal-logins/auth-login-acc-1"),
+        { params: Promise.resolve({ id: "auth-login-acc-1" }) },
+      );
+
+      expect(response.status).toBe(404);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/auth-terminal-logins/auth-login-acc-1");
+    });
+
+    it("DELETE /api/auth-terminal-logins/:id stops the terminal sign-in", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ stopped: "auth-login-acc-1" });
+
+      const response = await stopTerminalLogin(
+        new Request("http://localhost:3000/api/auth-terminal-logins/auth-login-acc-1", {
+          method: "DELETE",
+        }),
+        { params: Promise.resolve({ id: "auth-login-acc-1" }) },
+      );
+
+      expect(await response.json()).toEqual({ stopped: "auth-login-acc-1" });
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/auth-terminal-logins/auth-login-acc-1", {
+        method: "DELETE",
+      });
     });
 
     it("PATCH /api/auth-pools/:provider forwards only supplied fields", async () => {

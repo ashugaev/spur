@@ -498,6 +498,8 @@ const APP_SHELL_ROUTES: {
   { pattern: "**/api/tags", body: { tags: [] } },
   // Footer AuthAccountsMenu loads the managed account list on mount.
   { pattern: "**/api/auth-accounts", method: "GET", body: { accounts: [], pools: {} } },
+  // Dashboard AuthAlertsBanner polls sign-in alerts on mount.
+  { pattern: "**/api/auth-alerts", method: "GET", body: { alerts: [] } },
   { pattern: "**/api/github-status", body: DEFAULT_GITHUB_STATUS },
   { pattern: "**/api/gitlab-status", body: DEFAULT_GITLAB_STATUS },
   { pattern: /\/api\/pr-status\/batch$/, body: { results: {} } },

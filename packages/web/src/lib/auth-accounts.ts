@@ -1,16 +1,28 @@
-import { useQuery } from "@tanstack/react-query";
+import { type QueryClient, useQuery } from "@tanstack/react-query";
 import { formatClockTime } from "@/lib/format";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import type {
   AuthAccountStatus,
   AuthAccountSummary,
   AuthAccountsResponse,
+  AuthAlertsResponse,
   AuthLogin,
   AuthProvider,
+  TerminalLogin,
 } from "@/lib/types";
 
 export const AUTH_PROVIDERS: readonly AuthProvider[] = ["claude", "codex"];
 export const AUTH_ACCOUNTS_QUERY_KEY = ["auth-accounts"] as const;
+export const AUTH_ALERTS_QUERY_KEY = ["auth-alerts"] as const;
+const AUTH_ALERTS_POLL_INTERVAL_MS = 30_000;
+
+/** Account status and alert rows both change when a sign-in settles. */
+export function invalidateAuthQueries(queryClient: QueryClient): Promise<unknown> {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: AUTH_ACCOUNTS_QUERY_KEY }),
+    queryClient.invalidateQueries({ queryKey: AUTH_ALERTS_QUERY_KEY }),
+  ]);
+}
 
 export function isAuthProvider(value: string): value is AuthProvider {
   return (AUTH_PROVIDERS as readonly string[]).includes(value);
@@ -28,6 +40,24 @@ export function isAuthLogin(value: unknown): value is AuthLogin {
   if (typeof value !== "object" || value === null) return false;
   const record = value as { accountId?: unknown; status?: unknown };
   return typeof record.accountId === "string" && typeof record.status === "string";
+}
+
+function isAuthAlertsResponse(value: unknown): value is AuthAlertsResponse {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as { alerts?: unknown }).alerts)
+  );
+}
+
+export function isTerminalLogin(value: unknown): value is TerminalLogin {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as { id?: unknown; tmuxSession?: unknown; status?: unknown };
+  return (
+    typeof record.id === "string" &&
+    typeof record.tmuxSession === "string" &&
+    typeof record.status === "string"
+  );
 }
 
 export function authAccountName(account: Pick<AuthAccountSummary, "id" | "label">): string {
@@ -74,6 +104,23 @@ export function useAuthAccounts(enabled = true) {
     },
     enabled,
     staleTime: 30_000,
+  });
+}
+
+/** Sign-in alert rows, polled every 30s while the tab is visible. */
+export function useAuthAlerts() {
+  return useQuery<AuthAlertsResponse>({
+    queryKey: AUTH_ALERTS_QUERY_KEY,
+    queryFn: async ({ signal }) => {
+      const response = await fetch("/api/auth-alerts", { signal });
+      const payload = await readResponsePayload(response);
+      if (!response.ok || !isAuthAlertsResponse(payload)) {
+        throw new Error(responseErrorMessage(payload, "Failed to list sign-in alerts"));
+      }
+      return payload;
+    },
+    refetchInterval: AUTH_ALERTS_POLL_INTERVAL_MS,
+    staleTime: AUTH_ALERTS_POLL_INTERVAL_MS,
   });
 }
 

@@ -7,12 +7,13 @@ interface RouteContext {
   params: Promise<{ id: string }>;
 }
 
-export async function POST(_request: Request, context: RouteContext) {
+export async function POST(request: Request, context: RouteContext) {
   const { id } = await context.params;
+  const body = (await request.json().catch(() => ({}))) as { method?: unknown };
   try {
     const result = await spurRequestJson<AuthLogin>(
       `/auth-accounts/${encodeURIComponent(id)}/login`,
-      spurJsonInit("POST"),
+      spurJsonInit("POST", typeof body.method === "string" ? { method: body.method } : undefined),
     );
     return NextResponse.json(result);
   } catch (error) {
