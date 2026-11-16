@@ -232,10 +232,10 @@ export function AuthTerminalDialog({
           </div>
         ) : null}
 
-        <div className="mt-1 flex items-start justify-between gap-3">
+        <div className="mt-1 flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
           <div
             aria-live="polite"
-            className="flex min-w-0 flex-1 items-start gap-2 py-1 normal-case tracking-normal text-[var(--color-text-secondary)] [overflow-wrap:anywhere]"
+            className="flex min-w-0 flex-1 basis-56 items-start gap-2 py-1 normal-case tracking-normal text-[var(--color-text-secondary)] [overflow-wrap:anywhere]"
             data-testid="auth-terminal-status"
             role="status"
           >

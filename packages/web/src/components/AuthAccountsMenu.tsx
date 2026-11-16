@@ -62,6 +62,16 @@ function ProviderSection({
       restoreTrashId.current = null;
     }
   }, [confirmRemoveId]);
+  const addRef = useRef<HTMLButtonElement | null>(null);
+  const pendingRemoval = useRef<{ id: string; focusId: string | null } | null>(null);
+  // A removed row hands focus to the next row's trash button, else the Add button.
+  useEffect(() => {
+    const pending = pendingRemoval.current;
+    if (!pending || accounts.some((account) => account.id === pending.id)) return;
+    pendingRemoval.current = null;
+    const next = pending.focusId ? trashRefs.current.get(pending.focusId) : undefined;
+    (next ?? addRef.current)?.focus();
+  }, [accounts]);
   // One error per section: each action clears it on start, sets it on failure.
   const [lastError, setLastError] = useState<string | null>(null);
   const name = authProviderName(provider);
@@ -96,9 +106,23 @@ function ProviderSection({
         `Failed to remove ${name} account`,
       ),
     ...errorHandlers,
-    onSettled: () => {
+    onSettled: (_data, error, id) => {
+      if (error) {
+        restoreTrashId.current = id;
+        swapRow(null);
+        void refresh();
+        return;
+      }
+      // The row unmounts when the refetch lands: hold the blur guard until focus has moved on.
+      const index = accounts.findIndex((account) => account.id === id);
+      pendingRemoval.current = { id, focusId: accounts[index + 1]?.id ?? null };
+      focusHandoff.current = true;
       setConfirmRemoveId(null);
-      void refresh();
+      void refresh().finally(() => {
+        window.setTimeout(() => {
+          focusHandoff.current = false;
+        }, 50);
+      });
     },
   });
 
@@ -292,6 +316,7 @@ function ProviderSection({
         </div>
       ) : null}
       <button
+        ref={addRef}
         aria-busy={addMutation.isPending || undefined}
         className={`self-start py-1 uppercase tracking-[0.08em] text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50`}
         data-testid={`add-account-${provider}`}

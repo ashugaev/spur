@@ -291,6 +291,51 @@ describe("AuthAccountsMenu", () => {
     expect(document.activeElement).toBe(claude.getByRole("button", { name: "Remove home@x.com" }));
   });
 
+  describe("after a removal", () => {
+    let removed: string[];
+    beforeEach(() => {
+      removed = [];
+      routes["GET /api/auth-accounts"] = () => ({
+        payload: {
+          ...ACCOUNTS,
+          accounts: ACCOUNTS.accounts.filter((entry) => !removed.includes(entry.id)),
+        },
+      });
+      for (const id of ["claude-home", "claude-key"]) {
+        routes[`DELETE /api/auth-accounts/${id}`] = () => {
+          removed.push(id);
+          return { payload: { removed: id } };
+        };
+      }
+    });
+
+    it("moves focus to the next row's trash button and keeps the popover open", async () => {
+      const claude = await openMenu();
+      const popover = screen.getByTestId("auth-accounts-popover");
+      claude.getByRole("button", { name: "Remove home@x.com" }).focus();
+      fireEvent.click(claude.getByRole("button", { name: "Remove home@x.com" }));
+      fireEvent.click(claude.getByRole("button", { name: "Remove" }));
+      fireEvent.focusOut(popover, { relatedTarget: null });
+
+      await waitFor(() => expect(screen.queryByTestId("auth-account-claude-home")).toBeNull());
+      expect(document.activeElement).toBe(
+        claude.getByRole("button", { name: "Remove API key ····7Q2c" }),
+      );
+      expect(screen.queryByTestId("auth-accounts-popover")).toBeTruthy();
+    });
+
+    it("moves focus to the Add button when the last row is removed", async () => {
+      const claude = await openMenu();
+      fireEvent.click(claude.getByRole("button", { name: "Remove API key ····7Q2c" }));
+      fireEvent.click(claude.getByRole("button", { name: "Remove" }));
+
+      await waitFor(() => expect(screen.queryByTestId("auth-account-claude-key")).toBeNull());
+      expect(document.activeElement).toBe(
+        claude.getByRole("button", { name: "+ Add Claude account" }),
+      );
+    });
+  });
+
   it("still closes the popover when focus leaves it for elsewhere", async () => {
     await openMenu();
     await new Promise((resolve) => setTimeout(resolve, 10));
