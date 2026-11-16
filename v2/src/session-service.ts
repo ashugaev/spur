@@ -6796,6 +6796,13 @@ export class SessionService {
     return createRuntimeInfo(this.config, this.startedAt, this.lifecycle.instanceId);
   }
 
+  // Handoff: the spawned session is not a target, so the result passes through untouched.
+  private runLifecycle(
+    action: LifecycleAction,
+    targetIds: string[],
+    operationId: string | undefined,
+    work: () => Promise<HandoffSessionResponse>,
+  ): Promise<HandoffSessionResponse>;
   private runLifecycle(
     action: LifecycleAction,
     targetIds: string[],
@@ -25338,7 +25345,8 @@ export class SessionService {
                 workspaceIdOf(successor) === receipt.workspaceId &&
                 successor.tmuxSession === receipt.generation.tmuxSession &&
                 (await this.paneGenerationMatches(successor, receipt.generation));
-              if (claim?.token !== prepared.token || !sourceMatches || !successorMatches) {                throw new Error(`Handoff state changed before finalization for ${sessionId}`);
+              if (claim?.token !== prepared.token || !sourceMatches || !successorMatches) {
+                throw new Error(`Handoff state changed before finalization for ${sessionId}`);
               }
 
               if (prepared.carryTags.length > 0) {
