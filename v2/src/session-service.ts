@@ -25607,9 +25607,14 @@ export class SessionService {
         await this.withWorkspaceLifecycleLocks(source.id, async () => {
           const current = readSession(this.config.dataDir, source.id);
           if (current && !isTerminalSessionStatus(current.status)) {
-            this.reconcileHandoffTodoLocked(
-              current,
-              () => byWorkspace.get(workspaceIdOf(current)) ?? [],
+            // The grouped list only names candidates; status and workspace are re-read under the
+            // lock, since a successor may have been killed while this waited.
+            const workspaceId = workspaceIdOf(current);
+            this.reconcileHandoffTodoLocked(current, () =>
+              (byWorkspace.get(workspaceId) ?? []).flatMap((candidate) => {
+                const fresh = readSession(this.config.dataDir, candidate.id);
+                return fresh && workspaceIdOf(fresh) === workspaceId ? [fresh] : [];
+              }),
             );
           }
         });

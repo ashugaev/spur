@@ -59033,6 +59033,33 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      it("recovery re-reads a successor killed while it waited for the lock", async () => {
+        const { service, sessions } = await seedCrashWindow();
+        const internals = service as unknown as {
+          recoverHandoffTodo(): Promise<void>;
+          withWorkspaceLifecycleLocks<T>(id: string, task: () => Promise<T>): Promise<T>;
+        };
+        let release: () => void = () => {};
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const held = internals.withWorkspaceLifecycleLocks("api-1", () => gate);
+        const recovery = internals.recoverHandoffTodo();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const successor = sessions.get("api-2");
+        if (!successor) throw new Error("Expected successor");
+        sessions.set("api-2", { ...successor, status: "killed" });
+
+        release();
+        await Promise.all([held, recovery]);
+
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        service.dispose();
+      });
+
       it("a retried handoff does not treat an unlaunched successor as the owner", async () => {
         const { service } = await seedCrashWindow("spawning");
         reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
