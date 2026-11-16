@@ -353,7 +353,7 @@ export function AuthLoginDialog({
               {options.map((option) => (
                 <label
                   key={option.id}
-                  className={`flex cursor-pointer items-start gap-2.5 border px-2.5 py-2 has-[:focus-visible]:outline has-[:focus-visible]:outline-1 has-[:focus-visible]:outline-[var(--color-accent)] ${
+                  className={`flex cursor-pointer items-start gap-2.5 border px-2.5 py-2 has-[:focus-visible]:outline has-[:focus-visible]:outline-1 has-[:focus-visible]:outline-solid has-[:focus-visible]:outline-[var(--color-accent)] ${
                     method === option.id
                       ? "border-[var(--color-accent)]"
                       : "border-[var(--color-border-default)]"

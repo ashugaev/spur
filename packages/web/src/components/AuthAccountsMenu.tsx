@@ -320,7 +320,7 @@ function ProviderSection({
       <button
         ref={addRef}
         aria-busy={addMutation.isPending || undefined}
-        className={`self-start py-1 uppercase tracking-[0.08em] text-[var(--color-text-secondary)] outline-hidden transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] focus-visible:outline-1 focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50`}
+        className={`self-start py-1 uppercase tracking-[0.08em] text-[var(--color-text-secondary)] outline-hidden transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50`}
         data-testid={`add-account-${provider}`}
         disabled={busy}
         type="button"
@@ -356,7 +356,7 @@ export function AuthAccountsMenu() {
         aria-expanded={popover.open}
         aria-haspopup="true"
         aria-label="Manage agent accounts"
-        className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-hidden transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] focus-visible:outline-1 focus-visible:outline-[var(--color-accent)]"
+        className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-hidden transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)]"
         data-testid="auth-accounts-trigger"
         title="Manage agent accounts"
         type="button"
