@@ -129,6 +129,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
             {projection.items.map((item) => {
               const isExpanded = expanded.has(item.id);
               const panelId = `todo-audit-${item.id}`;
+              const status = statusGlyph(item);
               const overrides = projection.finishOverrides.filter((event) =>
                 event.unfinishedItemIds.includes(item.id),
               );
@@ -149,10 +150,11 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
                     }
                   >
                     <span
-                      aria-label={statusGlyph(item).label}
+                      role="img"
+                      aria-label={status.label}
                       className="uppercase text-[var(--color-text-tertiary)]"
                     >
-                      {statusGlyph(item).glyph}
+                      {status.glyph}
                     </span>
                     <span className="font-mono text-[var(--color-text-tertiary)]">
                       {item.id.slice(0, 8)}
