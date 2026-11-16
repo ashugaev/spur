@@ -5171,6 +5171,52 @@ projects:
     );
   });
 
+  it("leaves closeout unset and parses projects.<id>.closeout", async () => {
+    const absent = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(absent).projects["api"]?.closeout).toBeUndefined();
+
+    const set = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    closeout:
+      enabled: true
+      include: ["work:**", "workspace:docs/**", "artifacts:agent-history-*"]
+      maxBytes: 1024
+      retentionDays: 30
+`);
+    expect(loadConfig(set).projects["api"]?.closeout).toEqual({
+      enabled: true,
+      include: ["work:**", "workspace:docs/**", "artifacts:agent-history-*"],
+      maxBytes: 1024,
+      retentionDays: 30,
+    });
+  });
+
+  it.each([
+    ["unknown key", "exclude: [a]", "projects.api.closeout only supports"],
+    ["bad root", 'include: ["home:x"]', "projects.api.closeout.include[0]"],
+    ["no root", 'include: ["x"]', "projects.api.closeout.include[0]"],
+    ["dotdot", 'include: ["work:a/../b"]', "projects.api.closeout.include[0]"],
+    ["absolute", 'include: ["work:/etc"]', "projects.api.closeout.include[0]"],
+    ["blank glob", 'include: ["work: "]', "projects.api.closeout.include[0]"],
+    ["fractional maxBytes", "maxBytes: 1.5", "projects.api.closeout.maxBytes"],
+    ["zero retention", "retentionDays: 0", "projects.api.closeout.retentionDays"],
+  ])("rejects closeout %s", async (_name, line, message) => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    closeout:
+      ${line}
+`);
+    expect(() => loadConfig(configPath)).toThrow(message);
+  });
+
   it("leaves snapshots unset and parses projects.<id>.snapshots", async () => {
     const absent = await writeConfig(`
 projects:

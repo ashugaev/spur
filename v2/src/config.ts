@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { Cron } from "croner";
 import { deriveMinimumIntervalMs } from "./event-sources/cron.js";
+import { CLOSEOUT_ROOTS } from "./closeout-archive.js";
 import { MAX_SNAPSHOT_BYTES_CEILING } from "./snapshots.js";
 import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
@@ -30,6 +31,7 @@ import {
   type GitLabSourceConfig,
   type JiraSourceConfig,
   type ProjectBranchNamingConfig,
+  type ProjectCloseoutConfig,
   type ProjectConfig,
   type ProjectMcpConfig,
   type ProjectPreflightConfig,
@@ -1508,6 +1510,51 @@ function parseProjectSnapshots(
   };
 }
 
+function parseProjectCloseout(
+  projectId: string,
+  value: unknown,
+): ProjectCloseoutConfig | undefined {
+  if (value === undefined) return undefined;
+  const label = `projects.${projectId}.closeout`;
+  const raw = asObject(value, label);
+  const extraKeys = Object.keys(raw).filter(
+    (key) =>
+      key !== "enabled" && key !== "include" && key !== "maxBytes" && key !== "retentionDays",
+  );
+  if (extraKeys.length > 0) {
+    throw new Error(
+      `${label} only supports "enabled", "include", "maxBytes" and "retentionDays" (got: ${extraKeys.join(", ")})`,
+    );
+  }
+  const enabled = asOptionalBoolean(raw["enabled"], `${label}.enabled`);
+  const include = asOptionalStringArray(raw["include"], `${label}.include`);
+  include?.forEach((pattern, index) => {
+    const colon = pattern.indexOf(":");
+    const root = pattern.slice(0, colon);
+    const glob = pattern.slice(colon + 1);
+    if (
+      colon < 0 ||
+      !CLOSEOUT_ROOTS.some((known) => known === root) ||
+      glob.trim().length === 0 ||
+      glob.startsWith("/") ||
+      glob.includes("\\") ||
+      glob.split("/").includes("..")
+    ) {
+      throw new Error(
+        `${label}.include[${index}] must be "<root>:<glob>" with root ${CLOSEOUT_ROOTS.join(", ")}, a relative glob and no ".." segment`,
+      );
+    }
+  });
+  const maxBytes = asOptionalPositiveInteger(raw["maxBytes"], `${label}.maxBytes`);
+  const retentionDays = asOptionalPositiveInteger(raw["retentionDays"], `${label}.retentionDays`);
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(include !== undefined ? { include } : {}),
+    ...(maxBytes !== undefined ? { maxBytes } : {}),
+    ...(retentionDays !== undefined ? { retentionDays } : {}),
+  };
+}
+
 function parseProjectMcp(projectId: string, value: unknown): ProjectMcpConfig | undefined {
   if (value === undefined) return undefined;
   const label = `projects.${projectId}.mcp`;
@@ -1911,6 +1958,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const branchNaming = parseProjectBranchNaming(projectId, raw["branchNaming"]);
   const snapshots = parseProjectSnapshots(projectId, raw["snapshots"]);
+  const closeout = parseProjectCloseout(projectId, raw["closeout"]);
   const workspaceAccess = parseWorkspaceAccess(projectId, raw["workspaceAccess"], projectEnv);
   const devServer = parseDevServer(projectId, raw["devServer"]);
   const hasDevServerKey = raw["devServer"] !== undefined;
@@ -2043,6 +2091,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(preflight !== undefined ? { preflight } : {}),
     ...(branchNaming !== undefined ? { branchNaming } : {}),
     ...(snapshots !== undefined ? { snapshots } : {}),
+    ...(closeout !== undefined ? { closeout } : {}),
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(mcp !== undefined ? { mcp } : {}),
