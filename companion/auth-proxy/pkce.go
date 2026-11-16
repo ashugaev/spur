@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"compress/lzw"
 	"compress/zlib"
 	"context"
 	"crypto/rand"
@@ -33,6 +34,9 @@ const (
 	claudeScope       = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 	loginPrompt       = "Paste the callback URL from the authorization page"
 )
+
+// claudeCallbackWait bounds the wait for a paste, as the SDK callback server did. Var so tests shorten it.
+var claudeCallbackWait = 5 * time.Minute
 
 type claudeFlow struct{ verifier, challenge, state string }
 
@@ -66,11 +70,11 @@ func (f *claudeFlow) authorizeURL() string {
 type oauthCallback struct{ code, state, errCode string }
 
 // parseClaudeCallback accepts exactly the forms the SDK accepts (internal/misc ParseOAuthCallback).
-// A nil result with no error means blank input: keep waiting.
+// Blank input never reaches here: loginManager.input keeps waiting on it.
 func parseClaudeCallback(input string) (*oauthCallback, error) {
 	candidate := strings.TrimSpace(input)
 	if candidate == "" {
-		return nil, nil
+		return nil, errors.New("callback URL missing code")
 	}
 	if !strings.Contains(candidate, "://") {
 		switch {
@@ -119,21 +123,18 @@ func firstNonEmpty(a, b string) string {
 }
 
 // accept validates a pasted callback against this attempt. Returns the code and state to exchange.
-func (f *claudeFlow) accept(input string) (code, state string, wait bool, err error) {
+func (f *claudeFlow) accept(input string) (code, state string, err error) {
 	parsed, err := parseClaudeCallback(input)
 	if err != nil {
-		return "", "", false, err
-	}
-	if parsed == nil {
-		return "", "", true, nil
+		return "", "", err
 	}
 	if parsed.errCode != "" {
-		return "", "", false, errors.New("authorization was not granted")
+		return "", "", errors.New("authorization was not granted")
 	}
 	if subtle.ConstantTimeCompare([]byte(parsed.state), []byte(f.state)) != 1 {
-		return "", "", false, errors.New("state mismatch")
+		return "", "", errors.New("state mismatch")
 	}
-	return parsed.code, f.state, false, nil
+	return parsed.code, f.state, nil
 }
 
 type claudeTokens struct {
@@ -201,6 +202,69 @@ func (f *claudeFlow) exchange(ctx context.Context, client *http.Client, code, st
 	return &tokens, nil
 }
 
+const (
+	claudeProfileURL = "https://api.anthropic.com/api/oauth/profile"
+	claudeRolesURL   = "https://api.anthropic.com/api/oauth/claude_cli/roles"
+)
+
+// inspectClaudeAccount replays the SDK's post-exchange lookups: the profile response overrides the
+// token response identity where it carries a value, and the roles lookup is sent and ignored.
+// Both are advisory; any failure leaves the token response identity in place, as in the SDK.
+func inspectClaudeAccount(ctx context.Context, client *http.Client, tokens *claudeTokens) {
+	var profile struct {
+		Account struct {
+			UUID  string `json:"uuid"`
+			Email string `json:"email"`
+		} `json:"account"`
+		Organization struct {
+			UUID string `json:"uuid"`
+			Name string `json:"name"`
+		} `json:"organization"`
+	}
+	if body, err := fetchClaudeControlPlane(ctx, client, claudeProfileURL, tokens.AccessToken); err == nil &&
+		json.Unmarshal(body, &profile) == nil && strings.TrimSpace(profile.Account.UUID) != "" {
+		for target, value := range map[*string]string{
+			&tokens.Account.UUID:         profile.Account.UUID,
+			&tokens.Account.EmailAddress: profile.Account.Email,
+			&tokens.Organization.UUID:    profile.Organization.UUID,
+			&tokens.Organization.Name:    profile.Organization.Name,
+		} {
+			if value = strings.TrimSpace(value); value != "" {
+				*target = value
+			}
+		}
+	}
+	_, _ = fetchClaudeControlPlane(ctx, client, claudeRolesURL, tokens.AccessToken)
+}
+
+func fetchClaudeControlPlane(ctx context.Context, client *http.Client, endpoint, accessToken string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "axios/1.15.2")
+	req.Header.Set("Accept-Encoding", "gzip, compress, deflate, br")
+	req.Header.Set("Connection", "close")
+	req.Close = true
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+	req.Header.Set("Cache-Control", "no-cache")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := readOAuthBody(resp)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return body, nil
+}
+
 func readOAuthBody(resp *http.Response) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -222,6 +286,8 @@ func readOAuthBody(resp *http.Response) ([]byte, error) {
 			}
 		case "br":
 			reader = brotli.NewReader(bytes.NewReader(data))
+		case "compress":
+			reader = lzw.NewReader(bytes.NewReader(data), lzw.MSB, 8)
 		default:
 			return nil, errors.New("unsupported content encoding")
 		}

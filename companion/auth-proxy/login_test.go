@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"compress/lzw"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -177,43 +178,83 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// claudeTokenFake answers the Claude token endpoint only and records each request.
+// claudeTokenFake answers the Claude token, profile and roles endpoints and records each request.
+// Profile and roles answer 500 unless profile / rolesOK is set; any other URL is a transport error.
 type claudeTokenFake struct {
 	mu       sync.Mutex
 	requests []*http.Request
 	bodies   []string
 	status   int
 	encoding string
+	token    string // token response override
+	profile  string // profile response body; empty answers 500
+	rolesOK  bool
 }
 
-func (f *claudeTokenFake) RoundTrip(r *http.Request) (*http.Response, error) {
-	body, _ := io.ReadAll(r.Body)
-	f.mu.Lock()
-	f.requests, f.bodies = append(f.requests, r), append(f.bodies, string(body))
-	f.mu.Unlock()
-	if r.URL.String() != claudeTokenURL {
-		return nil, errors.New("unexpected request " + r.URL.Host)
-	}
-	payload := []byte(`{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600,"account":{"uuid":"acct-1","email_address":"fixture@example.invalid"},"organization":{"uuid":"org-1","name":"Org"}}`)
-	header := http.Header{}
-	if f.encoding == "gzip" {
-		var buf bytes.Buffer
+const claudeFakeToken = `{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600,"account":{"uuid":"acct-1","email_address":"fixture@example.invalid"},"organization":{"uuid":"org-1","name":"Org"}}`
+
+func encodeFixtureBody(t string, payload []byte) ([]byte, http.Header) {
+	var buf bytes.Buffer
+	switch t {
+	case "gzip":
 		zw := gzip.NewWriter(&buf)
 		_, _ = zw.Write(payload)
 		_ = zw.Close()
-		payload, header = buf.Bytes(), http.Header{"Content-Encoding": {"gzip"}}
+	case "compress":
+		zw := lzw.NewWriter(&buf, lzw.MSB, 8)
+		_, _ = zw.Write(payload)
+		_ = zw.Close()
+	default:
+		return payload, http.Header{}
 	}
-	status := f.status
+	return buf.Bytes(), http.Header{"Content-Encoding": {t}}
+}
+
+func (f *claudeTokenFake) RoundTrip(r *http.Request) (*http.Response, error) {
+	var body []byte
+	if r.Body != nil {
+		body, _ = io.ReadAll(r.Body)
+	}
+	f.mu.Lock()
+	f.requests, f.bodies = append(f.requests, r), append(f.bodies, string(body))
+	f.mu.Unlock()
+	status, payload := f.status, []byte(nil)
+	switch r.URL.String() {
+	case claudeTokenURL:
+		payload = []byte(firstNonEmpty(f.token, claudeFakeToken))
+	case claudeProfileURL:
+		status, payload = http.StatusInternalServerError, []byte(`{}`)
+		if f.profile != "" {
+			status, payload = http.StatusOK, []byte(f.profile)
+		}
+	case claudeRolesURL:
+		status, payload = http.StatusInternalServerError, []byte(`{}`)
+		if f.rolesOK {
+			status, payload = http.StatusOK, []byte(`{"roles":[]}`)
+		}
+	default:
+		return nil, errors.New("unexpected request " + r.URL.Host)
+	}
 	if status == 0 {
 		status = http.StatusOK
 	}
+	payload, header := encodeFixtureBody(f.encoding, payload)
 	return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(bytes.NewReader(payload)), Request: r}, nil
 }
 
-func (f *claudeTokenFake) calls() int {
+// calls counts token endpoint requests.
+func (f *claudeTokenFake) calls() int { return f.count(claudeTokenURL) }
+
+func (f *claudeTokenFake) count(target string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.requests)
+	n := 0
+	for _, r := range f.requests {
+		if r.URL.String() == target {
+			n++
+		}
+	}
+	return n
 }
 
 func TestPKCEAuthorizeURLMatchesSDK(t *testing.T) {
@@ -267,9 +308,9 @@ func TestClaudePasteFormsMatchSDK(t *testing.T) {
 		"error ignored when code": "?code=C&state=" + s + "&error=",
 	}
 	for name, input := range accepted {
-		code, state, wait, err := flow.accept(input)
-		if err != nil || wait || code != "C" || state != s {
-			t.Fatalf("%s: code=%q state=%q wait=%v err=%v", name, code, state, wait, err)
+		code, state, err := flow.accept(input)
+		if err != nil || code != "C" || state != s {
+			t.Fatalf("%s: code=%q state=%q err=%v", name, code, state, err)
 		}
 	}
 	rejected := map[string]string{
@@ -289,17 +330,17 @@ func TestClaudePasteFormsMatchSDK(t *testing.T) {
 		"fragment error with code": "#code=C&state=" + s + "&error=denied",
 	}
 	for name, input := range rejected {
-		if code, _, wait, err := flow.accept(input); err == nil || wait || code != "" {
-			t.Fatalf("%s: accepted (code=%q wait=%v)", name, code, wait)
+		if code, _, err := flow.accept(input); err == nil || code != "" {
+			t.Fatalf("%s: accepted (code=%q)", name, code)
 		}
 	}
-	if _, _, wait, err := flow.accept("   "); !wait || err != nil {
-		t.Fatal("blank input did not keep waiting")
+	if _, _, err := flow.accept("   "); err == nil {
+		t.Fatal("blank paste accepted")
 	}
 }
 
 func TestClaudeExchangeRequestShape(t *testing.T) {
-	for _, encoding := range []string{"", "gzip"} {
+	for _, encoding := range []string{"", "gzip", "compress"} {
 		fake := &claudeTokenFake{encoding: encoding}
 		flow, _ := newClaudeFlow()
 		tokens, err := flow.exchange(context.Background(), oauthHTTPClient(fake), "CODE", flow.state)
@@ -421,4 +462,122 @@ func TestLoginWorkerRejectsClaude(t *testing.T) {
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 		t.Fatal("rejected worker touched the data dir")
 	}
+}
+
+func TestClaudeProfileLookupMatchesSDK(t *testing.T) {
+	headers := func(r *http.Request) {
+		t.Helper()
+		for key, want := range map[string]string{"Authorization": "Bearer fixture-access", "Cache-Control": "no-cache", "User-Agent": "axios/1.15.2", "Accept": "application/json, text/plain, */*"} {
+			if got := r.Header.Get(key); got != want {
+				t.Fatalf("%s header %s=%q", r.URL.Path, key, got)
+			}
+		}
+		if r.Method != http.MethodGet {
+			t.Fatalf("%s method %s", r.URL.Path, r.Method)
+		}
+	}
+	tokens := func() *claudeTokens {
+		var v claudeTokens
+		if err := json.Unmarshal([]byte(claudeFakeToken), &v); err != nil {
+			t.Fatal(err)
+		}
+		return &v
+	}
+	// Profile wins where it carries a value; blank profile fields keep the token response.
+	fake := &claudeTokenFake{rolesOK: true, profile: `{"account":{"uuid":" acct-2 ","email":"profile@example.invalid"},"organization":{"uuid":"org-2","name":""}}`}
+	got := tokens()
+	inspectClaudeAccount(context.Background(), oauthHTTPClient(fake), got)
+	if got.Account.UUID != "acct-2" || got.Account.EmailAddress != "profile@example.invalid" || got.Organization.UUID != "org-2" || got.Organization.Name != "Org" {
+		t.Fatalf("profile merge: %+v", got)
+	}
+	if len(fake.requests) != 2 || fake.requests[0].URL.String() != claudeProfileURL || fake.requests[1].URL.String() != claudeRolesURL {
+		t.Fatal("profile then roles not requested")
+	}
+	headers(fake.requests[0])
+	headers(fake.requests[1])
+	// Profile failure, profile without account uuid, or a transport error keep the token identity.
+	for name, f := range map[string]*claudeTokenFake{
+		"profile error":   {},
+		"no account uuid": {profile: `{"account":{"uuid":"","email":"x@example.invalid"}}`},
+		"gzip profile":    {encoding: "gzip", profile: `{"account":{"uuid":"acct-3"}}`},
+	} {
+		got = tokens()
+		inspectClaudeAccount(context.Background(), oauthHTTPClient(f), got)
+		want := "acct-1"
+		if name == "gzip profile" {
+			want = "acct-3"
+		}
+		if got.Account.UUID != want || got.Account.EmailAddress != "fixture@example.invalid" || got.Organization.UUID != "org-1" {
+			t.Fatalf("%s: %+v", name, got)
+		}
+		if f.count(claudeRolesURL) != 1 {
+			t.Fatalf("%s: roles lookup skipped", name)
+		}
+	}
+	got = tokens()
+	inspectClaudeAccount(context.Background(), oauthHTTPClient(roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("down") })), got)
+	if got.Account.UUID != "acct-1" {
+		t.Fatal("transport error changed identity")
+	}
+}
+
+func TestClaudeLoginRefusesEmptyEmail(t *testing.T) {
+	fake := &claudeTokenFake{token: `{"access_token":"fixture-access","refresh_token":"r","expires_in":3600,"account":{"uuid":"acct-1"},"organization":{"uuid":"org-1"}}`}
+	l := claudeLoginFixture(t, fake)
+	if _, err := l.start(context.Background(), "account-a", claude); err != nil {
+		t.Fatal(err)
+	}
+	a := l.attempts["account-a"]
+	if _, err := l.input("account-a", "?code=C&state="+firstQueryState(t, a.status.URL)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-a.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("attempt did not end")
+	}
+	if got := l.status("account-a"); got.Status != "failed" {
+		t.Fatalf("status: %+v", got)
+	}
+	if stored, _ := l.store.List(context.Background()); len(stored) != 0 {
+		t.Fatal("credential without email was saved")
+	}
+	if fake.calls() != 1 || fake.count(claudeProfileURL) != 1 {
+		t.Fatal("exchange and profile lookup not both attempted")
+	}
+}
+
+func firstQueryState(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Query().Get("state")
+}
+
+func TestClaudeLoginPasteWaitTimesOut(t *testing.T) {
+	if claudeCallbackWait != 5*time.Minute {
+		t.Fatalf("paste wait is %s, SDK callback wait was 5m", claudeCallbackWait)
+	}
+	saved := claudeCallbackWait
+	claudeCallbackWait = 50 * time.Millisecond
+	t.Cleanup(func() { claudeCallbackWait = saved })
+	fake := &claudeTokenFake{}
+	l := claudeLoginFixture(t, fake)
+	if _, err := l.start(context.Background(), "account-a", claude); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-l.attempts["account-a"].done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unanswered prompt never timed out")
+	}
+	if got := l.status("account-a"); got.Status != "failed" || fake.calls() != 0 {
+		t.Fatalf("status after timeout: %+v", got)
+	}
+	if _, err := l.start(context.Background(), "account-b", claude); err != nil {
+		t.Fatal("timed-out attempt kept the companion busy")
+	}
+	_, _ = l.cancel("account-b")
 }

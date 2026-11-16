@@ -167,13 +167,18 @@ func identityMessage(marker, fallback string) string {
 }
 
 func (l *loginManager) claudeLogin(ctx context.Context, id string, a *loginAttempt, flow *claudeFlow) error {
+	// The SDK callback wait ended the attempt after five minutes without a result; keep that.
+	timeout := time.NewTimer(claudeCallbackWait)
+	defer timeout.Stop()
 	var input string
 	select {
 	case input = <-a.paste:
+	case <-timeout.C:
+		return errors.New("authentication timed out")
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	code, state, _, err := flow.accept(input)
+	code, state, err := flow.accept(input)
 	if err != nil {
 		return err
 	}
@@ -184,6 +189,10 @@ func (l *loginManager) claudeLogin(ctx context.Context, id string, a *loginAttem
 	tokens, err := flow.exchange(ctx, client, code, state)
 	if err != nil {
 		return err
+	}
+	inspectClaudeAccount(ctx, client, tokens)
+	if strings.TrimSpace(tokens.Account.EmailAddress) == "" {
+		return errors.New("claude token storage missing account information")
 	}
 	auth, err := buildClaudeOAuthRecord(id, tokens, time.Now())
 	if err != nil {
