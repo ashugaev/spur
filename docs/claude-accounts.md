@@ -12,9 +12,17 @@ Footer Accounts menu: one section per provider, Claude and Codex.
 
 - Profiles show label, status and quota cooldown.
 - Set the provider default and toggle Auto-rotation.
-- Add opens managed OAuth sign-in; follow its URL/code prompt. Sign in again for a profile that needs it.
-- Readiness requires completed OAuth and durable registration.
+- Add and Sign in open a method picker.
+- Claude: account (open link, paste returned URL or `code#state`) or API key.
+- Codex: device code (default), browser (open link, paste returned URL) or API key.
+- Ready only after a test request with the new credential succeeds; failure keeps the account signed out.
+- Every error offers Continue in terminal and Try again.
+- Terminal icon in the dialog header cancels the attempt and opens a terminal running native sign-in for that account.
+- Terminal shows Signed in only after the same test request; exit or Close without it shows Not signed in.
 - Close cancels unfinished sign-in; remove rejects an account used by a live session.
+
+Dashboard alert row per broken managed account or host login, above the agents list: Sign in and terminal icon.
+Row clears after a verified sign-in. Host rows open the terminal directly.
 
 Spawn dialog Auth picker: Auto or a ready profile.
 Session Switch auth: another profile or back to Auto, for the next request.
