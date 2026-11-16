@@ -196,4 +196,58 @@ describe("ToDo actor identity", () => {
     }
     expect(lookup).not.toHaveBeenCalled();
   });
+
+  it("resolves a handoff caller to an agent actor for another target", async () => {
+    const lookup = vi.fn(async () => ({ id: "caller-1", agent: "claude" as const }));
+    await expect(
+      resolveTodoMutationActor({
+        origin: "cli",
+        callerHeader: "caller-1",
+        targetSessionId: "other-target",
+        lookup,
+        anyTarget: true,
+      }),
+    ).resolves.toEqual({ kind: "agent", agent: "claude", sessionId: "caller-1" });
+    await expect(
+      resolveTodoMutationActor({
+        origin: "ui",
+        callerHeader: "caller-1",
+        targetSessionId: "other-target",
+        lookup,
+        anyTarget: true,
+      }),
+    ).rejects.toThrow("Caller session requires CLI origin");
+    await expect(
+      resolveTodoMutationActor({
+        origin: "cli",
+        callerHeader: "caller-1",
+        targetSessionId: "other-target",
+        lookup,
+      }),
+    ).rejects.toThrow("Caller session does not match target session");
+  });
+
+  it("returns 403 handoff_target_not_stalled for an agent handing off a healthy running session", async () => {
+    const { dataDir, session, url } = await fixture();
+    writeSession(dataDir, { ...session, status: "running" });
+    writeSession(dataDir, { ...session, id: "test-caller", tmuxSession: "test-caller" });
+
+    const response = await fetch(`${url}/${session.id}/handoff`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-spur-origin": "cli",
+        "x-spur-caller-session": "test-caller",
+      },
+      body: JSON.stringify({ agent: "claude" }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      code: "handoff_target_not_stalled",
+      sessionId: session.id,
+      status: "running",
+      error: expect.stringContaining("not stalled"),
+    });
+  });
 });

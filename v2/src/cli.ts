@@ -192,6 +192,7 @@ import {
   type UpdateSessionSlotsRequest,
   type UpdateSessionSlotsResponse,
   type HandoffSessionRequest,
+  type HandoffSessionResponse,
   type TodoMutationRequest,
   type TodoProjection,
   type LatestSnapshotEntry,
@@ -4384,13 +4385,19 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "handing off session",
         action: () =>
-          postJson<SessionView>(
+          // An older daemon omits the count.
+          postJson<SessionView & Partial<Pick<HandoffSessionResponse, "movedTodoItems">>>(
             cliEntrypoint,
             `/sessions/${sessionId}/handoff`,
             payload,
             configPath,
           ),
-        success: (session) => `Handed off to ${session.id} (${session.agent}).`,
+        success: (session) =>
+          `Handed off to ${session.id} (${session.agent})${
+            typeof session.movedTodoItems === "number"
+              ? `; moved ${session.movedTodoItems} ToDo items`
+              : ""
+          }.`,
         render: renderSessionCard,
       });
     });
