@@ -58983,10 +58983,10 @@ describe("SessionService", () => {
       });
 
       it("startup recovery rolls back copies of an unlaunched successor, and a retry moves them once", async () => {
-        const { service } = await seedCrashWindow("spawning");
-        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
-
-        await internals.recoverHandoffTodo();
+        const { service: seeder } = await seedCrashWindow("spawning");
+        seeder.dispose();
+        // Construction rolls the unlaunched copies back synchronously.
+        const service = await createDisposedSessionService();
 
         await expectRolledBack(service);
         reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
@@ -59005,6 +59005,31 @@ describe("SessionService", () => {
           "cancelled",
           "cancelled",
         ]);
+        service.dispose();
+      });
+
+      it("boot drift of an unlaunched successor to stopped cannot make it the owner", async () => {
+        const { service: seeder, sessions } = await seedCrashWindow("spawning");
+        seeder.dispose();
+        const { SessionService } = await loadSessionServiceModule();
+        // Construct and drift in one synchronous span, before any microtask recovery can run.
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        const successor = sessions.get("api-2");
+        if (!successor) throw new Error("Expected successor");
+        sessions.set("api-2", { ...successor, status: "stopped", stopReason: "manual_pause" });
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+        const response = await service.handoff("api-1", { agent: "cursor" });
+        expect(response.movedTodoItems).toBe(2);
         service.dispose();
       });
 

@@ -6505,6 +6505,7 @@ export class SessionService {
       ),
     }));
     this.protectDurableSpawns();
+    this.rollbackUnlaunchedHandoffCopies();
     queueMicrotask(() => {
       if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverDurableSpawns());
       if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverHandoffTodo());
@@ -25544,15 +25545,15 @@ export class SessionService {
   // A successor still `spawning` after a restart never confirmed its launch (the record turns
   // `running` only after the prompt went out), so its inherited copies belong to no live agent:
   // cancel them as the failure rollback does, leaving the source items open for the next handoff.
-  // Caller holds the successor's workspace lifecycle lock.
-  private neutralizeUnlaunchedHandoffCopiesLocked(successor: SessionRecord): void {
+  private neutralizeUnlaunchedHandoffCopies(successor: SessionRecord): void {
     const projection = readTodoIfPresent(this.config.dataDir, successor.id);
     if (!projection) return;
     const bySource = new Map<string, string[]>();
     for (const item of projection.items) {
       if (!item.handoffFrom || (item.status !== "open" && item.status !== "held")) continue;
-      const ids = bySource.get(item.handoffFrom.sessionId) ?? [];
-      bySource.set(item.handoffFrom.sessionId, [...ids, item.id]);
+      const ids = bySource.get(item.handoffFrom.sessionId);
+      if (ids) ids.push(item.id);
+      else bySource.set(item.handoffFrom.sessionId, [item.id]);
     }
     for (const [sourceId, itemIds] of bySource) {
       const closed = closeTodoItems(
@@ -25571,22 +25572,15 @@ export class SessionService {
     }
   }
 
-  private async recoverHandoffTodo(): Promise<void> {
-    const all = listSessions(this.config.dataDir);
-    const byWorkspace = new Map<string, SessionRecord[]>();
-    for (const candidate of all) {
-      const key = workspaceIdOf(candidate);
-      byWorkspace.set(key, [...(byWorkspace.get(key) ?? []), candidate]);
-    }
-    for (const successor of all) {
+  // Synchronous on purpose: it must finish before boot reconciliation can flip an unlaunched
+  // successor to `stopped`, where it would pass for a launched owner. No spawn of this process
+  // owns a session outside `spawnsInFlight`, and nothing else writes a spawning record's ledger,
+  // so no lifecycle lock is needed.
+  private rollbackUnlaunchedHandoffCopies(): void {
+    for (const successor of listSessions(this.config.dataDir)) {
       if (successor.status !== "spawning" || this.spawnsInFlight.has(successor.id)) continue;
       try {
-        await this.withWorkspaceLifecycleLocks(successor.id, async () => {
-          const current = readSession(this.config.dataDir, successor.id);
-          if (current?.status === "spawning" && !this.spawnsInFlight.has(current.id)) {
-            this.neutralizeUnlaunchedHandoffCopiesLocked(current);
-          }
-        });
+        this.neutralizeUnlaunchedHandoffCopies(successor);
       } catch (error) {
         this.logEvent("session.handoff.todo_reconcile_failed", {
           level: "warn",
@@ -25595,6 +25589,17 @@ export class SessionService {
           message: `Could not neutralize handoff ToDo copies of ${successor.id}: ${error instanceof Error ? error.message : String(error)}`,
         });
       }
+    }
+  }
+
+  private async recoverHandoffTodo(): Promise<void> {
+    const all = listSessions(this.config.dataDir);
+    const byWorkspace = new Map<string, SessionRecord[]>();
+    for (const candidate of all) {
+      const key = workspaceIdOf(candidate);
+      const members = byWorkspace.get(key);
+      if (members) members.push(candidate);
+      else byWorkspace.set(key, [candidate]);
     }
     for (const source of all) {
       if (isTerminalSessionStatus(source.status)) continue;
