@@ -169,13 +169,13 @@ describe("auth alerts", () => {
   });
 
   it("sessionsWaiting counts non-terminal bound sessions", async () => {
-    const sessions = [
-      { status: "working", auth: { effectiveAccountId: "acc-1" } },
-      { status: "needs_input", auth: { effectiveAccountId: "acc-1" } },
+    const sessions: Parameters<typeof countSessionsWaiting>[0] = [
+      { status: "running", auth: { effectiveAccountId: "acc-1" } },
+      { status: "paused", auth: { effectiveAccountId: "acc-1" } },
       { status: "completed", auth: { effectiveAccountId: "acc-1" } },
       { status: "killed", auth: { effectiveAccountId: "acc-1" } },
-      { status: "working", auth: { effectiveAccountId: "acc-2" } },
-      { status: "working" },
+      { status: "running", auth: { effectiveAccountId: "acc-2" } },
+      { status: "running" },
     ];
     expect(countSessionsWaiting(sessions, "acc-1")).toBe(2);
     const s = await setup();

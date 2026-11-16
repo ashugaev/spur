@@ -31,12 +31,16 @@ async function setup(overrides: Partial<AuthTerminalDeps> = {}) {
   const calls: string[] = [];
   const homeAtKill: boolean[] = [];
   const managedHome = join(dataDir, "auth-terminal", ACCOUNT);
-  const deps = {
+  // Overrides replace entries in the deps the service sees; `deps` returned to tests stays the
+  // typed mocks so call assertions keep their vi.fn types.
+  const mocks = {
     dataDir,
     homeDir,
-    createTmuxCommandSession: vi.fn(async (input: { sessionName: string }) => {
-      calls.push(`create:${input.sessionName}`);
-    }),
+    createTmuxCommandSession: vi.fn(
+      async (input: Parameters<AuthTerminalDeps["createTmuxCommandSession"]>[0]) => {
+        calls.push(`create:${input.sessionName}`);
+      },
+    ),
     killTmuxSession: vi.fn(async (name: string) => {
       calls.push(`kill:${name}`);
       homeAtKill.push(existsSync(managedHome));
@@ -51,9 +55,9 @@ async function setup(overrides: Partial<AuthTerminalDeps> = {}) {
     hostProbe: vi.fn(async () => okQuota),
     agentCommand: vi.fn((provider: string) => (provider === "claude" ? "claude" : "codex")),
     now: () => clock.ms,
-    ...overrides,
   } satisfies AuthTerminalDeps;
-  const terminals = new AuthTerminalLogins(deps);
+  const deps = mocks;
+  const terminals = new AuthTerminalLogins({ ...mocks, ...overrides });
   // Fires the watcher timer, then lets the tick's real file I/O settle.
   const fire = async () => {
     await vi.advanceTimersByTimeAsync(TERMINAL_TICK_MS);
