@@ -47,7 +47,7 @@ jobs:
           SPUR_DISABLE_AUTOSTART: "1"
         run: pnpm --dir v2 build
       - name: Test v2
-        run: pnpm --dir v2 test
+        run: pnpm --dir v2 run test --maxWorkers=2
       - name: Test managed account proxy
         run: go -C companion/auth-proxy test -p 2 ./...
       - name: Release
