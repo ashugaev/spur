@@ -315,3 +315,126 @@ func TestCompanionControlLifecycleAndEndpointHydration(t *testing.T) {
 		}
 	}
 }
+
+// getState reads login status and the manager while attempts commit; neither may wait on the other.
+func TestGetStateConcurrentWithVerify(t *testing.T) {
+	f := newLoginFixture(t)
+	c, out := f.control()
+	_ = out
+	stop := make(chan struct{})
+	polled := make(chan int, 1)
+	go func() {
+		n := 0
+		defer func() { polled <- n }()
+		reader, readerOut := f.control()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			reader.handle(context.Background(), controlRequest{ID: uint64(n + 1), Method: "getState", Params: json.RawMessage("{}")})
+			readerOut.Reset()
+			n++
+		}
+	}()
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for i := range 20 {
+			key := strings.Repeat("k", 7) + string(rune('a'+i))
+			if response := call(t, c, out, "setApiKey", apiKeyParams{AccountID: "account-a", Provider: claude, APIKey: key}); !response.OK {
+				t.Errorf("attempt %d: %+v", i, response.Error)
+				return
+			}
+			if final := f.await(t, "account-a"); final.Status != "ready" {
+				t.Errorf("attempt %d: %+v", i, final)
+				return
+			}
+		}
+	}()
+	select {
+	case <-finished:
+	case <-time.After(60 * time.Second):
+		t.Fatal("sign-in attempts and getState deadlocked")
+	}
+	close(stop)
+	select {
+	case n := <-polled:
+		if n == 0 {
+			t.Fatal("getState never ran")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("getState did not return")
+	}
+}
+
+func TestStateReportsCredentialAndBrokenAt(t *testing.T) {
+	f := newLoginFixture(t)
+	saveFixtureCredential(t, f, "account-a", "access-one", "refresh-one")
+	if _, err := f.l.store.Save(context.Background(), buildAPIKeyRecord("account-b", claude, strings.Repeat("key", 8))); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "credentials registered", func() bool { return f.l.ready("account-a", claude) && f.l.ready("account-b", claude) })
+	c, out := f.control()
+	got := states(t, c, out)
+	if got["account-a"].Credential != "oauth" || got["account-b"].Credential != "api_key" || got["account-x"].Credential != "" {
+		t.Fatalf("credentials: %+v", got)
+	}
+	if got["account-a"].BrokenAt != "" || got["account-b"].BrokenAt != "" {
+		t.Fatalf("breakage reported without a mark: %+v", got)
+	}
+	if strings.Contains(out.String(), strings.Repeat("key", 8)) {
+		t.Fatal("state leaked the API key")
+	}
+	f.r.mu.Lock()
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	f.r.state.Broken["account-a"] = at
+	f.r.mu.Unlock()
+	if got = states(t, c, out); got["account-a"].BrokenAt != "2026-03-04T05:06:07Z" || got["account-b"].BrokenAt != "" {
+		t.Fatalf("brokenAt: %+v", got)
+	}
+}
+
+func TestControlRejectsMethodForWrongProvider(t *testing.T) {
+	f := newLoginFixture(t)
+	c, out := f.control()
+	for name, params := range map[string]loginParams{
+		"claude device":  {AccountID: "account-a", Provider: claude, Method: methodDevice},
+		"claude browser": {AccountID: "account-a", Provider: claude, Method: methodBrowser},
+		"codex oauth":    {AccountID: "account-x", Provider: codex, Method: methodOAuth},
+		"missing method": {AccountID: "account-a", Provider: claude},
+		"unknown method": {AccountID: "account-a", Provider: claude, Method: "password"},
+		"wrong provider": {AccountID: "account-a", Provider: codex, Method: methodDevice},
+		"unknown":        {AccountID: "nobody", Provider: claude, Method: methodOAuth},
+	} {
+		if response := call(t, c, out, "login", params); response.OK {
+			t.Fatalf("%s: accepted", name)
+		}
+		if f.l.active != "" || len(f.l.attempts) != 0 {
+			t.Fatalf("%s: started an attempt", name)
+		}
+	}
+	for name, raw := range map[string]string{
+		"unknown field in login":  `{"accountId":"account-a","provider":"claude","method":"oauth","extra":1}`,
+		"unknown field in import": `{"accountId":"account-a","provider":"claude","extra":1}`,
+	} {
+		method := "login"
+		if name == "unknown field in import" {
+			method = "importNativeLogin"
+		}
+		out.Reset()
+		c.handle(context.Background(), controlRequest{ID: 1, Method: method, Params: json.RawMessage(raw)})
+		if strings.Contains(out.String(), `"ok":true`) {
+			t.Fatalf("%s: accepted", name)
+		}
+	}
+	for name, key := range map[string]string{"short": "1234567", "spaces": "abcd efgh", "newline": "abcdefgh\n", "long": strings.Repeat("k", 513), "empty": ""} {
+		if response := call(t, c, out, "setApiKey", apiKeyParams{AccountID: "account-a", Provider: claude, APIKey: key}); response.OK {
+			t.Fatalf("%s key accepted", name)
+		}
+	}
+	if f.l.active != "" || len(f.l.attempts) != 0 {
+		t.Fatal("rejected requests started an attempt")
+	}
+}

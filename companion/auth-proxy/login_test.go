@@ -193,7 +193,30 @@ type providerFake struct {
 	profile     string // profile response body; empty answers 500
 	rolesOK     bool
 	probeStatus int            // verification probe answer; 0 is 200
-	probeURL    map[string]int // per-URL probe answer override
+	probeURL    map[string]int // per-URL probe answer override; a negative status is a transport error
+	onProbe     func(*http.Request)
+}
+
+// setProbe sets the answer for one probe URL.
+func (f *providerFake) setProbe(target string, status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.probeURL == nil {
+		f.probeURL = map[string]int{}
+	}
+	f.probeURL[target] = status
+}
+
+// lastRequest returns the latest request sent to target, or nil.
+func (f *providerFake) lastRequest(target string) *http.Request {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.requests) - 1; i >= 0; i-- {
+		if f.requests[i].URL.String() == target {
+			return f.requests[i]
+		}
+	}
+	return nil
 }
 
 // codexFakeToken is a Codex token response. expires_in (200h) stays above the 96h Codex refresh lead.
@@ -241,7 +264,14 @@ func (f *providerFake) RoundTrip(r *http.Request) (*http.Response, error) {
 		if override, ok := f.probeURL[r.URL.String()]; ok {
 			status = override
 		}
+		onProbe := f.onProbe
 		f.mu.Unlock()
+		if onProbe != nil {
+			onProbe(r)
+		}
+		if status < 0 {
+			return nil, errors.New("network down")
+		}
 	case claudeProfileURL:
 		status, payload = http.StatusInternalServerError, []byte(`{}`)
 		if f.profile != "" {
@@ -876,16 +906,20 @@ func TestLoginReadyOnlyAfterVerification(t *testing.T) {
 
 func buildClaudeFixtureRecord(t *testing.T, id, access, refresh string) *coreauth.Auth {
 	t.Helper()
-	var tokens claudeTokens
-	if err := json.Unmarshal([]byte(claudeFakeToken), &tokens); err != nil {
-		t.Fatal(err)
-	}
-	tokens.AccessToken, tokens.RefreshToken = access, refresh
-	record, err := buildClaudeOAuthRecord(id, &tokens, time.Now())
+	record, err := buildClaudeFixtureRecordWith(id, access, refresh)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return record
+}
+
+func buildClaudeFixtureRecordWith(id, access, refresh string) (*coreauth.Auth, error) {
+	var tokens claudeTokens
+	if err := json.Unmarshal([]byte(claudeFakeToken), &tokens); err != nil {
+		return nil, err
+	}
+	tokens.AccessToken, tokens.RefreshToken = access, refresh
+	return buildClaudeOAuthRecord(id, &tokens, time.Now())
 }
 
 func waitFor(t *testing.T, what string, ok func() bool) {

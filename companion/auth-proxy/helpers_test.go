@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,15 +34,16 @@ func beyondRefreshLead(t *testing.T, p provider) time.Duration {
 
 // fakeExecutor stands in for a provider executor: probes answer with status and refreshes are recorded.
 type fakeExecutor struct {
-	provider  string
-	mu        sync.Mutex
-	status    int
-	err       error
-	requests  []*http.Request
-	auths     []*coreauth.Auth
-	refresh   []string
-	gate      chan struct{} // when set, Refresh blocks until closed
-	probeGate chan struct{} // when set, HttpRequest blocks until closed
+	provider   string
+	mu         sync.Mutex
+	status     int
+	err        error
+	requests   []*http.Request
+	auths      []*coreauth.Auth
+	refresh    []string
+	refreshErr error         // when set, Refresh fails with it
+	gate       chan struct{} // when set, Refresh blocks until closed
+	probeGate  chan struct{} // when set, HttpRequest blocks until closed
 }
 
 func (e *fakeExecutor) Identifier() string { return e.provider }
@@ -71,16 +73,24 @@ func (e *fakeExecutor) HttpRequest(_ context.Context, auth *coreauth.Auth, req *
 	return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}")), Request: req}, nil
 }
 func (e *fakeExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
-	if e.gate != nil {
-		<-e.gate
-	}
 	token, _ := auth.Metadata["refresh_token"].(string)
 	e.mu.Lock()
 	e.refresh = append(e.refresh, token)
 	e.mu.Unlock()
+	if e.gate != nil {
+		<-e.gate
+	}
+	if e.refreshErr != nil {
+		return nil, e.refreshErr
+	}
 	updated := auth.Clone()
 	updated.Metadata = maps.Clone(auth.Metadata)
 	return updated, nil
+}
+func (e *fakeExecutor) refreshTokens() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.refresh...)
 }
 func (e *fakeExecutor) probes() int {
 	e.mu.Lock()
@@ -100,7 +110,14 @@ type loginFixture struct {
 
 func newLoginFixture(t *testing.T) *loginFixture {
 	t.Helper()
-	r, err := openRouter(t.TempDir())
+	return newLoginFixtureIn(t, t.TempDir(), true)
+}
+
+// newLoginFixtureIn opens the data directory like a companion start. watch false leaves credential
+// files unregistered, as when the service never publishes them.
+func newLoginFixtureIn(t *testing.T, dir string, watch bool) *loginFixture {
+	t.Helper()
+	r, err := openRouter(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +126,7 @@ func newLoginFixture(t *testing.T) *loginFixture {
 		t.Fatal(err)
 	}
 	store := tokenStore(r.dir)
-	manager := coreauth.NewManager(store, nil, nil)
+	manager := coreauth.NewManager(store, r, r)
 	f := &loginFixture{r: r, dir: r.dir, net: &providerFake{}, executor: map[provider]*fakeExecutor{claude: {provider: "claude"}, codex: {provider: "codex"}}}
 	for _, e := range f.executor {
 		manager.RegisterExecutor(e)
@@ -124,8 +141,49 @@ func newLoginFixture(t *testing.T) *loginFixture {
 	}, []poolInput{{Provider: claude}, {Provider: codex}}, policy{CooldownMinutes: 60, MaxRotationsPerEpisode: 1}); err != nil {
 		t.Fatal(err)
 	}
-	f.watch(t)
+	if watch {
+		f.watch(t)
+	}
 	return f
+}
+
+// control returns the control surface over this fixture and a way to read what it wrote.
+func (f *loginFixture) control() (*control, *strings.Builder) {
+	out := &strings.Builder{}
+	return &control{out: out, router: f.r, logins: f.l}, out
+}
+
+var controlIDs atomic.Uint64
+
+// call sends one control request and returns the decoded response.
+func call(t *testing.T, c *control, out *strings.Builder, method string, params any) controlResponse {
+	t.Helper()
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	c.handle(context.Background(), controlRequest{ID: controlIDs.Add(1), Method: method, Params: raw})
+	var response controlResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &response); err != nil {
+		t.Fatalf("%s response %q: %v", method, out.String(), err)
+	}
+	return response
+}
+
+// states returns getState account entries by id.
+func states(t *testing.T, c *control, out *strings.Builder) map[string]accountStatus {
+	t.Helper()
+	response := call(t, c, out, "getState", map[string]any{})
+	var summary stateSummary
+	if err := json.Unmarshal(response.Result, &summary); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]accountStatus{}
+	for _, a := range summary.Accounts {
+		byID[a.ID] = a
+	}
+	return byID
 }
 
 // watch stands in for the service file watcher: a credential file whose size or mtime changed is

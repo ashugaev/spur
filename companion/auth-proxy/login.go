@@ -324,6 +324,9 @@ func (l *loginManager) commit(ctx context.Context, id string, p provider, a *log
 			return err
 		}
 	}
+	// A save that leaves the file byte-identical raises no watcher event, and the fenced account would
+	// never register again; the save time keeps every sign-in distinct.
+	staged.Metadata["spur_saved_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := l.store.Save(coreauth.WithAuthCreationIntent(ctx), staged); err != nil {
 		return err
 	}
@@ -387,6 +390,8 @@ func (l *loginManager) takeStaged(ctx context.Context, id string) (*coreauth.Aut
 	staging := stagingStore(l.dir)
 	stored, listErr := staging.List(ctx)
 	_ = staging.Delete(context.Background(), authFileID(id))
+	// The Codex save leaves its lock file beside the credential.
+	_ = os.Remove(filepath.Join(l.dir, "auth-proxy-staging", authFileID(id)+".lock"))
 	for _, auth := range stored {
 		if auth.ID == authFileID(id) {
 			return auth, nil
@@ -435,8 +440,11 @@ func (l *loginManager) restoreSavedAccount(id string) {
 	}
 }
 
+// registrationWait bounds the wait for the service to register a saved credential. Var so tests shorten it.
+var registrationWait = 15 * time.Second
+
 func (l *loginManager) waitRegistered(ctx context.Context, id string) error {
-	deadline := time.NewTimer(15 * time.Second)
+	deadline := time.NewTimer(registrationWait)
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
