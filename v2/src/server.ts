@@ -105,6 +105,7 @@ import {
   SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
+  HandoffTargetNotStalledError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
   SessionService,
@@ -338,13 +339,15 @@ export async function resolveTodoMutationActor(args: {
     sessionId: string,
   ) => { id: string; agent: AgentName } | Promise<{ id: string; agent: AgentName }>;
   invalid?: new (message: string) => Error;
+  /** The caller may act on a session other than its own (handoff of a stalled session). */
+  anyTarget?: boolean;
 }): Promise<TodoActor> {
   const { origin, callerHeader, targetSessionId, lookup } = args;
   const Invalid = args.invalid ?? InvalidTodoRequestError;
   if (Array.isArray(callerHeader)) throw new Invalid("Caller session header is invalid");
   if (callerHeader) {
     if (origin !== "cli") throw new Invalid("Caller session requires CLI origin");
-    if (callerHeader !== targetSessionId)
+    if (!args.anyTarget && callerHeader !== targetSessionId)
       throw new Invalid("Caller session does not match target session");
     const caller = await lookup(callerHeader);
     return { kind: "agent", agent: caller.agent, sessionId: caller.id };
@@ -2642,15 +2645,19 @@ export async function startServer(
       const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
       if (method === "POST" && handoffSessionId) {
         const body = await readJsonBody<HandoffSessionRequest>(request);
-        sendJson(
-          response,
-          200,
-          await service.handoff(
-            handoffSessionId,
-            body,
-            humanTodoOptions(origin, request.headers["x-spur-caller-session"]),
-          ),
-        );
+        const callerHeader = request.headers["x-spur-caller-session"];
+        const todoOptions = callerHeader
+          ? {
+              todoActor: await resolveTodoMutationActor({
+                origin,
+                callerHeader,
+                targetSessionId: handoffSessionId,
+                lookup: (callerSessionId) => service.getSessionIdentity(callerSessionId),
+                anyTarget: true,
+              }),
+            }
+          : humanTodoOptions(origin, callerHeader);
+        sendJson(response, 200, await service.handoff(handoffSessionId, body, todoOptions));
         return;
       }
 
@@ -3126,6 +3133,7 @@ export async function startServer(
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
         error instanceof SessionNotRestorableError ||
+        error instanceof HandoffTargetNotStalledError ||
         error instanceof SpawnBatchConflictError ||
         error instanceof PrAlertOwnerRequestError
       ) {
@@ -3257,6 +3265,9 @@ export async function startServer(
             statusCode: response.statusCode,
             ...(errorMessage ? { error: errorMessage } : {}),
             latencyMs: Math.round(performance.now() - startedAt),
+            ...(typeof request.headers["x-spur-caller-session"] === "string"
+              ? { callerSession: request.headers["x-spur-caller-session"] }
+              : {}),
           });
           if (record) {
             appendUserAction(service.info().dataDir, record);

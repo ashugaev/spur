@@ -2248,6 +2248,7 @@ export {
   serviceKey,
   mockClaudeJsonlState,
   mockClaudeSessionStatus,
+  findLatestClaudeSessionFileMock,
   runningSession,
   sessionServiceInternals,
   SUBMITTED,

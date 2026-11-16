@@ -16,6 +16,7 @@ import {
   type TodoActor,
   type TodoBlocker,
   type TodoEvent,
+  type TodoHandoffRef,
   type TodoItemProjection,
   type TodoMutationRequest,
   type TodoProjection,
@@ -124,6 +125,13 @@ function actorValid(actor: unknown): actor is TodoActor {
   );
 }
 
+function handoffRefValid(ref: unknown): boolean {
+  if (ref === undefined) return true;
+  if (!ref || typeof ref !== "object") return false;
+  const value = ref as Record<string, unknown>;
+  return nonblank(value.sessionId) && nonblank(value.itemId);
+}
+
 function parseEvent(raw: unknown, owner: string, line: number): TodoEvent {
   const fail = (message: string): never => {
     throw new TodoLedgerCorruptError(owner, message, line);
@@ -145,8 +153,12 @@ function parseEvent(raw: unknown, owner: string, line: number): TodoEvent {
     if (!nonblank(event.itemId) || !nonblank(event.text) || !nonblank(event.reason)) {
       fail("Added item fields are invalid");
     }
+    if (!handoffRefValid(event.handoffFrom)) fail("Handoff source is invalid");
   } else if (event.type === "item_completed" || event.type === "item_cancelled") {
     if (!nonblank(event.itemId) || !nonblank(event.reason)) fail("Resolution fields are invalid");
+    if (event.type === "item_cancelled" && !handoffRefValid(event.handoffTo)) {
+      fail("Handoff target is invalid");
+    }
   } else if (event.type === "item_held") {
     if (
       !nonblank(event.itemId) ||
@@ -253,6 +265,7 @@ function replayTodoLines(lines: readonly string[], sessionId: string): TodoProje
         text: event.text,
         status: "open",
         added: { reason: event.reason, actor: event.actor, at: event.at },
+        ...(event.handoffFrom ? { handoffFrom: event.handoffFrom } : {}),
         history: [event],
       };
       items.push(item);
@@ -283,7 +296,10 @@ function replayTodoLines(lines: readonly string[], sessionId: string): TodoProje
     }
     item.history.push(event);
     if (event.type === "item_completed") item.status = "completed";
-    if (event.type === "item_cancelled") item.status = "cancelled";
+    if (event.type === "item_cancelled") {
+      item.status = "cancelled";
+      if (event.handoffTo) item.handoffTo = event.handoffTo;
+    }
     if (event.type === "item_held") item.status = "held";
     if (event.type === "item_resumed") item.status = "open";
     item.latestTransition = {
@@ -441,6 +457,175 @@ export function mutateTodo(
   }
   appendEvent(dataDir, event, session.project);
   return replayTodo(dataDir, session.id);
+}
+
+export interface HandoffTodoItem {
+  itemId: string;
+  text: string;
+  addedReason: string;
+  from: TodoHandoffRef;
+  hold?: { reason: string; blocker: TodoBlocker };
+}
+
+const HANDOFF_ACTOR: TodoActor = { kind: "system", source: "handoff" };
+
+/** Open/held items of a source ledger, in ledger order, each with a fresh id for the successor. */
+export function planHandoffTodo(projection: TodoProjection, sourceId: string): HandoffTodoItem[] {
+  const planned: HandoffTodoItem[] = [];
+  for (const item of projection.items) {
+    if (item.status !== "open" && item.status !== "held") continue;
+    const transition = item.latestTransition;
+    if (item.status === "held" && (transition?.type !== "held" || !transition.reason)) {
+      throw new TodoLedgerCorruptError(sourceId, `Held item ${item.id} has no hold transition`);
+    }
+    planned.push({
+      itemId: randomUUID(),
+      text: item.text,
+      addedReason: item.added.reason,
+      from: { sessionId: sourceId, itemId: item.id },
+      ...(transition?.type === "held" && transition.blocker && transition.reason
+        ? { hold: { reason: transition.reason, blocker: transition.blocker } }
+        : {}),
+    });
+  }
+  return planned;
+}
+
+/**
+ * Source items that a successor chain already owns, derived from the ledgers alone, to finish a
+ * handoff that stopped between the successor write and the source cancel. `ledgers` holds every
+ * same-workspace session's ledger; `live` marks a session that is non-terminal and has begun its
+ * launch. A copy is owned unless it is a rollback or a legacy-migration close, and then when
+ * (1) its session is live and the copy is still open/held, (2) it left the open state by its
+ * session's own decision (completed, cancelled, moved on), or (3) a downstream copy that records
+ * it in `handoffFrom` is owned. The source item closes against the first hop.
+ */
+export function planHandoffReconcile(
+  source: TodoProjection,
+  sourceId: string,
+  ledgers: ReadonlyArray<{ sessionId: string; projection: TodoProjection; live: boolean }>,
+): Array<{ successorId: string; itemId: string; handoffTo: TodoHandoffRef }> {
+  const refKey = (sessionId: string, itemId: string) => `${sessionId}\0${itemId}`;
+  const downstream = new Map<
+    string,
+    Array<{ ledger: (typeof ledgers)[number]; item: TodoItemProjection }>
+  >();
+  for (const ledger of ledgers) {
+    for (const item of ledger.projection.items) {
+      if (!item.handoffFrom) continue;
+      const key = refKey(item.handoffFrom.sessionId, item.handoffFrom.itemId);
+      const entry = { ledger, item };
+      const list = downstream.get(key);
+      if (list) list.push(entry);
+      else downstream.set(key, [entry]);
+    }
+  }
+  const visiting = new Set<string>();
+  const owned = (ledger: (typeof ledgers)[number], item: TodoItemProjection): boolean => {
+    const key = refKey(ledger.sessionId, item.id);
+    if (visiting.has(key)) return false;
+    const unfinished = item.status === "open" || item.status === "held";
+    // A rollback or migration close never owns by itself, but work that already moved on from
+    // the copy (a live downstream copy) still does.
+    const voided = isRolledBackCopy(item) || isMigrationClosed(item);
+    if (!voided && (unfinished ? ledger.live : true)) return true;
+    visiting.add(key);
+    const viaDownstream = (downstream.get(key) ?? []).some((next) => owned(next.ledger, next.item));
+    visiting.delete(key);
+    return viaDownstream;
+  };
+  const planned: Array<{ successorId: string; itemId: string; handoffTo: TodoHandoffRef }> = [];
+  for (const item of source.items) {
+    if (item.status !== "open" && item.status !== "held") continue;
+    for (const entry of downstream.get(refKey(sourceId, item.id)) ?? []) {
+      if (!owned(entry.ledger, entry.item)) continue;
+      planned.push({
+        successorId: entry.ledger.sessionId,
+        itemId: item.id,
+        handoffTo: { sessionId: entry.ledger.sessionId, itemId: entry.item.id },
+      });
+      break;
+    }
+  }
+  return planned;
+}
+
+function isRolledBackCopy(item: TodoItemProjection): boolean {
+  const transition = item.latestTransition;
+  return (
+    item.status === "cancelled" &&
+    transition?.actor.kind === "system" &&
+    transition.actor.source === "handoff" &&
+    !item.handoffTo
+  );
+}
+
+// A legacy-migration close is the daemon tidying a terminal session, not the owner's decision.
+function isMigrationClosed(item: TodoItemProjection): boolean {
+  const actor = item.latestTransition?.actor;
+  return actor?.kind === "system" && actor.source === "legacy_migration";
+}
+
+export function inheritTodo(
+  dataDir: string,
+  owner: Pick<SessionRecord, "id" | "project">,
+  items: readonly HandoffTodoItem[],
+): void {
+  for (const item of items) {
+    appendEvent(
+      dataDir,
+      {
+        ...eventBase(owner.id, HANDOFF_ACTOR),
+        type: "item_added",
+        itemId: item.itemId,
+        text: item.text,
+        reason: item.addedReason,
+        handoffFrom: item.from,
+      },
+      owner.project,
+    );
+    if (item.hold) {
+      appendEvent(
+        dataDir,
+        {
+          ...eventBase(owner.id, HANDOFF_ACTOR),
+          type: "item_held",
+          itemId: item.itemId,
+          reason: item.hold.reason,
+          blocker: item.hold.blocker,
+        },
+        owner.project,
+      );
+    }
+  }
+}
+
+/** Cancels the listed items that are still open/held; returns the ids it closed. */
+export function closeTodoItems(
+  dataDir: string,
+  owner: Pick<SessionRecord, "id" | "project">,
+  closes: ReadonlyArray<{ itemId: string; handoffTo?: TodoHandoffRef }>,
+  reason: string,
+): string[] {
+  const projection = replayTodo(dataDir, owner.id);
+  const closed: string[] = [];
+  for (const close of closes) {
+    const item = projection.items.find((candidate) => candidate.id === close.itemId);
+    if (!item || (item.status !== "open" && item.status !== "held")) continue;
+    appendEvent(
+      dataDir,
+      {
+        ...eventBase(owner.id, HANDOFF_ACTOR),
+        type: "item_cancelled",
+        itemId: close.itemId,
+        reason,
+        ...(close.handoffTo ? { handoffTo: close.handoffTo } : {}),
+      },
+      owner.project,
+    );
+    closed.push(close.itemId);
+  }
+  return closed;
 }
 
 export function unfinishedTodo(projection: TodoProjection) {
