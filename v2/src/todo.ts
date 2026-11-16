@@ -513,6 +513,7 @@ export function planHandoffReconcile(
           candidate.handoffFrom?.sessionId === sourceId &&
           candidate.handoffFrom.itemId === item.id &&
           !isRolledBackCopy(candidate) &&
+          !isMigrationClosed(candidate) &&
           !(successor.dead && (candidate.status === "open" || candidate.status === "held")),
       );
       if (copy) {
@@ -536,6 +537,12 @@ function isRolledBackCopy(item: TodoItemProjection): boolean {
     transition.actor.source === "handoff" &&
     !item.handoffTo
   );
+}
+
+// A legacy-migration close is the daemon tidying a terminal session, not the owner's decision.
+function isMigrationClosed(item: TodoItemProjection): boolean {
+  const actor = item.latestTransition?.actor;
+  return actor?.kind === "system" && actor.source === "legacy_migration";
 }
 
 export function inheritTodo(

@@ -476,6 +476,30 @@ describe("Spur ToDo ledger", () => {
     expect(planned[0]?.handoffTo).toEqual({ sessionId: "s-2", itemId: plan[0]?.itemId });
   });
 
+  it("planHandoffReconcile: a legacy-migration close does not prove ownership", async () => {
+    const { dataDir, session } = await fixture();
+    mutateTodo(dataDir, session, { action: "add", text: "A", reason: "r" }, actor);
+    const source = replayTodo(dataDir, session.id);
+    inheritTodo(
+      dataDir,
+      { id: "s-2", project: session.project },
+      planHandoffTodo(source, session.id),
+    );
+    // A killed successor without a ledger version gets its open copies closed by the migration.
+    ensureTodoLedger(dataDir, { ...session, id: "s-2", workspaceId: "s-2", status: "killed" });
+    const migrated = replayTodo(dataDir, "s-2");
+    expect(migrated.items[0]?.latestTransition?.actor).toEqual({
+      kind: "system",
+      source: "legacy_migration",
+    });
+
+    expect(
+      planHandoffReconcile(source, session.id, [
+        { sessionId: "s-2", projection: migrated, dead: true },
+      ]),
+    ).toEqual([]);
+  });
+
   it("planHandoffReconcile: a dead successor owns moved-on copies, never open ones", async () => {
     const { dataDir, session } = await fixture();
     for (const text of ["A", "B"]) {
