@@ -494,13 +494,15 @@ export function planHandoffTodo(projection: TodoProjection, sourceId: string): H
 /**
  * Source items a successor already holds a live copy of, derived from the ledgers alone: a
  * successor item records `handoffFrom`, and only the handoff rollback (a system/handoff cancel
- * without `handoffTo`) takes a copy out of play. Used to finish a handoff that stopped between the
- * successor write and the source cancel.
+ * without `handoffTo`) takes a copy out of play. A `dead` successor (killed, completed, or never
+ * launched) owns only copies that already left the open state (completed, cancelled, moved on by
+ * a later handoff); a copy still open/held there has no owner. Used to finish a handoff that
+ * stopped between the successor write and the source cancel.
  */
 export function planHandoffReconcile(
   source: TodoProjection,
   sourceId: string,
-  successors: ReadonlyArray<{ sessionId: string; projection: TodoProjection }>,
+  successors: ReadonlyArray<{ sessionId: string; projection: TodoProjection; dead: boolean }>,
 ): Array<{ successorId: string; itemId: string; handoffTo: TodoHandoffRef }> {
   const planned: Array<{ successorId: string; itemId: string; handoffTo: TodoHandoffRef }> = [];
   for (const item of source.items) {
@@ -510,7 +512,8 @@ export function planHandoffReconcile(
         (candidate) =>
           candidate.handoffFrom?.sessionId === sourceId &&
           candidate.handoffFrom.itemId === item.id &&
-          !isRolledBackCopy(candidate),
+          !isRolledBackCopy(candidate) &&
+          !(successor.dead && (candidate.status === "open" || candidate.status === "held")),
       );
       if (copy) {
         planned.push({

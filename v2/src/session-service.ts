@@ -25505,20 +25505,18 @@ export class SessionService {
     if (this.handoffsInFlight.has(source.id)) return;
     const projection = readTodoIfPresent(this.config.dataDir, source.id);
     if (!projection || projection.counts.open + projection.counts.held === 0) return;
-    const successors: Array<{ sessionId: string; projection: TodoProjection }> = [];
+    const successors: Array<{ sessionId: string; projection: TodoProjection; dead: boolean }> = [];
     for (const candidate of sameWorkspace()) {
-      // A live successor owns copies; a `spawning` one only once its launch began (`agentLaunchId`).
-      if (
-        candidate.id === source.id ||
-        (candidate.status === "spawning" && !candidate.agentLaunchId) ||
-        isTerminalSessionStatus(candidate.status)
-      ) {
-        continue;
-      }
+      if (candidate.id === source.id) continue;
+      // Dead: terminal, or `spawning` before its launch began (`agentLaunchId`). The planner
+      // lets a dead successor own only copies that already left the open state.
+      const dead =
+        isTerminalSessionStatus(candidate.status) ||
+        (candidate.status === "spawning" && !candidate.agentLaunchId);
       try {
         const candidateProjection = readTodoIfPresent(this.config.dataDir, candidate.id);
         if (candidateProjection) {
-          successors.push({ sessionId: candidate.id, projection: candidateProjection });
+          successors.push({ sessionId: candidate.id, projection: candidateProjection, dead });
         }
       } catch (error) {
         // One damaged sibling ledger must not block the source.

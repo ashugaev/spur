@@ -59116,7 +59116,74 @@ describe("SessionService", () => {
         service.dispose();
       });
 
-      it("startup recovery ignores a terminal successor", async () => {
+      // A -> B -> C: B (still finalizing A's handoff) handed itself off to C and completed, then
+      // the daemon stopped before A's finalize.
+      async function seedChain() {
+        // todoLedgerVersion 1: a completed record without it would get its open items migrated.
+        const seeded = await seedCrashWindow("completed", undefined, { todoLedgerVersion: 1 });
+        const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
+        const bLedger = actualTodo.replayTodo(TEST_DATA_DIR, "api-2");
+        const toC = actualTodo.planHandoffTodo(bLedger, "api-2");
+        seeded.sessions.set(
+          "api-3",
+          sessionRecord({
+            id: "api-3",
+            workspaceId: "api-1",
+            status: "running",
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+          }),
+        );
+        actualTodo.inheritTodo(TEST_DATA_DIR, { id: "api-3", project: "api" }, toC);
+        actualTodo.closeTodoItems(
+          TEST_DATA_DIR,
+          { id: "api-2", project: "api" },
+          toC.map((item) => ({
+            itemId: item.from.itemId,
+            handoffTo: { sessionId: "api-3", itemId: item.itemId },
+          })),
+          "handed off to api-3",
+        );
+        return seeded;
+      }
+
+      it("chain: startup recovery keeps ownership through a completed middle successor", async () => {
+        const { service } = await seedChain();
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(source.items.every((item) => item.handoffTo?.sessionId === "api-2")).toBe(true);
+        expect((await service.readTodo("api-3")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-4");
+        expect((await service.handoff("api-1", { agent: "cursor" })).movedTodoItems).toBe(0);
+        service.dispose();
+      });
+
+      it("chain: a retried handoff of the first source does not duplicate the later successor's work", async () => {
+        const { service } = await seedChain();
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-4");
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.movedTodoItems).toBe(0);
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "cancelled",
+          "cancelled",
+        ]);
+        expect((await service.readTodo("api-4")).items).toEqual([]);
+        expect((await service.readTodo("api-3")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        service.dispose();
+      });
+
+      it("startup recovery ignores a terminal successor whose copies are still open", async () => {
         const { service } = await seedCrashWindow("killed");
         const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
 

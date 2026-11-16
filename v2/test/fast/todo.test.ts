@@ -466,13 +466,38 @@ describe("Spur ToDo ledger", () => {
     );
 
     const planned = planHandoffReconcile(source, session.id, [
-      { sessionId: "s-2", projection: replayTodo(dataDir, "s-2") },
+      { sessionId: "s-2", projection: replayTodo(dataDir, "s-2"), dead: false },
     ]);
 
     expect(planned.map((entry) => entry.itemId)).toEqual([
       plan[0]?.from.itemId,
       plan[2]?.from.itemId,
     ]);
+    expect(planned[0]?.handoffTo).toEqual({ sessionId: "s-2", itemId: plan[0]?.itemId });
+  });
+
+  it("planHandoffReconcile: a dead successor owns moved-on copies, never open ones", async () => {
+    const { dataDir, session } = await fixture();
+    for (const text of ["A", "B"]) {
+      mutateTodo(dataDir, session, { action: "add", text, reason: "r" }, actor);
+    }
+    const source = replayTodo(dataDir, session.id);
+    const plan = planHandoffTodo(source, session.id);
+    const successor = { id: "s-2", project: session.project };
+    inheritTodo(dataDir, successor, plan);
+    // A's copy moved on to a later successor; B's copy is still open on the dead session.
+    closeTodoItems(
+      dataDir,
+      successor,
+      [{ itemId: plan[0]?.itemId ?? "", handoffTo: { sessionId: "s-3", itemId: "c-1" } }],
+      "handed off to s-3",
+    );
+
+    const planned = planHandoffReconcile(source, session.id, [
+      { sessionId: "s-2", projection: replayTodo(dataDir, "s-2"), dead: true },
+    ]);
+
+    expect(planned.map((entry) => entry.itemId)).toEqual([plan[0]?.from.itemId]);
     expect(planned[0]?.handoffTo).toEqual({ sessionId: "s-2", itemId: plan[0]?.itemId });
   });
 });
