@@ -25193,14 +25193,15 @@ export class SessionService {
     // Refuse before queueing for admission; handoffTransaction rechecks after the wait.
     this.assertNoHeldCloseoutTake(sessionId);
     const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      // Before validation: validation reconciles ToDo, which a handoff in flight must own.
+      if (this.handoffsInFlight.has(sessionId)) {
+        throw new Error(`Handoff already in flight for ${sessionId}`);
+      }
       const { session } = this.validateHandoffSource(sessionId, options);
       // A take may have landed while this call waited on the lock.
       this.assertNoHeldCloseoutTake(sessionId);
       if (this.prAlertTransferFrom(session, "handoff")?.kind === "owner")
         assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
-      if (this.handoffsInFlight.has(sessionId)) {
-        throw new Error(`Handoff already in flight for ${sessionId}`);
-      }
       const agent = parseAgentName(request.agent);
       const token = Symbol(`handoff:${sessionId}`);
       this.handoffsInFlight.set(sessionId, {
@@ -25456,7 +25457,11 @@ export class SessionService {
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    this.reconcileHandoffTodoLocked(session);
+    this.reconcileHandoffTodoLocked(session, () =>
+      listSessions(this.config.dataDir).filter(
+        (candidate) => workspaceIdOf(candidate) === workspaceIdOf(session),
+      ),
+    );
     const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
     if (!human && !otherAgent && todoLedgerBlock(handoffProjection) === "empty") {
       const error = new TodoEmptyLedgerError([sessionId]);
@@ -25488,14 +25493,18 @@ export class SessionService {
   // copies in both ledgers. The successor's `handoffFrom` refs say which source items it holds, so
   // cancel those. The source session stays stopped: the successor owns the work, and a person or
   // agent can complete the source. Caller holds the source's workspace lifecycle lock.
-  private reconcileHandoffTodoLocked(source: SessionRecord): void {
+  // A handoff in flight for the source owns its copies (they roll back on failure): never reconcile
+  // against them. `sameWorkspace` is read only when the source still has open or held items.
+  private reconcileHandoffTodoLocked(
+    source: SessionRecord,
+    sameWorkspace: () => readonly SessionRecord[],
+  ): void {
+    if (this.handoffsInFlight.has(source.id)) return;
     const projection = readTodoIfPresent(this.config.dataDir, source.id);
     if (!projection || projection.counts.open + projection.counts.held === 0) return;
     const successors: Array<{ sessionId: string; projection: TodoProjection }> = [];
-    for (const candidate of listSessions(this.config.dataDir)) {
-      if (candidate.id === source.id || workspaceIdOf(candidate) !== workspaceIdOf(source)) {
-        continue;
-      }
+    for (const candidate of sameWorkspace()) {
+      if (candidate.id === source.id || isTerminalSessionStatus(candidate.status)) continue;
       try {
         const candidateProjection = readTodoIfPresent(this.config.dataDir, candidate.id);
         if (candidateProjection) {
@@ -25526,17 +25535,26 @@ export class SessionService {
   }
 
   private async recoverHandoffTodo(): Promise<void> {
-    for (const source of listSessions(this.config.dataDir)) {
-      if (source.status !== "stopped" || this.handoffsInFlight.has(source.id)) continue;
+    const all = listSessions(this.config.dataDir);
+    const byWorkspace = new Map<string, SessionRecord[]>();
+    for (const candidate of all) {
+      const key = workspaceIdOf(candidate);
+      byWorkspace.set(key, [...(byWorkspace.get(key) ?? []), candidate]);
+    }
+    for (const source of all) {
+      if (source.status !== "stopped") continue;
       try {
         await this.withWorkspaceLifecycleLocks(source.id, async () => {
           const current = readSession(this.config.dataDir, source.id);
-          if (current?.status === "stopped" && !this.handoffsInFlight.has(source.id)) {
-            this.reconcileHandoffTodoLocked(current);
+          if (current?.status === "stopped") {
+            this.reconcileHandoffTodoLocked(
+              current,
+              () => byWorkspace.get(workspaceIdOf(current)) ?? [],
+            );
           }
         });
       } catch (error) {
-        this.logEvent("session.handoff.todo_reconciled", {
+        this.logEvent("session.handoff.todo_reconcile_failed", {
           level: "warn",
           sessionId: source.id,
           projectId: source.project,

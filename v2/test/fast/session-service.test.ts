@@ -58901,7 +58901,7 @@ describe("SessionService", () => {
       });
 
       // The daemon stopped after the successor went live and before the source was cancelled.
-      async function seedCrashWindow() {
+      async function seedCrashWindow(successorStatus: SessionRecord["status"] = "running") {
         const seeded = await seedHandoff({ status: "stopped", stopReason: "manual_pause" });
         const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
         const source = await seeded.service.readTodo("api-1");
@@ -58910,7 +58910,7 @@ describe("SessionService", () => {
           sessionRecord({
             id: "api-2",
             workspaceId: "api-1",
-            status: "running",
+            status: successorStatus,
             worktreePath: "/tmp/spur-worktrees/api/api-1",
           }),
         );
@@ -58963,6 +58963,91 @@ describe("SessionService", () => {
             details: expect.objectContaining({ successorId: "api-2" }),
           }),
         );
+        service.dispose();
+      });
+
+      it("startup recovery ignores a terminal successor", async () => {
+        const { service } = await seedCrashWindow("killed");
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        service.dispose();
+      });
+
+      it("recovers an interrupted handoff when the service starts", async () => {
+        const { service: seeder } = await seedCrashWindow();
+        seeder.dispose();
+        const service = await createDisposedSessionService();
+
+        await vi.waitFor(async () =>
+          expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+            "cancelled",
+            "cancelled",
+          ]),
+        );
+        service.dispose();
+      });
+
+      it("logs a distinct warning when startup recovery fails for a source", async () => {
+        const { service } = await seedCrashWindow();
+        const internals = service as unknown as {
+          recoverHandoffTodo(): Promise<void>;
+          reconcileHandoffTodoLocked(): void;
+        };
+        vi.spyOn(internals, "reconcileHandoffTodoLocked").mockImplementation(() => {
+          throw new Error("ledger unreadable");
+        });
+
+        await internals.recoverHandoffTodo();
+
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.handoff.todo_reconcile_failed",
+            level: "warn",
+            sessionId: "api-1",
+          }),
+        );
+        service.dispose();
+      });
+
+      it("rejects a second handoff while one is in flight and leaves the first one's rollback intact", async () => {
+        const { service } = await seedHandoff();
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+        let failLaunch: () => void = () => {};
+        waitForTmuxReadyMock.mockImplementationOnce(
+          () =>
+            new Promise<void>((_resolve, reject) => {
+              failLaunch = () => reject(new Error("agent never became ready"));
+            }),
+        );
+        const first = service.handoff("api-1", { agent: "cursor" });
+        const firstOutcome = first.then(
+          () => new Error("Expected the first handoff to reject"),
+          (error: unknown) => error,
+        );
+        await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+          /already in flight/,
+        );
+        await internals.recoverHandoffTodo();
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+
+        failLaunch();
+        await expect(firstOutcome).resolves.toMatchObject({
+          message: expect.stringContaining("agent never became ready"),
+        });
+
+        await expectRolledBack(service);
         service.dispose();
       });
 
