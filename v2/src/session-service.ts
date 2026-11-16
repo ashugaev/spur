@@ -14674,6 +14674,8 @@ export class SessionService {
           runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
         }
         launchedRecord = runningRecord;
+        // This write persists `agentLaunchId` before the launch prompt is sent: handoff recovery
+        // reads it as the evidence that the successor began its launch and owns its ToDo copies.
         this.writeSpawnRecord({ ...runningRecord, status: "spawning" });
         this.logEvent("session.spawn.tmux_created", {
           level: "info",
@@ -25505,10 +25507,10 @@ export class SessionService {
     if (!projection || projection.counts.open + projection.counts.held === 0) return;
     const successors: Array<{ sessionId: string; projection: TodoProjection }> = [];
     for (const candidate of sameWorkspace()) {
-      // Only a launched, live successor owns copies; a `spawning` record never confirmed launch.
+      // A live successor owns copies; a `spawning` one only once its launch began (`agentLaunchId`).
       if (
         candidate.id === source.id ||
-        candidate.status === "spawning" ||
+        (candidate.status === "spawning" && !candidate.agentLaunchId) ||
         isTerminalSessionStatus(candidate.status)
       ) {
         continue;
@@ -25542,9 +25544,9 @@ export class SessionService {
     }
   }
 
-  // A successor still `spawning` after a restart never confirmed its launch (the record turns
-  // `running` only after the prompt went out), so its inherited copies belong to no live agent:
-  // cancel them as the failure rollback does, leaving the source items open for the next handoff.
+  // A successor still `spawning` without `agentLaunchId` never began its launch, so its inherited
+  // copies belong to no agent: cancel them as the failure rollback does, leaving the source items
+  // open for the next handoff.
   private neutralizeUnlaunchedHandoffCopies(successor: SessionRecord): void {
     const projection = readTodoIfPresent(this.config.dataDir, successor.id);
     if (!projection) return;
@@ -25578,7 +25580,15 @@ export class SessionService {
   // nothing else writes a spawning record's ledger, so no lifecycle lock is needed.
   private rollbackUnlaunchedHandoffCopies(): void {
     for (const successor of listSessions(this.config.dataDir)) {
-      if (successor.status !== "spawning" || this.spawnsInFlight.has(successor.id)) continue;
+      // `agentLaunchId` is persisted before the launch prompt can be delivered: a record carrying
+      // it may own live work, so it keeps its copies (a restorable stopped session after boot).
+      if (
+        successor.status !== "spawning" ||
+        successor.agentLaunchId ||
+        this.spawnsInFlight.has(successor.id)
+      ) {
+        continue;
+      }
       try {
         this.neutralizeUnlaunchedHandoffCopies(successor);
       } catch (error) {

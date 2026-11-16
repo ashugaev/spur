@@ -58904,6 +58904,7 @@ describe("SessionService", () => {
       async function seedCrashWindow(
         successorStatus: SessionRecord["status"] = "running",
         sourceOverrides: Partial<SessionRecord> = { status: "stopped", stopReason: "manual_pause" },
+        successorOverrides: Partial<SessionRecord> = {},
       ) {
         const seeded = await seedHandoff(sourceOverrides);
         const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
@@ -58915,6 +58916,7 @@ describe("SessionService", () => {
             workspaceId: "api-1",
             status: successorStatus,
             worktreePath: "/tmp/spur-worktrees/api/api-1",
+            ...successorOverrides,
           }),
         );
         actualTodo.inheritTodo(
@@ -59058,6 +59060,49 @@ describe("SessionService", () => {
           "open",
           "held",
         ]);
+        service.dispose();
+      });
+
+      it("launch evidence: a spawning successor that began its launch keeps its copies at boot", async () => {
+        const { service: seeder } = await seedCrashWindow(
+          "spawning",
+          { status: "stopped", stopReason: "manual_pause" },
+          { agentLaunchId: "launch-1" },
+        );
+        seeder.dispose();
+        const service = await createDisposedSessionService();
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        expect((await service.readTodo("api-2")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(source.items.every((item) => item.handoffTo?.sessionId === "api-2")).toBe(true);
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+        const response = await service.handoff("api-1", { agent: "cursor" });
+        expect(response.movedTodoItems).toBe(0);
+        service.dispose();
+      });
+
+      it("launch evidence: the successor record carries agentLaunchId before the prompt is sent", async () => {
+        const { sessions, service } = await seedHandoff({}, { items: false });
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Work", reason: "Why" },
+          sourceAgent,
+        );
+        let launchIdAtSend: string | undefined;
+        sendMessageToTmuxMock.mockImplementation(async (name: string) => {
+          if (name === "api-2") launchIdAtSend = sessions.get("api-2")?.agentLaunchId;
+        });
+
+        await service.handoff("api-1", { agent: "cursor" });
+
+        expect(launchIdAtSend).toEqual(expect.any(String));
         service.dispose();
       });
 
