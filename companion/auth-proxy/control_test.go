@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -436,5 +437,96 @@ func TestControlRejectsMethodForWrongProvider(t *testing.T) {
 	}
 	if f.l.active != "" || len(f.l.attempts) != 0 {
 		t.Fatal("rejected requests started an attempt")
+	}
+}
+
+func TestGetStateIdentity(t *testing.T) {
+	f := newLoginFixture(t)
+	ctx := context.Background()
+	claudeAuth := identityFixture(t, "account-a", "org-1", "user-1")
+	claudeAuth.Metadata["organization_name"] = "Acme"
+	claudeAuth.Metadata["refresh_token"] = "fixture-refresh-secret"
+	key := "sk-ant-secret-key-7Q2c"
+	codexAuth := buildCodexOAuthRecord("account-x", &codexTokens{IDToken: "id-token-secret", AccessToken: "codex-access-secret", RefreshToken: "codex-refresh-secret", AccountID: "workspace-9", Email: "codex@example.invalid", PlanType: "pro", ExpiresIn: 3600}, time.Now())
+	for _, auth := range []*coreauth.Auth{claudeAuth, buildAPIKeyRecord("account-b", claude, key), codexAuth} {
+		if _, err := f.l.manager.Register(ctx, auth); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, out := f.control()
+	got := states(t, c, out)
+	if want := (&accountIdentity{Email: "same@example.invalid", OrganizationName: "Acme", OrganizationID: "org-1"}); !reflect.DeepEqual(got["account-a"].Identity, want) {
+		t.Fatalf("claude identity: %+v", got["account-a"].Identity)
+	}
+	if want := (&accountIdentity{Email: "codex@example.invalid", OrganizationID: "workspace-9", Plan: "pro"}); !reflect.DeepEqual(got["account-x"].Identity, want) {
+		t.Fatalf("codex identity: %+v", got["account-x"].Identity)
+	}
+	if want := (&accountIdentity{KeyHint: "7Q2c"}); !reflect.DeepEqual(got["account-b"].Identity, want) {
+		t.Fatalf("api key identity: %+v", got["account-b"].Identity)
+	}
+	reply := out.String()
+	for _, secret := range []string{key, "apiKey", "access_token", "refresh_token", "fixture-refresh-secret", "id-token-secret", "codex-access-secret", "codex-refresh-secret", "fixture-token"} {
+		if strings.Contains(reply, secret) {
+			t.Fatalf("state reply contains %q", secret)
+		}
+	}
+}
+
+func TestGetUsageDoesNotBlockControl(t *testing.T) {
+	d, fake := signedInUsageDriver(t)
+	entered, release := make(chan struct{}, 4), make(chan struct{})
+	fake.arm(func(r *http.Request) (*http.Response, error) {
+		entered <- struct{}{}
+		<-release
+		return usageReply(200, nil, `{}`)(r)
+	})
+	send := func(line string) {
+		t.Helper()
+		if _, err := io.WriteString(d.f.input, line+"\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func() controlResponse {
+		t.Helper()
+		select {
+		case raw := <-d.f.messages:
+			var response controlResponse
+			if err := json.Unmarshal(raw, &response); err != nil {
+				t.Fatal(err)
+			}
+			return response
+		case <-time.After(5 * time.Second):
+			t.Fatal("control timeout")
+			return controlResponse{}
+		}
+	}
+	send(`{"id":900,"method":"getUsage","params":{"accountIds":["oauth-claude"]}}`)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("usage request never reached the transport")
+	}
+	send(`{"id":901,"method":"getState","params":{}}`)
+	if response := read(); response.ID != 901 || !response.OK {
+		t.Fatalf("getState behind a pending usage read: %+v", response)
+	}
+	send(`{"id":902,"method":"getUsage","params":{"accountIds":["oauth-codex"]}}`)
+	if response := read(); response.ID != 902 || response.OK || response.Error == nil || response.Error.Message != "usage read already pending" {
+		t.Fatalf("overlapping getUsage: %+v", response)
+	}
+	send(`{"id":903,"method":"getUsage","params":{"accountIds":["a","b","c","d","e"]}}`)
+	if response := read(); response.ID != 903 || response.OK {
+		t.Fatalf("5 ids: %+v", response)
+	}
+	close(release)
+	if response := read(); response.ID != 900 || !response.OK {
+		t.Fatalf("pending usage read: %+v", response)
+	}
+	result, response := d.usage("oauth-claude", "no-such-account", "oauth-codex")
+	if !response.OK || len(result.Usage) != 3 {
+		t.Fatalf("mixed ids: %+v", response)
+	}
+	if result.Usage[0].Status != "ok" || result.Usage[1] != (usageEntry{AccountID: "no-such-account", Status: "error"}) || result.Usage[2].Status != "ok" {
+		t.Fatalf("mixed ids: %+v", result)
 	}
 }

@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -36,20 +39,9 @@ const roundTripperKey = "cliproxy.roundtripper"
 // answer: 2xx or 429 verified, 401/403 rejected, anything else unavailable. transport, when set,
 // replaces the executor's network transport.
 func verifyCredential(ctx context.Context, manager *coreauth.Manager, transport http.RoundTripper, auth *coreauth.Auth) probeResult {
-	executor, ok := manager.Executor(auth.Provider)
-	if !ok {
-		return probeResult{outcome: probeUnavailable}
-	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	if transport != nil {
-		ctx = context.WithValue(ctx, roundTripperKey, transport)
-	}
-	req, err := probeRequest(ctx, auth)
-	if err != nil {
-		return probeResult{outcome: probeUnavailable}
-	}
-	resp, err := executor.HttpRequest(ctx, auth, req)
+	resp, err := sendProbe(ctx, manager, transport, auth)
 	if err != nil {
 		return probeResult{outcome: probeUnavailable}
 	}
@@ -62,6 +54,70 @@ func verifyCredential(ctx context.Context, manager *coreauth.Manager, transport 
 		return probeResult{probeRejected, resp.StatusCode}
 	}
 	return probeResult{probeUnavailable, resp.StatusCode}
+}
+
+const (
+	probeTimeout     = 15 * time.Second
+	usageBodyCap     = 1 << 16
+	usageStatusOK    = "ok"
+	usageStatusError = "error"
+)
+
+// usageEntry is one account's usage read. Body is the provider answer on 2xx only; no request
+// header or credential ever enters it.
+type usageEntry struct {
+	AccountID         string `json:"accountId"`
+	Status            string `json:"status"`
+	HTTPStatus        int    `json:"httpStatus,omitempty"`
+	RetryAfterSeconds int    `json:"retryAfterSeconds,omitempty"`
+	Body              string `json:"body,omitempty"`
+}
+
+// sendProbe sends the provider probe request for auth through its executor. The caller owns ctx
+// (timeout and cancel) and the response body. transport, when set, replaces the network transport.
+func sendProbe(ctx context.Context, manager *coreauth.Manager, transport http.RoundTripper, auth *coreauth.Auth) (*http.Response, error) {
+	executor, ok := manager.Executor(auth.Provider)
+	if !ok {
+		return nil, errors.New("no executor for provider")
+	}
+	if transport != nil {
+		ctx = context.WithValue(ctx, roundTripperKey, transport)
+	}
+	req, err := probeRequest(ctx, auth)
+	if err != nil {
+		return nil, err
+	}
+	return executor.HttpRequest(ctx, auth, req)
+}
+
+// fetchUsage reads the OAuth usage endpoint for auth. API-key and missing credentials make no request.
+// The reply is an error entry unless the provider answered 2xx with a body within usageBodyCap.
+func fetchUsage(ctx context.Context, manager *coreauth.Manager, transport http.RoundTripper, auth *coreauth.Auth) usageEntry {
+	failed := usageEntry{Status: usageStatusError}
+	if auth == nil || isAPIKey(auth) {
+		return failed
+	}
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	resp, err := sendProbe(ctx, manager, transport, auth)
+	if err != nil {
+		return failed
+	}
+	defer resp.Body.Close()
+	failed.HTTPStatus = resp.StatusCode
+	if resp.StatusCode == http.StatusTooManyRequests {
+		if seconds, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && seconds > 0 {
+			failed.RetryAfterSeconds = seconds
+		}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return failed
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, usageBodyCap+1))
+	if err != nil || len(body) > usageBodyCap {
+		return failed
+	}
+	return usageEntry{Status: usageStatusOK, HTTPStatus: resp.StatusCode, Body: string(body)}
 }
 
 func probeRequest(ctx context.Context, auth *coreauth.Auth) (*http.Request, error) {

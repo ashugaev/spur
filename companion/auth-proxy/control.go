@@ -8,8 +8,12 @@ import (
 	"errors"
 	"io"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type controlRequest struct {
@@ -27,6 +31,9 @@ type controlResponse struct {
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  *controlError   `json:"error,omitempty"`
 }
+
+const maxUsageAccounts = 4
+
 type emptyResult struct{}
 type configureParams struct {
 	Accounts []accountInput `json:"accounts"`
@@ -77,16 +84,38 @@ type accountStatus struct {
 	Credential string `json:"credential,omitempty"`
 	// BrokenAt is set from the first loss of sign-in after a verified sign-in until the next verified sign-in.
 	BrokenAt string `json:"brokenAt,omitempty"`
+	// Identity is the provider identity of the registered credential; it never carries a secret.
+	Identity *accountIdentity `json:"identity,omitempty"`
+}
+type accountIdentity struct {
+	Email            string `json:"email,omitempty"`
+	OrganizationName string `json:"organizationName,omitempty"`
+	OrganizationID   string `json:"organizationId,omitempty"`
+	Plan             string `json:"plan,omitempty"`
+	// KeyHint is the last 4 characters of an API key.
+	KeyHint string `json:"keyHint,omitempty"`
+}
+type usageParams struct {
+	AccountIDs []string `json:"accountIds"`
+}
+type usageResult struct {
+	Usage []usageEntry `json:"usage"`
+}
+
+// registeredCredential is what the manager holds for one account: the kind and its identity.
+type registeredCredential struct {
+	kind     string
+	identity *accountIdentity
 }
 type stateSummary struct {
 	Accounts []accountStatus  `json:"accounts"`
 	Sessions []sessionSummary `json:"sessions"`
 }
 type resultValue interface {
-	emptyResult | registration | stateSummary | loginStatus
+	emptyResult | registration | stateSummary | loginStatus | usageResult
 }
 type inputValue interface {
-	*runtimeState | *controlRequest | *configureParams | *registerParams | *switchParams | *sessionParams | *loginParams | *apiKeyParams | *importParams | *accountParams | *loginInputParams | *emptyResult
+	*runtimeState | *controlRequest | *configureParams | *registerParams | *switchParams | *sessionParams | *loginParams | *apiKeyParams | *importParams | *accountParams | *loginInputParams | *usageParams | *emptyResult
 }
 
 func decode[T inputValue](raw []byte, target T) error {
@@ -107,6 +136,8 @@ type control struct {
 	mu     sync.Mutex
 	router *router
 	logins *loginManager
+	// usageBusy is set while a getUsage read runs; a second one is rejected.
+	usageBusy atomic.Bool
 }
 
 func (c *control) write(response controlResponse) {
@@ -183,7 +214,7 @@ func (c *control) handle(ctx context.Context, req controlRequest) {
 						status.Status = "sign-in-required"
 					}
 				}
-				entry := accountStatus{ID: a.ID, Provider: a.Provider, Status: status.Status, Error: status.Error, Credential: registered[a.ID]}
+				entry := accountStatus{ID: a.ID, Provider: a.Provider, Status: status.Status, Error: status.Error, Credential: registered[a.ID].kind, Identity: registered[a.ID].identity}
 				if at, broken := r.state.Broken[a.ID]; broken {
 					entry.BrokenAt = at.UTC().Format(time.RFC3339)
 				}
@@ -200,6 +231,24 @@ func (c *control) handle(ctx context.Context, req controlRequest) {
 			sort.Slice(result.Sessions, func(i, j int) bool { return result.Sessions[i].SessionID < result.Sessions[j].SessionID })
 		}
 		reply(c, req.ID, result, err)
+	case "getUsage":
+		var p usageParams
+		err := decode(req.Params, &p)
+		if err == nil && (len(p.AccountIDs) < 1 || len(p.AccountIDs) > maxUsageAccounts) {
+			err = errors.New("getUsage takes 1 to 4 account ids")
+		}
+		if err == nil && !c.usageBusy.CompareAndSwap(false, true) {
+			err = errors.New("usage read already pending")
+		}
+		if err != nil {
+			reply(c, req.ID, usageResult{}, err)
+			return
+		}
+		// Provider HTTP runs off the serve loop so other control traffic is not stalled.
+		go func() {
+			defer c.usageBusy.Store(false)
+			reply(c, req.ID, c.readUsage(ctx, p.AccountIDs), nil)
+		}()
 	case "registerSession":
 		var p registerParams
 		err := decode(req.Params, &p)
@@ -366,9 +415,9 @@ func (c *control) loginState(id string) loginStatus {
 	return status
 }
 
-// registeredCredentials reports the kind of each account's registered credential and records the
-// breakage of any verified account whose sign-in the SDK rejected without running a hook.
-func (c *control) registeredCredentials() map[string]string {
+// registeredCredentials reports the kind and identity of each account's registered credential and
+// records the breakage of any verified account whose sign-in the SDK rejected without running a hook.
+func (c *control) registeredCredentials() map[string]registeredCredential {
 	r := c.router
 	r.mu.Lock()
 	accounts := make([]accountInput, 0, len(r.accounts))
@@ -376,7 +425,7 @@ func (c *control) registeredCredentials() map[string]string {
 		accounts = append(accounts, a)
 	}
 	r.mu.Unlock()
-	kinds := make(map[string]string, len(accounts))
+	registered := make(map[string]registeredCredential, len(accounts))
 	for _, a := range accounts {
 		auth, ok := c.logins.manager.GetByID(authFileID(a.ID))
 		if !ok || auth.Provider != string(a.Provider) {
@@ -385,10 +434,60 @@ func (c *control) registeredCredentials() map[string]string {
 		if auth.RequiresSignIn {
 			r.markBroken(a.ID)
 		}
-		kinds[a.ID] = "oauth"
+		kind := "oauth"
 		if isAPIKey(auth) {
-			kinds[a.ID] = credentialAPIKey
+			kind = credentialAPIKey
 		}
+		registered[a.ID] = registeredCredential{kind: kind, identity: credentialIdentity(auth)}
 	}
-	return kinds
+	return registered
+}
+
+// credentialIdentity reads the provider identity from credential metadata, or nil when it holds none.
+func credentialIdentity(auth *coreauth.Auth) *accountIdentity {
+	field := func(name string) string {
+		value, _ := auth.Metadata[name].(string)
+		return strings.TrimSpace(value)
+	}
+	var identity accountIdentity
+	switch {
+	case isAPIKey(auth):
+		if key := field("api_key"); len(key) > 4 {
+			identity.KeyHint = key[len(key)-4:]
+		}
+	case provider(auth.Provider) == claude:
+		identity = accountIdentity{Email: field("email"), OrganizationName: field("organization_name"), OrganizationID: field("organization_uuid")}
+	default:
+		identity = accountIdentity{Email: field("email"), OrganizationID: field("account_id"), Plan: field("plan_type")}
+	}
+	if identity == (accountIdentity{}) {
+		return nil
+	}
+	return &identity
+}
+
+// readUsage reads the usage endpoint of each requested OAuth account in parallel. An unknown or
+// removed account yields an error entry for that id only.
+func (c *control) readUsage(ctx context.Context, ids []string) usageResult {
+	result := usageResult{Usage: make([]usageEntry, len(ids))}
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			entry := usageEntry{Status: usageStatusError}
+			c.router.mu.Lock()
+			account, known := c.router.accounts[id]
+			c.router.mu.Unlock()
+			if known {
+				if auth, ok := c.logins.manager.GetByID(authFileID(id)); ok && auth.Provider == string(account.Provider) {
+					entry = fetchUsage(ctx, c.logins.manager, c.logins.transport, auth)
+				}
+			}
+			entry.AccountID = id
+			result.Usage[i] = entry
+		}()
+	}
+	wg.Wait()
+	return result
 }
