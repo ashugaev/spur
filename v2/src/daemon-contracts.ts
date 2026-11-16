@@ -1319,11 +1319,14 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "get_closeout",
     "GET",
     "/sessions/{sessionId}/closeout",
-    "Read the closeout archive manifest written by complete; works for live, completed and archived sessions.",
+    "Read a closeout archive manifest written by complete (latest unless version is given); works for live, completed and archived sessions.",
     {
-      examples: [{ pathParams: { sessionId: "example-sessionId" } }],
+      query: [
+        field("version", "integer", "Archive version, a positive integer; default latest.", false),
+      ],
+      examples: [{ pathParams: { sessionId: "example-sessionId" }, query: { version: "1" } }],
       response:
-        "CloseoutManifest {sessionId,project,completedAt,links,snapshotVersion,headSha,files,skipped,missingRoots,error?,expiredAt?}; 404 when the session has no archive; 500 closeout_corrupt.",
+        "CloseoutManifest {version,sessionId,project,completedAt,links,snapshotVersion,headSha,files,skipped,missingRoots,error?,expiredAt?,versions}; versions lists every archive version ascending; 404 when none or unknown version; 400 invalid version; 500 closeout_corrupt.",
       source: "v2/src/closeout-archive.ts",
     },
   ),
@@ -1333,6 +1336,9 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "/sessions/{sessionId}/closeout/files/{path}",
     "Download one archived file as an attachment.",
     {
+      query: [
+        field("version", "integer", "Archive version, a positive integer; default latest.", false),
+      ],
       catchAllPathParams: ["path"],
       examples: [{ pathParams: { sessionId: "example-sessionId", path: "work/notes.md" } }],
       response:
@@ -1344,13 +1350,13 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "list_closeouts",
     "GET",
     "/closeouts",
-    "Closeout archives of every session whose links match, newest first, for live, completed and archived sessions.",
+    "Latest closeout archive of every session whose links match, newest first, for live, completed and archived sessions.",
     {
       query: [
         field("link", "string[]", "Repeatable S5 link label or label=URL; all must match.", true),
       ],
       examples: [{ query: { link: "pr=https://example.com/pull/42" } }],
-      response: "CloseoutEntry[] {sessionId,status,manifest}; no link 400.",
+      response: "CloseoutEntry[] {sessionId,status,manifest incl. versions}; no link 400.",
       source: "v2/src/closeout-archive.ts",
     },
   ),

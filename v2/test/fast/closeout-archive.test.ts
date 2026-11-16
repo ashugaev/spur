@@ -103,10 +103,14 @@ describe("closeout archive", () => {
       sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
     });
     expect(manifest.missingRoots).toEqual([]);
-    expect(readFileSync(join(sessionDir, "closeout", "files", "work", "notes.md"), "utf8")).toBe(
-      "hello",
-    );
-    expect(readCloseoutManifest(join(sessionDir, "closeout"), "s1")).toEqual(manifest);
+    expect(
+      readFileSync(join(sessionDir, "closeout", "1", "files", "work", "notes.md"), "utf8"),
+    ).toBe("hello");
+    expect(manifest.version).toBe(1);
+    expect(readCloseoutManifest(join(sessionDir, "closeout"), "s1")).toEqual({
+      ...manifest,
+      versions: [1],
+    });
   });
 
   it("copies own agent-history captures only on an explicit pattern", async () => {
@@ -186,28 +190,40 @@ describe("closeout archive", () => {
       put(join(artifacts, `f${i}.txt`), "");
     const manifest = await write();
     expect(manifest.error).toContain(String(CLOSEOUT_WALK_MAX_ENTRIES));
-    expect(existsSync(join(sessionDir, "closeout", "closeout.json"))).toBe(true);
+    expect(existsSync(join(sessionDir, "closeout", "1", "manifest.json"))).toBe(true);
     expect(readCloseoutManifest(join(sessionDir, "closeout"), "s1")?.error).toBe(manifest.error);
   });
 
-  it("removes stale temp dirs and replaces a previous archive", async () => {
-    mkdirSync(join(sessionDir, "closeout.tmp-stale", "files"), { recursive: true });
-    writeFileSync(join(sessionDir, "closeout.tmp-stale", "files", "x"), "x");
+  it("removes stale temp dirs and keeps one version per write", async () => {
+    const closeoutDir = join(sessionDir, "closeout");
+    mkdirSync(join(closeoutDir, ".tmp-stale", "files"), { recursive: true });
+    writeFileSync(join(closeoutDir, ".tmp-stale", "files", "x"), "x");
     put(join(artifacts, "one.txt"), "1");
-    await write();
-    expect(existsSync(join(sessionDir, "closeout.tmp-stale"))).toBe(false);
+    const first = await write();
+    expect(existsSync(join(closeoutDir, ".tmp-stale"))).toBe(false);
     await rm(join(artifacts, "one.txt"));
     put(join(artifacts, "two.txt"), "2");
     const second = await write();
+    expect([first.version, second.version]).toEqual([1, 2]);
     expect(paths(second)).toEqual(["artifacts/two.txt"]);
-    expect(existsSync(join(sessionDir, "closeout", "files", "artifacts", "one.txt"))).toBe(false);
+    expect(readCloseoutManifest(closeoutDir, "s1")?.versions).toEqual([1, 2]);
+    expect(readCloseoutManifest(closeoutDir, "s1")?.version).toBe(2);
+    expect(paths(readCloseoutManifest(closeoutDir, "s1", 1) as typeof first)).toEqual([
+      "artifacts/one.txt",
+    ]);
+    expect(readCloseoutManifest(closeoutDir, "s1", 3)).toBeNull();
+    expect(existsSync(join(closeoutDir, "1", "files", "artifacts", "one.txt"))).toBe(true);
+    expect(resolveCloseoutFile(closeoutDir, "artifacts/one.txt")).toBeNull();
+    expect(resolveCloseoutFile(closeoutDir, "artifacts/one.txt", 1)).toMatchObject({ size: 1 });
+    expect(resolveCloseoutFile(closeoutDir, "artifacts/two.txt")).toMatchObject({ size: 1 });
+    expect(resolveCloseoutFile(closeoutDir, "artifacts/two.txt", 9)).toBeNull();
   });
 
   it("throws CloseoutCorruptError for a corrupt manifest", () => {
     const dir = join(sessionDir, "closeout");
-    put(join(dir, "closeout.json"), "{nope");
+    put(join(dir, "1", "manifest.json"), "{nope");
     expect(() => readCloseoutManifest(dir, "s1")).toThrow(CloseoutCorruptError);
-    put(join(dir, "closeout.json"), '{"sessionId":"other"}');
+    put(join(dir, "1", "manifest.json"), '{"version":1,"sessionId":"other"}');
     expect(() => readCloseoutManifest(dir, "s1")).toThrow(CloseoutCorruptError);
     expect(readCloseoutManifest(join(base, "none"), "s1")).toBeNull();
   });
@@ -217,26 +233,30 @@ describe("closeout archive", () => {
     await write();
     const dir = join(sessionDir, "closeout");
     expect(resolveCloseoutFile(dir, "artifacts/a.txt")).toMatchObject({ size: 1, name: "a.txt" });
-    expect(resolveCloseoutFile(dir, "artifacts/../closeout.json")).toBeNull();
+    expect(resolveCloseoutFile(dir, "artifacts/../manifest.json")).toBeNull();
     expect(resolveCloseoutFile(dir, "bogus/a.txt")).toBeNull();
     expect(resolveCloseoutFile(dir, "artifacts")).toBeNull();
     expect(resolveCloseoutFile(dir, "artifacts/missing")).toBeNull();
-    symlinkSync(join(dir, "closeout.json"), join(dir, "files", "artifacts", "esc"));
+    symlinkSync(join(dir, "1", "manifest.json"), join(dir, "1", "files", "artifacts", "esc"));
     expect(resolveCloseoutFile(dir, "artifacts/esc")).toBeNull();
   });
 
-  it("expires due archives once and keeps the manifest", async () => {
+  it("expires each version by its own completedAt and keeps manifests", async () => {
     put(join(artifacts, "a.txt"), "a");
     await write({ completedAt: "2026-01-01T00:00:00.000Z" });
+    await write({ completedAt: "2026-01-10T00:00:00.000Z" });
     const dir = join(sessionDir, "closeout");
     const day = 86_400_000;
     const start = Date.parse("2026-01-01T00:00:00.000Z");
-    expect(expireCloseout(dir, "s1", 5, start + day)).toBe(false);
-    expect(existsSync(join(dir, "files"))).toBe(true);
-    expect(expireCloseout(dir, "s1", 5, start + 6 * day)).toBe(true);
-    expect(existsSync(join(dir, "files"))).toBe(false);
-    expect(readCloseoutManifest(dir, "s1")?.expiredAt).toBeTruthy();
-    expect(expireCloseout(dir, "s1", 5, start + 7 * day)).toBe(false);
-    expect(resolveCloseoutFile(dir, "artifacts/a.txt")).toBeNull();
+    expect(expireCloseout(dir, "s1", 5, start + day)).toBe(0);
+    expect(expireCloseout(dir, "s1", 5, start + 6 * day)).toBe(1);
+    expect(existsSync(join(dir, "1", "files"))).toBe(false);
+    expect(existsSync(join(dir, "2", "files"))).toBe(true);
+    expect(readCloseoutManifest(dir, "s1", 1)?.expiredAt).toBeTruthy();
+    expect(readCloseoutManifest(dir, "s1", 2)?.expiredAt).toBeUndefined();
+    expect(expireCloseout(dir, "s1", 5, start + 7 * day)).toBe(0);
+    expect(resolveCloseoutFile(dir, "artifacts/a.txt", 1)).toBeNull();
+    expect(resolveCloseoutFile(dir, "artifacts/a.txt", 2)).not.toBeNull();
+    expect(expireCloseout(dir, "s1", 5, start + 20 * day)).toBe(1);
   });
 });

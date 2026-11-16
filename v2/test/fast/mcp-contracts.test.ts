@@ -25,10 +25,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "1cd7acf5cff19895f65cd695e3b750b66974e75c2280e601d8433a98efb07e85",
-  "types.ts": "56616d8b618cd6e7ce173ff558d0e9da1dc14aad2d9230af321e6bcb0192feda",
+  "server.ts": "908f840cfcee2d6547d617fb6f292d4113fd81eb1f070e20ba4e0de10acb62e5",
+  "types.ts": "c58a0d323956cbb37996a9d3e43810d3cdb994664888e59fe5417e56c115e3c4",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "ebd57b86e632183f8f398f870d97e53fac2a2415d44839c14f3570a9b0633a4e",
+  "session-service.ts": "74cd405e5ef7f8c881e95128085559c263ce6ad4727017dbf655a5a84129fce4",
   "session-transitions.ts": "832771b8d95a6722cf67fc05685f2fd5f03e7a60a923c7a438e1b5b3bc0dcbb0",
   "session-slots.ts": "cb766d6b58c70f34775a18edf6afa77312acdc766a017770b30102462535ed73",
   "task-status.ts": "98700844f71e5d5edfd628c92653ed3cfcde4ff6c213acd24b9751935034bea1",
@@ -83,6 +83,10 @@ describe("daemon MCP operation contracts", () => {
       expect.objectContaining({ name: "link", type: "string[]", required: true }),
     );
     expect(getDaemonOperation("get_closeout_file")?.catchAllPathParams).toEqual(["path"]);
+    for (const id of ["get_closeout", "get_closeout_file"])
+      expect(getDaemonOperation(id)?.query).toContainEqual(
+        expect.objectContaining({ name: "version", type: "integer", required: false }),
+      );
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("list_sessions")?.query).toContainEqual(
       expect.objectContaining({ name: "link", type: "string[]", required: false }),

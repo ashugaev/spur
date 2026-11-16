@@ -39961,7 +39961,7 @@ describe("SessionService", () => {
   describe("closeout archive", () => {
     const LINK_URL = "https://example.test/pr/1";
     const closeoutJson = (id: string) =>
-      join(TEST_DATA_DIR, "sessions", id, "closeout", "closeout.json");
+      join(TEST_DATA_DIR, "sessions", id, "closeout", "1", "manifest.json");
 
     function ownWorktreeSession(overrides: Partial<SessionRecord> = {}) {
       return sessionRecord({
@@ -40034,7 +40034,7 @@ describe("SessionService", () => {
       });
       expect(
         readFileSync(
-          join(TEST_DATA_DIR, "sessions", "api-1", "closeout", "files", "work", "notes.md"),
+          join(TEST_DATA_DIR, "sessions", "api-1", "closeout", "1", "files", "work", "notes.md"),
           "utf8",
         ),
       ).toBe("keep me");
@@ -40099,6 +40099,39 @@ describe("SessionService", () => {
       expect(locked.mock.calls[0]?.[3]).toMatchObject({ closeoutHeadSha: null });
     });
 
+    it("keeps the first archive readable when a reopened session completes again", async () => {
+      const sessions = createSessionStore(ownWorktreeSession());
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(false);
+      const workDir = join(TEST_ARTIFACTS_ROOT, "api-1", ".spur-work");
+      mkdirSync(workDir, { recursive: true });
+      writeFileSync(join(workDir, "first.md"), "one");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      await service.complete("api-1");
+
+      const completed = sessions.get("api-1") as SessionRecord;
+      sessions.set("api-1", { ...completed, status: "running" });
+      mkdirSync(workDir, { recursive: true });
+      writeFileSync(join(workDir, "second.md"), "two");
+      await service.complete("api-1");
+
+      expect(service.readCloseout("api-1")).toMatchObject({
+        version: 2,
+        versions: [1, 2],
+        files: [{ path: "second.md" }],
+      });
+      expect(service.readCloseout("api-1", 1).files).toEqual([
+        expect.objectContaining({ root: "work", path: "first.md" }),
+      ]);
+      expect(readFileSync(service.readCloseoutFile("api-1", "work/first.md", 1).path, "utf8")).toBe(
+        "one",
+      );
+      expect(() => service.readCloseout("api-1", 3)).toThrow(/not found/);
+    });
+
     it("writes no closeout dir when closeout.enabled is false", async () => {
       await completeWith(ownWorktreeSession(), { enabled: false });
 
@@ -40145,11 +40178,12 @@ describe("SessionService", () => {
         projects: { api: { ...config.projects.api, closeout: { retentionDays: 1 } } },
       });
       createSessionStore(sessionRecord({ id: "api-1", status: "completed" }));
-      const dir = join(TEST_DATA_DIR, "sessions", "api-1", "closeout");
+      const dir = join(TEST_DATA_DIR, "sessions", "api-1", "closeout", "1");
       mkdirSync(join(dir, "files"), { recursive: true });
       writeFileSync(
-        join(dir, "closeout.json"),
+        join(dir, "manifest.json"),
         JSON.stringify({
+          version: 1,
           sessionId: "api-1",
           project: "api",
           completedAt: "2020-01-01T00:00:00.000Z",
@@ -40186,11 +40220,12 @@ describe("SessionService", () => {
         },
       });
       const old = "2020-01-01T00:00:00.000Z";
-      const manifestFor = (id: string, project: string) =>
+      const manifestFor = (id: string, project: string, version: number, completedAt: string) =>
         JSON.stringify({
+          version,
           sessionId: id,
           project,
-          completedAt: old,
+          completedAt,
           links: [],
           snapshotVersion: null,
           headSha: null,
@@ -40198,11 +40233,11 @@ describe("SessionService", () => {
           skipped: [],
           missingRoots: [],
         });
-      const place = (root: string, id: string, project: string) => {
-        const dir = join(root, "closeout");
+      const place = (root: string, id: string, project: string, version = 1, completedAt = old) => {
+        const dir = join(root, "closeout", String(version));
         mkdirSync(join(dir, "files"), { recursive: true });
         writeFileSync(join(dir, "files", "x"), "x");
-        writeFileSync(join(dir, "closeout.json"), manifestFor(id, project));
+        writeFileSync(join(dir, "manifest.json"), manifestFor(id, project, version, completedAt));
         return dir;
       };
       createSessionStore(
@@ -40210,6 +40245,13 @@ describe("SessionService", () => {
         sessionRecord({ id: "web-1", project: "web", status: "completed" }),
       );
       const liveApi = place(join(TEST_DATA_DIR, "sessions", "api-1"), "api-1", "api");
+      const liveApiNew = place(
+        join(TEST_DATA_DIR, "sessions", "api-1"),
+        "api-1",
+        "api",
+        2,
+        new Date().toISOString(),
+      );
       const liveWeb = place(join(TEST_DATA_DIR, "sessions", "web-1"), "web-1", "web");
       const archivedRoot = join(TEST_DATA_DIR, "sessions-archive", "api");
       mkdirSync(archivedRoot, { recursive: true });
@@ -40232,8 +40274,9 @@ describe("SessionService", () => {
       expect(existsSync(join(liveApi, "files"))).toBe(false);
       expect(existsSync(join(archivedApi, "files"))).toBe(false);
       expect(
-        JSON.parse(readFileSync(join(liveApi, "closeout.json"), "utf8")).expiredAt,
+        JSON.parse(readFileSync(join(liveApi, "manifest.json"), "utf8")).expiredAt,
       ).toBeTruthy();
+      expect(existsSync(join(liveApiNew, "files", "x"))).toBe(true);
       expect(existsSync(join(liveWeb, "files", "x"))).toBe(true);
       expect(logSpurEventMock).toHaveBeenCalledWith(
         TEST_DATA_DIR,

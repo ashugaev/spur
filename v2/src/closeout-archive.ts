@@ -19,6 +19,7 @@ import { dirname, join, matchesGlob, sep } from "node:path";
 import { AGENT_HISTORY_ARTIFACT_PREFIX } from "./agent-history-delta.js";
 import type {
   CloseoutManifest,
+  CloseoutManifestView,
   CloseoutRoot,
   ProjectConfig,
   SessionLink,
@@ -30,9 +31,10 @@ export const DEFAULT_CLOSEOUT_INCLUDE: readonly string[] = ["work:**", "artifact
 export const DEFAULT_CLOSEOUT_MAX_BYTES = 52428800;
 export const CLOSEOUT_WALK_MAX_ENTRIES = 20000;
 
-const MANIFEST_FILE = "closeout.json";
+const MANIFEST_FILE = "manifest.json";
 const FILES_DIR = "files";
-const TMP_PREFIX = "closeout.tmp-";
+const TMP_PREFIX = ".tmp-";
+const VERSION_DIR = /^[1-9][0-9]*$/;
 const GLOB_MAGIC = /[*?[\]{}]/;
 const DAY_MS = 86_400_000;
 
@@ -229,18 +231,30 @@ function fileSizeHint(fullPath: string): number {
   }
 }
 
-function removeStaleTemps(sessionDir: string): string | null {
+/** Ascending archive versions under sessions/<id>/closeout/; empty when none. */
+export function listCloseoutVersions(dir: string): number[] {
+  try {
+    return readdirSync(dir)
+      .filter((name) => VERSION_DIR.test(name))
+      .map(Number)
+      .sort((a, b) => a - b);
+  } catch {
+    return [];
+  }
+}
+
+function removeStaleTemps(closeoutDir: string): string | null {
   let failure: string | null = null;
   let names: string[] = [];
   try {
-    names = readdirSync(sessionDir);
+    names = readdirSync(closeoutDir);
   } catch {
     return null;
   }
   for (const name of names) {
     if (!name.startsWith(TMP_PREFIX)) continue;
     try {
-      rmSync(join(sessionDir, name), { recursive: true, force: true });
+      rmSync(join(closeoutDir, name), { recursive: true, force: true });
     } catch (error) {
       failure = `Stale temp removal failed for ${name}: ${errorText(error)}`;
     }
@@ -253,13 +267,16 @@ function errorText(error: unknown): string {
 }
 
 /**
- * Copies the selected session files into sessions/<id>/closeout/ and returns the manifest.
- * Build problems land in manifest.error and the manifest is still written; only a failure to
- * write the manifest or swap the archive in place throws. Never writes a top-level .json file
- * into the shard directory (listSessions parses those as records).
+ * Copies the selected session files into sessions/<id>/closeout/<n>/ (n = latest + 1) and
+ * returns the manifest. Build problems land in manifest.error and the manifest is still written;
+ * only a failure to write the manifest or move the archive into place throws. Never writes a
+ * top-level .json file into the shard directory (listSessions parses those as records).
  */
 export function writeCloseoutArchive(input: CloseoutWriteInput): CloseoutManifest {
+  const closeoutDir = join(input.sessionDir, "closeout");
+  mkdirSync(closeoutDir, { recursive: true });
   const manifest: CloseoutManifest = {
+    version: (listCloseoutVersions(closeoutDir).at(-1) ?? 0) + 1,
     sessionId: input.sessionId,
     project: input.project,
     completedAt: input.completedAt,
@@ -271,9 +288,9 @@ export function writeCloseoutArchive(input: CloseoutWriteInput): CloseoutManifes
     missingRoots: [],
   };
   const problems: string[] = [];
-  const staleFailure = removeStaleTemps(input.sessionDir);
+  const staleFailure = removeStaleTemps(closeoutDir);
   if (staleFailure) problems.push(staleFailure);
-  const tmpDir = join(input.sessionDir, `${TMP_PREFIX}${randomUUID()}`);
+  const tmpDir = join(closeoutDir, `${TMP_PREFIX}${randomUUID()}`);
   mkdirSync(join(tmpDir, FILES_DIR), { recursive: true });
   try {
     buildArchive(input, manifest, tmpDir, problems);
@@ -281,11 +298,9 @@ export function writeCloseoutArchive(input: CloseoutWriteInput): CloseoutManifes
     problems.push(errorText(error));
   }
   if (problems.length > 0) manifest.error = problems.join("; ");
-  const finalDir = join(input.sessionDir, "closeout");
   try {
     writeFileSync(join(tmpDir, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
-    rmSync(finalDir, { recursive: true, force: true });
-    renameSync(tmpDir, finalDir);
+    renameSync(tmpDir, join(closeoutDir, String(manifest.version)));
   } catch (error) {
     rmSync(tmpDir, { recursive: true, force: true });
     throw error;
@@ -393,6 +408,7 @@ function isManifest(value: unknown, sessionId: string): value is CloseoutManifes
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   return (
+    typeof v.version === "number" &&
     v.sessionId === sessionId &&
     typeof v.project === "string" &&
     typeof v.completedAt === "string" &&
@@ -403,35 +419,47 @@ function isManifest(value: unknown, sessionId: string): value is CloseoutManifes
   );
 }
 
-/** Null when the session has no archive; CloseoutCorruptError when closeout.json is unusable. */
-export function readCloseoutManifest(dir: string, sessionId: string): CloseoutManifest | null {
-  const file = join(dir, MANIFEST_FILE);
-  if (!existsSync(file)) return null;
+/**
+ * Latest manifest, or the given version's, with every version listed. Null when the session has
+ * no archive or no such version; CloseoutCorruptError when manifest.json is unusable.
+ */
+export function readCloseoutManifest(
+  dir: string,
+  sessionId: string,
+  version?: number,
+): CloseoutManifestView | null {
+  const versions = listCloseoutVersions(dir);
+  const selected = version ?? versions.at(-1);
+  if (selected === undefined || !versions.includes(selected)) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(file, "utf8"));
+    parsed = JSON.parse(readFileSync(join(dir, String(selected), MANIFEST_FILE), "utf8"));
   } catch {
-    throw new CloseoutCorruptError(sessionId, "Closeout manifest contains invalid JSON");
+    throw new CloseoutCorruptError(sessionId, "Closeout manifest is missing or invalid JSON");
   }
-  if (!isManifest(parsed, sessionId)) {
+  if (!isManifest(parsed, sessionId) || parsed.version !== selected) {
     throw new CloseoutCorruptError(sessionId, "Closeout manifest has an unexpected shape");
   }
-  return parsed;
+  return { ...parsed, versions };
 }
 
 /**
- * Resolves "<root>/<path>" to a regular file under closeout/files/<root>, or null. The caller
- * has already rejected empty, ".", ".." and backslash segments.
+ * Resolves "<root>/<path>" to a regular file under closeout/<version>/files/<root>, or null
+ * (version defaults to the latest). The caller has already rejected empty, ".", ".." and
+ * backslash segments.
  */
 export function resolveCloseoutFile(
   dir: string,
   rootAndPath: string,
+  version?: number,
 ): { path: string; size: number; name: string } | null {
   const segments = rootAndPath.split("/");
   const root = segments[0] as CloseoutRoot;
   if (segments.length < 2 || !CLOSEOUT_ROOTS.includes(root)) return null;
+  const selected = version ?? listCloseoutVersions(dir).at(-1);
+  if (selected === undefined) return null;
   try {
-    const rootDir = realpathSync(join(dir, FILES_DIR, root));
+    const rootDir = realpathSync(join(dir, String(selected), FILES_DIR, root));
     const target = realpathSync(join(rootDir, ...segments.slice(1)));
     if (!target.startsWith(rootDir + sep)) return null;
     const stat = lstatSync(target);
@@ -442,20 +470,29 @@ export function resolveCloseoutFile(
   }
 }
 
-/** Deletes files/ and stamps expiredAt once completedAt + retentionDays has passed. */
+/**
+ * Per version: deletes files/ and stamps expiredAt once its completedAt + retentionDays has
+ * passed. Returns how many versions expired.
+ */
 export function expireCloseout(
   dir: string,
   sessionId: string,
   retentionDays: number,
   now: number,
-): boolean {
-  const manifest = readCloseoutManifest(dir, sessionId);
-  if (!manifest || manifest.expiredAt) return false;
-  if (Date.parse(manifest.completedAt) + retentionDays * DAY_MS > now) return false;
-  rmSync(join(dir, FILES_DIR), { recursive: true, force: true });
-  manifest.expiredAt = new Date(now).toISOString();
-  const tmp = join(dir, `${MANIFEST_FILE}.tmp-${randomUUID()}`);
-  writeFileSync(tmp, `${JSON.stringify(manifest, null, 2)}\n`);
-  renameSync(tmp, join(dir, MANIFEST_FILE));
-  return true;
+): number {
+  let expired = 0;
+  for (const version of listCloseoutVersions(dir)) {
+    const manifest = readCloseoutManifest(dir, sessionId, version);
+    if (!manifest || manifest.expiredAt) continue;
+    if (Date.parse(manifest.completedAt) + retentionDays * DAY_MS > now) continue;
+    const versionDir = join(dir, String(version));
+    rmSync(join(versionDir, FILES_DIR), { recursive: true, force: true });
+    const { versions: _versions, ...stored } = manifest;
+    const next: CloseoutManifest = { ...stored, expiredAt: new Date(now).toISOString() };
+    const tmp = join(versionDir, `${MANIFEST_FILE}.tmp-${randomUUID()}`);
+    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
+    renameSync(tmp, join(versionDir, MANIFEST_FILE));
+    expired += 1;
+  }
+  return expired;
 }

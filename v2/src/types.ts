@@ -927,6 +927,7 @@ export interface ProjectCloseoutConfig {
 }
 
 export interface CloseoutManifest {
+  version: number;
   sessionId: string;
   project: string;
   completedAt: string;
@@ -945,10 +946,15 @@ export interface CloseoutManifest {
   expiredAt?: string;
 }
 
+export interface CloseoutManifestView extends CloseoutManifest {
+  /** Every archive version of the session, ascending. */
+  versions: number[];
+}
+
 export interface CloseoutEntry {
   sessionId: string;
   status: SessionStatus;
-  manifest: CloseoutManifest;
+  manifest: CloseoutManifestView;
 }
 
 export type ProviderReasoningEffort =

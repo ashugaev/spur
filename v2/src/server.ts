@@ -519,6 +519,13 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
   response.end(body);
 }
 
+/** undefined: absent (latest); null: not a positive integer. */
+function parseCloseoutVersion(params: URLSearchParams): number | undefined | null {
+  const raw = params.get("version");
+  if (raw === null) return undefined;
+  return /^[1-9][0-9]*$/.test(raw) ? Number(raw) : null;
+}
+
 function sendError(response: ServerResponse, statusCode: number, message: string): void {
   sendJson(response, statusCode, { error: message } satisfies JsonError);
 }
@@ -2514,12 +2521,26 @@ export async function startServer(
 
       const closeoutMatch = path.match(/^\/sessions\/([^/]+)\/closeout$/);
       if (method === "GET" && closeoutMatch?.[1]) {
-        sendJson(response, 200, service.readCloseout(decodeURIComponent(closeoutMatch[1])));
+        const version = parseCloseoutVersion(url.searchParams);
+        if (version === null) {
+          sendError(response, 400, "version must be a positive integer");
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          service.readCloseout(decodeURIComponent(closeoutMatch[1]), version),
+        );
         return;
       }
 
       const closeoutFileMatch = path.match(/^\/sessions\/([^/]+)\/closeout\/files\/(.+)$/);
       if (method === "GET" && closeoutFileMatch?.[1] && closeoutFileMatch[2]) {
+        const version = parseCloseoutVersion(url.searchParams);
+        if (version === null) {
+          sendError(response, 400, "version must be a positive integer");
+          return;
+        }
         let sessionId: string;
         let relativePath: string | null;
         try {
@@ -2538,7 +2559,7 @@ export async function startServer(
           sendError(response, 404, `Closeout file not found: ${closeoutFileMatch[2]}`);
           return;
         }
-        const file = service.readCloseoutFile(sessionId, relativePath);
+        const file = service.readCloseoutFile(sessionId, relativePath, version);
         response.writeHead(200, {
           "content-type": "application/octet-stream",
           "content-length": String(file.size),

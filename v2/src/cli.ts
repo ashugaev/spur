@@ -198,7 +198,7 @@ import {
   type TodoMutationRequest,
   type TodoProjection,
   type CloseoutEntry,
-  type CloseoutManifest,
+  type CloseoutManifestView,
   type LatestSnapshotEntry,
   type WorkSnapshotMeta,
   type WorkSnapshotRead,
@@ -4205,8 +4205,14 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Read the archive complete keeps: show, get a file, or find by link.");
   const closeoutPath = (sessionId: string): string =>
     `/sessions/${encodeURIComponent(sessionId)}/closeout`;
-  const closeoutLines = (manifest: CloseoutManifest): string[] => [
-    `completed ${manifest.completedAt} snapshot ${manifest.snapshotVersion ?? "-"} head ${manifest.headSha ?? "-"}`,
+  const closeoutVersionQuery = (versionArg: string | undefined): string => {
+    if (versionArg === undefined) return "";
+    const version = versionArg.trim();
+    if (!/^[1-9][0-9]*$/.test(version)) throw new Error("version must be a positive integer");
+    return `?version=${version}`;
+  };
+  const closeoutLines = (manifest: CloseoutManifestView): string[] => [
+    `version ${manifest.version} of ${manifest.versions.join(",")} completed ${manifest.completedAt} snapshot ${manifest.snapshotVersion ?? "-"} head ${manifest.headSha ?? "-"}`,
     ...(manifest.error ? [`error ${manifest.error}`] : []),
     ...(manifest.expiredAt ? [`expired ${manifest.expiredAt}`] : []),
     ...manifest.files.map((file) => `${file.root}/${file.path}\t${file.bytes}`),
@@ -4217,13 +4223,20 @@ export function createProgram(cliEntrypoint: string): Command {
   closeoutCommand
     .command("show")
     .argument("<sessionId>", "Session id")
+    .argument("[version]", "Archive version; defaults to the latest")
     .option("--json", "Print the manifest as JSON")
-    .action(async (sessionId: string, options, command) => {
+    .action(async (sessionId: string, versionArg: string | undefined, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const query = closeoutVersionQuery(versionArg);
       await outputResult({
         json: Boolean(options.json),
         label: "loading closeout",
-        action: () => getJson<CloseoutManifest>(cliEntrypoint, closeoutPath(sessionId), configPath),
+        action: () =>
+          getJson<CloseoutManifestView>(
+            cliEntrypoint,
+            `${closeoutPath(sessionId)}${query}`,
+            configPath,
+          ),
         render: (manifest) => closeoutLines(manifest).join("\n"),
       });
     });
@@ -4231,26 +4244,34 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("get")
     .argument("<sessionId>", "Session id")
     .argument("<file>", "<root>/<path> as printed by closeout show")
+    .argument("[version]", "Archive version; defaults to the latest")
     .option("--out <file>", "Write to a file instead of stdout")
-    .action(async (sessionId: string, file: string, options, command) => {
-      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
-      const encoded = file
-        .split("/")
-        .map((segment) => encodeURIComponent(segment))
-        .join("/");
-      const bytes = await withSpinner("downloading closeout file", () =>
-        getBytes(cliEntrypoint, `${closeoutPath(sessionId)}/files/${encoded}`, configPath),
-      );
-      if (options.out) {
-        writeFileSync(options.out as string, bytes);
-        writeStdout(`Wrote ${bytes.length} bytes to ${options.out as string}`);
-      } else {
-        process.stdout.write(bytes);
-      }
-    });
+    .action(
+      async (sessionId: string, file: string, versionArg: string | undefined, options, command) => {
+        const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+        const query = closeoutVersionQuery(versionArg);
+        const encoded = file
+          .split("/")
+          .map((segment) => encodeURIComponent(segment))
+          .join("/");
+        const bytes = await withSpinner("downloading closeout file", () =>
+          getBytes(
+            cliEntrypoint,
+            `${closeoutPath(sessionId)}/files/${encoded}${query}`,
+            configPath,
+          ),
+        );
+        if (options.out) {
+          writeFileSync(options.out as string, bytes);
+          writeStdout(`Wrote ${bytes.length} bytes to ${options.out as string}`);
+        } else {
+          process.stdout.write(bytes);
+        }
+      },
+    );
   closeoutCommand
     .command("list")
-    .description("Closeout archives of every session whose links match.")
+    .description("Latest closeout archive of every session whose links match.")
     .option("--link <label[=url]>", "Session link; repeat to require all", collectOptionValue, [])
     .option("--json", "Print the entries as JSON")
     .action(async (options, command) => {

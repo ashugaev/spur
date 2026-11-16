@@ -48,6 +48,8 @@ async function run(args: string[]): Promise<void> {
 }
 
 const manifest = {
+  version: 2,
+  versions: [1, 2],
   sessionId: "api-1",
   project: "api",
   completedAt: "2026-11-02T00:00:00.000Z",
@@ -82,7 +84,7 @@ describe("closeout CLI", { timeout: 30_000 }, () => {
     );
     expect(writeStdoutMock).toHaveBeenLastCalledWith(
       [
-        "completed 2026-11-02T00:00:00.000Z snapshot 4 head abc123",
+        "version 2 of 1,2 completed 2026-11-02T00:00:00.000Z snapshot 4 head abc123",
         "error Walk stopped",
         "work/notes.md\t7",
         "skipped artifacts/big.bin\t999\tmax_bytes",
@@ -90,6 +92,27 @@ describe("closeout CLI", { timeout: 30_000 }, () => {
     );
     await run(["closeout", "show", "api-1", "--json"]);
     expect(writeStdoutMock).toHaveBeenLastCalledWith(JSON.stringify(manifest, null, 2));
+  });
+
+  it("show and get select a version through the positional argument", async () => {
+    getJsonMock.mockResolvedValue(manifest);
+    await run(["closeout", "show", "api-1", "1"]);
+    expect(getJsonMock).toHaveBeenLastCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/api-1/closeout?version=1",
+      "/tmp/spur.yaml",
+    );
+    getBytesMock.mockResolvedValue(Buffer.from("old"));
+    vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    await run(["closeout", "get", "api-1", "work/a.txt", "1"]);
+    expect(getBytesMock).toHaveBeenLastCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/api-1/closeout/files/work/a.txt?version=1",
+      "/tmp/spur.yaml",
+    );
+    await expect(run(["closeout", "show", "api-1", "0"])).rejects.toThrow(
+      "version must be a positive integer",
+    );
   });
 
   it("get encodes segments and writes --out or stdout", async () => {

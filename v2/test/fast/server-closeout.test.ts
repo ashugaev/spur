@@ -59,7 +59,7 @@ async function fixture() {
     slots: { links: [{ label: "board-worker", url: LINK_URL }] },
   });
   const archive = async (session: SessionRecord, completedAt: string, files: string[]) => {
-    const source = join(root, `src-${session.id}`);
+    const source = join(root, `src-${session.id}-${completedAt}`);
     mkdirSync(source, { recursive: true });
     for (const name of files) writeFileSync(join(source, name), `bytes of ${name}`);
     await writeCloseoutArchive({
@@ -107,14 +107,47 @@ describe("closeout routes", () => {
     expect(await again.text()).toBe("bytes of a.txt");
   });
 
+  it("serves the latest version by default and an explicit ?version=", async () => {
+    const { dataDir, base, record, archive } = await fixture();
+    const done = record("co-ver", "completed");
+    writeSession(dataDir, done);
+    await archive(done, "2026-11-02T00:00:00.000Z", ["a.txt"]);
+    await archive(done, "2026-11-03T00:00:00.000Z", ["b.txt"]);
+
+    const latest = (await (await fetch(`${base}/sessions/co-ver/closeout`)).json()) as {
+      version: number;
+      versions: number[];
+      files: { path: string }[];
+    };
+    expect(latest).toMatchObject({ version: 2, versions: [1, 2], files: [{ path: "b.txt" }] });
+    const first = (await (await fetch(`${base}/sessions/co-ver/closeout?version=1`)).json()) as {
+      version: number;
+      files: { path: string }[];
+    };
+    expect(first).toMatchObject({ version: 1, files: [{ path: "a.txt" }] });
+    const files = `${base}/sessions/co-ver/closeout/files/artifacts`;
+    expect(await (await fetch(`${files}/a.txt?version=1`)).text()).toBe("bytes of a.txt");
+    expect((await fetch(`${files}/a.txt`)).status).toBe(404);
+    expect(await (await fetch(`${files}/b.txt`)).text()).toBe("bytes of b.txt");
+    expect((await fetch(`${base}/sessions/co-ver/closeout?version=3`)).status).toBe(404);
+    expect((await fetch(`${files}/a.txt?version=3`)).status).toBe(404);
+    expect((await fetch(`${base}/sessions/co-ver/closeout?version=0`)).status).toBe(400);
+    expect((await fetch(`${files}/b.txt?version=x`)).status).toBe(400);
+
+    const list = (await (
+      await fetch(`${base}/closeouts?link=board-worker=${LINK_URL}`)
+    ).json()) as { manifest: { version: number; versions: number[] } }[];
+    expect(list[0]?.manifest).toMatchObject({ version: 2, versions: [1, 2] });
+  });
+
   it("answers 404 for unsafe paths, unknown roots, symlinks and sessions without an archive", async () => {
     const { dataDir, base, record, archive } = await fixture();
     const done = record("co-done", "completed");
     writeSession(dataDir, done);
     await archive(done, "2026-11-02T00:00:00.000Z", ["a.txt"]);
     symlinkSync(
-      join(dataDir, "sessions", "co-done", "closeout", "closeout.json"),
-      join(dataDir, "sessions", "co-done", "closeout", "files", "artifacts", "esc"),
+      join(dataDir, "sessions", "co-done", "closeout", "1", "manifest.json"),
+      join(dataDir, "sessions", "co-done", "closeout", "1", "files", "artifacts", "esc"),
     );
     writeSession(dataDir, record("co-none", "completed"));
 
@@ -160,7 +193,7 @@ describe("closeout routes", () => {
     const done = record("co-bad", "completed");
     writeSession(dataDir, done);
     await archive(done, "2026-11-02T00:00:00.000Z", []);
-    writeFileSync(join(dataDir, "sessions", "co-bad", "closeout", "closeout.json"), "{nope");
+    writeFileSync(join(dataDir, "sessions", "co-bad", "closeout", "1", "manifest.json"), "{nope");
     const response = await fetch(`${base}/sessions/co-bad/closeout`);
     expect(response.status).toBe(500);
     expect(await response.json()).toMatchObject({ code: "closeout_corrupt" });

@@ -628,7 +628,7 @@ import {
   type SessionLink,
   type SessionLinkFilter,
   type CloseoutEntry,
-  type CloseoutManifest,
+  type CloseoutManifestView,
   type TodoItemProjection,
   type WorkSnapshot,
   type WorkSnapshotFreshness,
@@ -20723,14 +20723,19 @@ export class SessionService {
     });
   }
 
-  readCloseout(sessionId: string): CloseoutManifest {
+  readCloseout(sessionId: string, version?: number): CloseoutManifestView {
     const { session, location } = this.readSnapshotOwner(sessionId);
     const manifest = readCloseoutManifest(
       closeoutDirAt(this.config.dataDir, session, location),
       sessionId,
+      version,
     );
     if (!manifest) {
-      throw new SessionResourceNotFoundError(`Session ${sessionId} has no closeout archive`);
+      throw new SessionResourceNotFoundError(
+        version === undefined
+          ? `Session ${sessionId} has no closeout archive`
+          : `Closeout version ${version} not found for session ${sessionId}`,
+      );
     }
     return manifest;
   }
@@ -20738,11 +20743,13 @@ export class SessionService {
   readCloseoutFile(
     sessionId: string,
     rootAndPath: string,
+    version?: number,
   ): { path: string; size: number; name: string } {
     const { session, location } = this.readSnapshotOwner(sessionId);
     const file = resolveCloseoutFile(
       closeoutDirAt(this.config.dataDir, session, location),
       rootAndPath,
+      version,
     );
     if (!file) {
       throw new SessionResourceNotFoundError(
@@ -20752,7 +20759,7 @@ export class SessionService {
     return file;
   }
 
-  /** One entry per session matching every link that has an archive, newest first. */
+  /** One entry per session matching every link that has an archive (latest version), newest first. */
   closeoutsByLink(links: readonly SessionLinkFilter[]): CloseoutEntry[] {
     const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
       ...listSessions(this.config.dataDir).map((session) => ({
@@ -20797,16 +20804,12 @@ export class SessionService {
       try {
         const days = this.closeoutSettingsFor(session).retentionDays;
         if (days === null) continue;
-        if (
-          expireCloseout(
-            closeoutDirAt(this.config.dataDir, session, location),
-            session.id,
-            days,
-            Date.now(),
-          )
-        ) {
-          expired += 1;
-        }
+        expired += expireCloseout(
+          closeoutDirAt(this.config.dataDir, session, location),
+          session.id,
+          days,
+          Date.now(),
+        );
       } catch {
         errors += 1;
       }
@@ -20814,7 +20817,7 @@ export class SessionService {
     if (expired > 0 || errors > 0) {
       this.logEvent("session.closeout_archive.expired", {
         level: "info",
-        message: `Closeout retention expired ${expired} archive(s), ${errors} error(s)`,
+        message: `Closeout retention expired ${expired} archive version(s), ${errors} error(s)`,
         details: { expired, errors },
       });
     }
