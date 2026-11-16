@@ -309,6 +309,8 @@ describe("AuthLoginDialog verification", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     expect(await screen.findByText("Verifying sign-in…")).toBeTruthy();
+    expect(screen.getByText("Key received")).toBeTruthy();
+    expect(screen.queryByText("Key accepted")).toBeNull();
     expect(screen.queryByText(/Signed in · verified/)).toBeNull();
     status = { accountId: CLAUDE.id, status: "ready" };
 
@@ -371,6 +373,44 @@ describe("AuthLoginDialog errors", () => {
       expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
     },
   );
+
+  it("tells a blocked provider apart from a rejected code, with status only", async () => {
+    route("POST", "/api/auth-accounts/claude-new/login", () => ({
+      payload: {
+        accountId: CLAUDE.id,
+        status: "failed",
+        errorCode: "provider_blocked",
+        error: "Provider blocked the sign-in request (HTTP 403)",
+      },
+    }));
+    render(CLAUDE);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Sign-in blocked");
+    expect(alert.textContent).toContain(
+      "Provider blocked the sign-in request (HTTP 403). Continue in terminal.",
+    );
+    expect(alert.textContent).not.toContain("code rejected");
+    expect(screen.getAllByRole("button", { name: "Continue in terminal" })).toHaveLength(2);
+  });
+
+  it("shows a code the provider rejected", async () => {
+    route("POST", "/api/auth-accounts/claude-new/login", () => ({
+      payload: {
+        accountId: CLAUDE.id,
+        status: "failed",
+        errorCode: "code_rejected",
+        error: "Provider rejected the sign-in code (HTTP 400)",
+      },
+    }));
+    render(CLAUDE);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Sign-in code rejected");
+    expect(alert.textContent).toContain("Provider rejected the sign-in code (HTTP 400)");
+  });
 
   it("says a device code expired", async () => {
     route("POST", "/api/auth-accounts/codex-new/login", () => ({
