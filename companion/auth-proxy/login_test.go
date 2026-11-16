@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -143,12 +144,12 @@ func TestRepeatedLoginReusesSamePendingWorker(t *testing.T) {
 	attempt := &loginAttempt{status: loginStatus{AccountID: "account-a", Status: "pending", URL: "https://claude.ai/oauth/authorize"}}
 	l := &loginManager{active: "account-a", attempts: map[string]*loginAttempt{"account-a": attempt}}
 	for range 2 {
-		status, err := l.start(context.Background(), "account-a", claude)
+		status, err := l.start(context.Background(), "account-a", claude, methodOAuth)
 		if err != nil || status.Status != "pending" || l.attempts["account-a"] != attempt {
 			t.Fatal("repeated login did not reuse pending worker")
 		}
 	}
-	if _, err := l.start(context.Background(), "account-b", claude); err == nil {
+	if _, err := l.start(context.Background(), "account-b", claude, methodOAuth); err == nil {
 		t.Fatal("different profile started a concurrent login")
 	}
 }
@@ -178,18 +179,25 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// claudeTokenFake answers the Claude token, profile and roles endpoints and records each request.
-// Profile and roles answer 500 unless profile / rolesOK is set; any other URL is a transport error.
-type claudeTokenFake struct {
-	mu       sync.Mutex
-	requests []*http.Request
-	bodies   []string
-	status   int
-	encoding string
-	token    string // token response override
-	profile  string // profile response body; empty answers 500
-	rolesOK  bool
+// providerFake is the in-memory provider network: the Claude and Codex token endpoints, the Claude
+// profile and roles lookups and the four verification probe targets. It records each request and
+// answers any other URL with a transport error, so no fixture traffic can reach a real provider.
+// Profile and roles answer 500 unless profile / rolesOK is set.
+type providerFake struct {
+	mu          sync.Mutex
+	requests    []*http.Request
+	bodies      []string
+	status      int
+	encoding    string
+	token       string // Claude token response override
+	profile     string // profile response body; empty answers 500
+	rolesOK     bool
+	probeStatus int            // verification probe answer; 0 is 200
+	probeURL    map[string]int // per-URL probe answer override
 }
+
+// codexFakeToken is a Codex token response. expires_in (200h) stays above the 96h Codex refresh lead.
+var codexFakeToken = `{"access_token":"fixture-codex-access","refresh_token":"fixture-codex-refresh","expires_in":720000,"id_token":"` + makeJWT(map[string]any{"email": "codex@example.invalid", "https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "workspace-1", "chatgpt_plan_type": "plus"}}) + `"}`
 
 // expires_in must stay above the SDK's 4h Claude refresh lead (ClaudeAuthenticator.RefreshLead).
 // A shorter fixture token is refresh-due on arrival, so the SDK scheduler POSTs the fixture refresh
@@ -213,7 +221,7 @@ func encodeFixtureBody(t string, payload []byte) ([]byte, http.Header) {
 	return buf.Bytes(), http.Header{"Content-Encoding": {t}}
 }
 
-func (f *claudeTokenFake) RoundTrip(r *http.Request) (*http.Response, error) {
+func (f *providerFake) RoundTrip(r *http.Request) (*http.Response, error) {
 	var body []byte
 	if r.Body != nil {
 		body, _ = io.ReadAll(r.Body)
@@ -225,6 +233,15 @@ func (f *claudeTokenFake) RoundTrip(r *http.Request) (*http.Response, error) {
 	switch r.URL.String() {
 	case claudeTokenURL:
 		payload = []byte(firstNonEmpty(f.token, claudeFakeToken))
+	case codexTokenURL:
+		payload = []byte(codexFakeToken)
+	case claudeUsageURL, codexUsageURL, claudeModelsURL, codexModelsURL:
+		f.mu.Lock()
+		status, payload = f.probeStatus, []byte(`{}`)
+		if override, ok := f.probeURL[r.URL.String()]; ok {
+			status = override
+		}
+		f.mu.Unlock()
 	case claudeProfileURL:
 		status, payload = http.StatusInternalServerError, []byte(`{}`)
 		if f.profile != "" {
@@ -246,9 +263,9 @@ func (f *claudeTokenFake) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // calls counts token endpoint requests.
-func (f *claudeTokenFake) calls() int { return f.count(claudeTokenURL) }
+func (f *providerFake) calls() int { return f.count(claudeTokenURL) }
 
-func (f *claudeTokenFake) count(target string) int {
+func (f *providerFake) count(target string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n := 0
@@ -295,10 +312,27 @@ func TestPKCEAuthorizeURLMatchesSDK(t *testing.T) {
 	}
 }
 
-func TestClaudePasteFormsMatchSDK(t *testing.T) {
-	flow, _ := newClaudeFlow()
+// TestPKCEPasteForms: every form the SDK parser accepts, plus the bare code#state the Claude page
+// shows, is accepted for both browser flows; error forms and a wrong state end with no exchange.
+func TestPKCEPasteForms(t *testing.T) {
+	claudeSide, err := newClaudeFlow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexSide, err := newCodexFlow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, flow := range []*pkceSecrets{&claudeSide.pkceSecrets, &codexSide.pkceSecrets} {
+		pasteForms(t, flow)
+	}
+}
+
+func pasteForms(t *testing.T, flow *pkceSecrets) {
+	t.Helper()
 	s := flow.state
 	accepted := map[string]string{
+		"bare code#state":         "C#" + s,
 		"full URL":                "http://localhost:54545/callback?code=C&state=" + s,
 		"URL without scheme":      "localhost:54545/callback?code=C&state=" + s,
 		"query only":              "?code=C&state=" + s,
@@ -322,7 +356,9 @@ func TestClaudePasteFormsMatchSDK(t *testing.T) {
 		"error with code":          "?code=C&error=access_denied&state=" + s,
 		"literal code=X#Y":         "code=C#" + s,
 		"query code=X#Y":           "?code=C#" + s,
-		"bare code#state":          "C#" + s,
+		"bare code#wrong state":    "C#other",
+		"bare state only":          "#" + s,
+		"bare code only":           "C#",
 		"wrong state":              "?code=C&state=other",
 		"missing code":             "?state=" + s,
 		"missing state":            "?code=C",
@@ -342,9 +378,9 @@ func TestClaudePasteFormsMatchSDK(t *testing.T) {
 	}
 }
 
-func TestClaudeExchangeRequestShape(t *testing.T) {
+func TestPKCEExchangeRequestShape(t *testing.T) {
 	for _, encoding := range []string{"", "gzip", "compress"} {
-		fake := &claudeTokenFake{encoding: encoding}
+		fake := &providerFake{encoding: encoding}
 		flow, _ := newClaudeFlow()
 		tokens, err := flow.exchange(context.Background(), oauthHTTPClient(fake), "CODE", flow.state)
 		if err != nil {
@@ -376,12 +412,12 @@ func TestClaudeExchangeRequestShape(t *testing.T) {
 		}
 	}
 	// A "#state" left on the code overrides the state, like the SDK exchange.
-	fake := &claudeTokenFake{}
+	fake := &providerFake{}
 	flow, _ := newClaudeFlow()
 	if _, err := flow.exchange(context.Background(), oauthHTTPClient(fake), "CODE#OVERRIDE", flow.state); err != nil || !strings.Contains(fake.bodies[0], `"code":"CODE"`) || !strings.HasSuffix(fake.bodies[0], `"state":"OVERRIDE"}`) {
 		t.Fatalf("code#state split: %v %s", err, fake.bodies)
 	}
-	failing := &claudeTokenFake{status: http.StatusBadRequest}
+	failing := &providerFake{status: http.StatusBadRequest}
 	if _, err := flow.exchange(context.Background(), oauthHTTPClient(failing), "CODE", flow.state); err == nil {
 		t.Fatal("non-200 exchange accepted")
 	}
@@ -394,8 +430,8 @@ func claudeLoginFixture(t *testing.T, fake http.RoundTripper) *loginManager {
 }
 
 func TestClaudeLoginKeepsPromptText(t *testing.T) {
-	l := claudeLoginFixture(t, &claudeTokenFake{})
-	status, err := l.start(context.Background(), "account-a", claude)
+	l := claudeLoginFixture(t, &providerFake{})
+	status, err := l.start(context.Background(), "account-a", claude, methodOAuth)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,10 +440,10 @@ func TestClaudeLoginKeepsPromptText(t *testing.T) {
 		t.Fatalf("first status: %+v", status)
 	}
 	// Repeat start reuses the attempt; a different account is refused.
-	if again, err := l.start(context.Background(), "account-a", claude); err != nil || again.URL != status.URL {
+	if again, err := l.start(context.Background(), "account-a", claude, methodOAuth); err != nil || again.URL != status.URL {
 		t.Fatal("repeat start changed the attempt")
 	}
-	if _, err := l.start(context.Background(), "account-b", claude); err == nil {
+	if _, err := l.start(context.Background(), "account-b", claude, methodOAuth); err == nil {
 		t.Fatal("second account started concurrently")
 	}
 	for _, bad := range []string{"", "a\nb", "a\rb", strings.Repeat("x", 8193)} {
@@ -423,34 +459,39 @@ func TestClaudeLoginKeepsPromptText(t *testing.T) {
 	}
 }
 
-func TestClaudeLoginRejectedPasteMakesNoExchange(t *testing.T) {
-	for _, input := range []string{"?code=C&state=wrong", "error=access_denied", "C#state", "garbage"} {
-		fake := &claudeTokenFake{}
-		l := claudeLoginFixture(t, fake)
-		status, err := l.start(context.Background(), "account-a", claude)
-		if err != nil {
-			t.Fatal(err)
+func TestPKCERejectedPasteMakesNoExchange(t *testing.T) {
+	for _, side := range []struct {
+		p      provider
+		method string
+	}{{claude, methodOAuth}, {codex, methodBrowser}} {
+		for _, input := range []string{"?code=C&state=wrong", "error=access_denied", "C#wrong", "code=C#state", "garbage"} {
+			fake := &providerFake{}
+			l := claudeLoginFixture(t, fake)
+			status, err := l.start(context.Background(), "account-a", side.p, side.method)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := l.attempts["account-a"]
+			after, err := l.input("account-a", input)
+			if err != nil || after.Prompt != "" || after.Status != "pending" || after.URL != status.URL || after.Stage != stageSubmitted {
+				t.Fatalf("input result: %+v %v", after, err)
+			}
+			select {
+			case <-a.done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("rejected paste did not end the attempt")
+			}
+			if got := l.status("account-a"); got.Status != "failed" || got.Error != "Sign-in failed; retry authentication" || got.ErrorCode != errInputRejected {
+				t.Fatalf("%s status after %q: %+v", side.p, input, got)
+			}
+			if fake.calls() != 0 || fake.count(codexTokenURL) != 0 || fake.count(claudeUsageURL) != 0 {
+				t.Fatalf("%q reached the network", input)
+			}
+			if _, err := l.start(context.Background(), "account-b", side.p, side.method); err != nil {
+				t.Fatal("failed attempt kept the companion busy")
+			}
+			_, _ = l.cancel("account-b")
 		}
-		a := l.attempts["account-a"]
-		after, err := l.input("account-a", input)
-		if err != nil || after.Prompt != "" || after.Status != "pending" || after.URL != status.URL {
-			t.Fatalf("input result: %+v %v", after, err)
-		}
-		select {
-		case <-a.done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("rejected paste did not end the attempt")
-		}
-		if got := l.status("account-a"); got.Status != "failed" || got.Error != "Sign-in failed; retry authentication" {
-			t.Fatalf("status after %q: %+v", input, got)
-		}
-		if fake.calls() != 0 {
-			t.Fatalf("%q reached the token endpoint", input)
-		}
-		if _, err := l.start(context.Background(), "account-b", claude); err != nil {
-			t.Fatal("failed attempt kept the companion busy")
-		}
-		_, _ = l.cancel("account-b")
 	}
 }
 
@@ -487,7 +528,7 @@ func TestClaudeProfileLookupMatchesSDK(t *testing.T) {
 		return &v
 	}
 	// Profile wins where it carries a value; blank profile fields keep the token response.
-	fake := &claudeTokenFake{rolesOK: true, profile: `{"account":{"uuid":" acct-2 ","email":"profile@example.invalid"},"organization":{"uuid":"org-2","name":""}}`}
+	fake := &providerFake{rolesOK: true, profile: `{"account":{"uuid":" acct-2 ","email":"profile@example.invalid"},"organization":{"uuid":"org-2","name":""}}`}
 	got := tokens()
 	inspectClaudeAccount(context.Background(), oauthHTTPClient(fake), got)
 	if got.Account.UUID != "acct-2" || got.Account.EmailAddress != "profile@example.invalid" || got.Organization.UUID != "org-2" || got.Organization.Name != "Org" {
@@ -499,7 +540,7 @@ func TestClaudeProfileLookupMatchesSDK(t *testing.T) {
 	headers(fake.requests[0])
 	headers(fake.requests[1])
 	// Profile failure, profile without account uuid, or a transport error keep the token identity.
-	for name, f := range map[string]*claudeTokenFake{
+	for name, f := range map[string]*providerFake{
 		"profile error":   {},
 		"no account uuid": {profile: `{"account":{"uuid":"","email":"x@example.invalid"}}`},
 		"gzip profile":    {encoding: "gzip", profile: `{"account":{"uuid":"acct-3"}}`},
@@ -525,9 +566,9 @@ func TestClaudeProfileLookupMatchesSDK(t *testing.T) {
 }
 
 func TestClaudeLoginRefusesEmptyEmail(t *testing.T) {
-	fake := &claudeTokenFake{token: `{"access_token":"fixture-access","refresh_token":"r","expires_in":3600,"account":{"uuid":"acct-1"},"organization":{"uuid":"org-1"}}`}
+	fake := &providerFake{token: `{"access_token":"fixture-access","refresh_token":"r","expires_in":3600,"account":{"uuid":"acct-1"},"organization":{"uuid":"org-1"}}`}
 	l := claudeLoginFixture(t, fake)
-	if _, err := l.start(context.Background(), "account-a", claude); err != nil {
+	if _, err := l.start(context.Background(), "account-a", claude, methodOAuth); err != nil {
 		t.Fatal(err)
 	}
 	a := l.attempts["account-a"]
@@ -566,9 +607,9 @@ func TestClaudeLoginPasteWaitTimesOut(t *testing.T) {
 	saved := claudeCallbackWait
 	claudeCallbackWait = 50 * time.Millisecond
 	t.Cleanup(func() { claudeCallbackWait = saved })
-	fake := &claudeTokenFake{}
+	fake := &providerFake{}
 	l := claudeLoginFixture(t, fake)
-	if _, err := l.start(context.Background(), "account-a", claude); err != nil {
+	if _, err := l.start(context.Background(), "account-a", claude, methodOAuth); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -579,8 +620,281 @@ func TestClaudeLoginPasteWaitTimesOut(t *testing.T) {
 	if got := l.status("account-a"); got.Status != "failed" || fake.calls() != 0 {
 		t.Fatalf("status after timeout: %+v", got)
 	}
-	if _, err := l.start(context.Background(), "account-b", claude); err != nil {
+	if _, err := l.start(context.Background(), "account-b", claude, methodOAuth); err != nil {
 		t.Fatal("timed-out attempt kept the companion busy")
 	}
 	_, _ = l.cancel("account-b")
+}
+
+func TestPKCEAuthorizeURLCodex(t *testing.T) {
+	flow, err := newCodexFlow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(flow.authorizeURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Scheme != "https" || u.Host != "auth.openai.com" || u.Path != "/oauth/authorize" {
+		t.Fatalf("authorize endpoint: %s", u.Redacted())
+	}
+	sum := sha256.Sum256([]byte(flow.verifier))
+	want := url.Values{
+		"client_id":                  {"app_EMoamEEZ73f0CkXaXp7hrann"},
+		"response_type":              {"code"},
+		"redirect_uri":               {"http://localhost:1455/auth/callback"},
+		"scope":                      {"openid email profile offline_access"},
+		"state":                      {flow.state},
+		"code_challenge":             {base64.RawURLEncoding.EncodeToString(sum[:])},
+		"code_challenge_method":      {"S256"},
+		"prompt":                     {"login"},
+		"id_token_add_organizations": {"true"},
+		"codex_cli_simplified_flow":  {"true"},
+	}
+	if got := u.Query(); !maps.EqualFunc(got, want, func(a, b []string) bool { return len(a) == 1 && len(b) == 1 && a[0] == b[0] }) {
+		t.Fatalf("authorize params differ: %v", got)
+	}
+	if len(flow.verifier) != 128 || len(flow.state) != 32 {
+		t.Fatalf("verifier/state lengths %d/%d", len(flow.verifier), len(flow.state))
+	}
+}
+
+func TestPKCECodexExchangeRequestShape(t *testing.T) {
+	fake := &providerFake{}
+	flow, _ := newCodexFlow()
+	auth, err := flow.redeem(context.Background(), oauthHTTPClient(fake), "account-x", "CODE", flow.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := fake.requests[0]
+	if r.Method != http.MethodPost || r.URL.String() != "https://auth.openai.com/oauth/token" {
+		t.Fatalf("request: %s %s", r.Method, r.URL)
+	}
+	if r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" || r.Header.Get("Accept") != "application/json" {
+		t.Fatalf("headers: %v", r.Header)
+	}
+	form, err := url.ParseQuery(fake.bodies[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := url.Values{"grant_type": {"authorization_code"}, "client_id": {"app_EMoamEEZ73f0CkXaXp7hrann"}, "code": {"CODE"}, "redirect_uri": {"http://localhost:1455/auth/callback"}, "code_verifier": {flow.verifier}}
+	if !maps.EqualFunc(form, want, func(a, b []string) bool { return len(a) == 1 && len(b) == 1 && a[0] == b[0] }) {
+		t.Fatalf("form differs: %v", form)
+	}
+	identity, err := validatedIdentity(auth)
+	if err != nil || identity.AccountID != "workspace-1" || auth.Metadata["email"] != "codex@example.invalid" || auth.Metadata["plan_type"] != "plus" || auth.ID != "account-x.json" {
+		t.Fatalf("identity from id_token: %+v %v", identity, err)
+	}
+	if !usableAuth(auth) || auth.Metadata["refresh_token"] != "fixture-codex-refresh" || auth.Metadata["type"] != "codex" {
+		t.Fatal("record missing credential fields")
+	}
+	// An id_token without the identity claims cannot become a record.
+	bare := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"access_token":"a","refresh_token":"r","expires_in":720000,"id_token":"not-a-jwt"}`)), Request: r}, nil
+	})
+	if _, err := flow.redeem(context.Background(), oauthHTTPClient(bare), "account-x", "CODE", flow.state); err == nil {
+		t.Fatal("identity-less id_token accepted")
+	}
+	if _, err := flow.redeem(context.Background(), oauthHTTPClient(&providerFake{status: http.StatusBadRequest}), "account-x", "CODE", flow.state); err == nil {
+		t.Fatal("rejected exchange accepted")
+	}
+}
+
+func TestLoginOptionsPerMethod(t *testing.T) {
+	allowed := map[provider][]string{claude: {methodOAuth}, codex: {methodDevice, methodBrowser}}
+	for _, p := range []provider{claude, codex} {
+		for _, method := range []string{methodOAuth, methodDevice, methodBrowser, methodAPIKey, "", "other"} {
+			want := false
+			for _, ok := range allowed[p] {
+				want = want || ok == method
+			}
+			if loginMethodAllowed(p, method) != want {
+				t.Fatalf("%s/%q allowed=%v", p, method, !want)
+			}
+		}
+	}
+	l := claudeLoginFixture(t, &providerFake{})
+	for _, bad := range []struct {
+		p      provider
+		method string
+	}{{claude, methodDevice}, {claude, methodBrowser}, {codex, methodOAuth}, {codex, ""}} {
+		if _, err := l.start(context.Background(), "account-a", bad.p, bad.method); err == nil || l.active != "" {
+			t.Fatalf("%s/%q started", bad.p, bad.method)
+		}
+	}
+	status, err := l.start(context.Background(), "account-x", codex, methodBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = l.cancel("account-x") })
+	if !strings.HasPrefix(status.URL, "https://auth.openai.com/oauth/authorize?") || status.Method != methodBrowser || status.Stage != stageAuthorize || status.Prompt != loginPrompt || status.UserCode != "" {
+		t.Fatalf("codex browser status: %+v", status)
+	}
+}
+
+// helperWorkerEnv selects the behaviour of the re-executed test binary standing in for the device worker.
+const helperWorkerEnv = "SPUR_TEST_HELPER_WORKER"
+
+func TestHelperWorkerProcess(t *testing.T) {
+	mode := os.Getenv(helperWorkerEnv)
+	if mode == "" {
+		t.Skip("helper process only")
+	}
+	dir := os.Getenv(helperWorkerEnv + "_DIR")
+	switch mode {
+	case "expired":
+		fmt.Println("Codex device code: ABCD-1234")
+		os.Exit(1)
+	case "identity":
+		fmt.Println(duplicateIdentity)
+		os.Exit(1)
+	case "stage":
+		fmt.Println("Codex device URL: https://auth.openai.com/codex/device")
+		tokens := &codexTokens{IDToken: codexIDToken("device@example.invalid", "workspace-device"), AccessToken: "fixture-device-access", RefreshToken: "fixture-device-refresh", ExpiresIn: 720000, Email: "device@example.invalid", AccountID: "workspace-device"}
+		record := buildCodexOAuthRecord("account-x", tokens, time.Now())
+		if err := os.MkdirAll(filepath.Join(dir, "auth-proxy-staging"), 0o700); err != nil {
+			os.Exit(2)
+		}
+		if _, err := stagingStore(dir).Save(context.Background(), record); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+	os.Exit(3)
+}
+
+// helperCommand makes the device worker seam re-execute this test binary in the given mode.
+func helperCommand(mode string) func(context.Context, []string) *exec.Cmd {
+	return func(ctx context.Context, args []string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHelperWorkerProcess$")
+		cmd.Env = append(os.Environ(), helperWorkerEnv+"="+mode, helperWorkerEnv+"_DIR="+args[1])
+		return cmd
+	}
+}
+
+func TestLoginFailureCodes(t *testing.T) {
+	for mode, want := range map[string]struct{ code, message string }{
+		"expired":  {errExpired, "Sign-in timed out; retry authentication"},
+		"identity": {errIdentity, "This account is already saved; select its existing profile"},
+	} {
+		f := newLoginFixture(t)
+		f.l.command = helperCommand(mode)
+		status, err := f.l.start(context.Background(), "account-x", codex, methodDevice)
+		if err != nil || status.Status != "pending" || status.Method != methodDevice {
+			t.Fatalf("%s start: %+v %v", mode, status, err)
+		}
+		final := f.await(t, "account-x")
+		if final.Status != "failed" || final.ErrorCode != want.code || final.Error != want.message {
+			t.Fatalf("%s: %+v", mode, final)
+		}
+		if f.executor[codex].probes() != 0 {
+			t.Fatalf("%s: failed worker reached the probe", mode)
+		}
+	}
+}
+
+// TestLoginReadyOnlyAfterVerification: the account is not ready while the probe runs, a rejected
+// probe leaves the old credential in place, and the verified probe sets the mark.
+func TestLoginReadyOnlyAfterVerification(t *testing.T) {
+	f := newLoginFixture(t)
+	old := buildClaudeFixtureRecord(t, "account-a", "old-access", "old-refresh")
+	if _, err := f.l.store.Save(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "old credential registered", func() bool { return f.l.ready("account-a", claude) })
+	if err := f.r.setVerified("account-a"); err != nil {
+		t.Fatal(err)
+	}
+	pasteAndAwait := func() loginStatus {
+		status, err := f.l.start(context.Background(), "account-a", claude, methodOAuth)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = f.l.input("account-a", "?code=CODE&state="+firstQueryState(t, status.URL)); err != nil {
+			t.Fatal(err)
+		}
+		return f.await(t, "account-a")
+	}
+	readAccess := func() string {
+		stored, err := f.l.store.List(context.Background())
+		if err != nil || len(stored) != 1 {
+			t.Fatalf("store: %v %d", err, len(stored))
+		}
+		token, _ := stored[0].Metadata["access_token"].(string)
+		return token
+	}
+
+	// Rejected probe: nothing new is saved, the old credential is registered again and still verified.
+	f.executor[claude].status = http.StatusUnauthorized
+	final := pasteAndAwait()
+	if final.Status != "failed" || final.ErrorCode != errNotConfirmed {
+		t.Fatalf("rejected probe: %+v", final)
+	}
+	if readAccess() != "old-access" {
+		t.Fatal("rejected probe replaced the saved credential")
+	}
+	waitFor(t, "old credential restored", func() bool { return f.l.ready("account-a", claude) })
+	if verified, _ := f.marks("account-a"); !verified {
+		t.Fatal("failed sign-in cleared the old verified mark")
+	}
+
+	// Verified probe held open: pending at stage verifying, not routable, no file replaced yet.
+	f.executor[claude].status = http.StatusOK
+	gate := make(chan struct{})
+	f.executor[claude].probeGate = gate
+	status, err := f.l.start(context.Background(), "account-a", claude, methodOAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.l.input("account-a", "?code=CODE&state="+firstQueryState(t, status.URL)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "stage verifying", func() bool { return f.l.status("account-a").Stage == stageVerifying })
+	if got := f.l.status("account-a"); got.Status != "pending" {
+		t.Fatalf("while probing: %+v", got)
+	}
+	f.r.mu.Lock()
+	eligible := f.r.eligibleLocked("account-a", claude)
+	f.r.mu.Unlock()
+	if eligible || f.l.ready("account-a", claude) {
+		t.Fatal("account routable while its sign-in is unverified")
+	}
+	if readAccess() != "old-access" {
+		t.Fatal("credential replaced before the probe passed")
+	}
+	close(gate)
+	if final = f.await(t, "account-a"); final.Status != "ready" {
+		t.Fatalf("verified probe: %+v", final)
+	}
+	if readAccess() != "fixture-access" {
+		t.Fatal("verified credential not saved")
+	}
+	if verified, broken := f.marks("account-a"); !verified || broken {
+		t.Fatalf("marks after verified sign-in: verified=%v broken=%v", verified, broken)
+	}
+}
+
+func buildClaudeFixtureRecord(t *testing.T, id, access, refresh string) *coreauth.Auth {
+	t.Helper()
+	var tokens claudeTokens
+	if err := json.Unmarshal([]byte(claudeFakeToken), &tokens); err != nil {
+		t.Fatal(err)
+	}
+	tokens.AccessToken, tokens.RefreshToken = access, refresh
+	record, err := buildClaudeOAuthRecord(id, &tokens, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func waitFor(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !ok() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

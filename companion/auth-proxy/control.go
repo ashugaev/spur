@@ -48,6 +48,16 @@ type sessionParams struct {
 type loginParams struct {
 	AccountID string   `json:"accountId"`
 	Provider  provider `json:"provider"`
+	Method    string   `json:"method"`
+}
+type apiKeyParams struct {
+	AccountID string   `json:"accountId"`
+	Provider  provider `json:"provider"`
+	APIKey    string   `json:"apiKey"`
+}
+type importParams struct {
+	AccountID string   `json:"accountId"`
+	Provider  provider `json:"provider"`
 }
 type accountParams struct {
 	AccountID string `json:"accountId"`
@@ -63,6 +73,10 @@ type accountStatus struct {
 	Error    string   `json:"error,omitempty"`
 	// CooldownUntil is set while a shared quota cooldown is active.
 	CooldownUntil string `json:"cooldownUntil,omitempty"`
+	// Credential is the kind of the registered credential: oauth or api_key.
+	Credential string `json:"credential,omitempty"`
+	// BrokenAt is set from the first loss of sign-in after a verified sign-in until the next verified sign-in.
+	BrokenAt string `json:"brokenAt,omitempty"`
 }
 type stateSummary struct {
 	Accounts []accountStatus  `json:"accounts"`
@@ -72,7 +86,7 @@ type resultValue interface {
 	emptyResult | registration | stateSummary | loginStatus
 }
 type inputValue interface {
-	*runtimeState | *controlRequest | *configureParams | *registerParams | *switchParams | *sessionParams | *loginParams | *accountParams | *loginInputParams | *emptyResult
+	*runtimeState | *controlRequest | *configureParams | *registerParams | *switchParams | *sessionParams | *loginParams | *apiKeyParams | *importParams | *accountParams | *loginInputParams | *emptyResult
 }
 
 func decode[T inputValue](raw []byte, target T) error {
@@ -157,13 +171,22 @@ func (c *control) handle(ctx context.Context, req controlRequest) {
 		err := decode(req.Params, &p)
 		result := stateSummary{Accounts: []accountStatus{}, Sessions: []sessionSummary{}}
 		if err == nil {
+			// Registered credentials are read before r.mu: the manager must not be entered under it.
+			registered := c.registeredCredentials()
 			r.mu.Lock()
 			for _, a := range r.accounts {
 				status := c.logins.status(a.ID)
-				if status.Status != "pending" && c.logins.ready(a.ID, a.Provider) {
-					status.Status = "ready"
+				if status.Status != "pending" {
+					if r.readyAccount != nil && r.readyAccount(a.ID, a.Provider) {
+						status.Status = "ready"
+					} else if status.Status == "ready" {
+						status.Status = "sign-in-required"
+					}
 				}
-				entry := accountStatus{ID: a.ID, Provider: a.Provider, Status: status.Status, Error: status.Error}
+				entry := accountStatus{ID: a.ID, Provider: a.Provider, Status: status.Status, Error: status.Error, Credential: registered[a.ID]}
+				if at, broken := r.state.Broken[a.ID]; broken {
+					entry.BrokenAt = at.UTC().Format(time.RFC3339)
+				}
 				if until := r.state.Cooldowns[a.ID]; until.After(time.Now()) {
 					entry.CooldownUntil = until.UTC().Format(time.RFC3339)
 				}
@@ -212,13 +235,31 @@ func (c *control) handle(ctx context.Context, req controlRequest) {
 		err := decode(req.Params, &p)
 		var result loginStatus
 		if err == nil {
-			r.mu.Lock()
-			a, exists := r.accounts[p.AccountID]
-			r.mu.Unlock()
-			if !exists || a.Provider != p.Provider {
-				err = errors.New("unknown provider account")
-			} else {
-				result, err = c.logins.start(ctx, p.AccountID, p.Provider)
+			if err = c.knownAccount(p.AccountID, p.Provider); err == nil && !loginMethodAllowed(p.Provider, p.Method) {
+				err = errors.New("sign-in method is not available for this provider")
+			}
+		}
+		if err == nil {
+			result, err = c.logins.start(ctx, p.AccountID, p.Provider, p.Method)
+		}
+		reply(c, req.ID, result, err)
+	case "setApiKey":
+		var p apiKeyParams
+		err := decode(req.Params, &p)
+		var result loginStatus
+		if err == nil {
+			if err = c.knownAccount(p.AccountID, p.Provider); err == nil {
+				result, err = c.logins.setAPIKey(ctx, p.AccountID, p.Provider, p.APIKey)
+			}
+		}
+		reply(c, req.ID, result, err)
+	case "importNativeLogin":
+		var p importParams
+		err := decode(req.Params, &p)
+		var result loginStatus
+		if err == nil {
+			if err = c.knownAccount(p.AccountID, p.Provider); err == nil {
+				result, err = c.logins.importNative(ctx, p.AccountID, p.Provider)
 			}
 		}
 		reply(c, req.ID, result, err)
@@ -252,7 +293,7 @@ func (c *control) handle(ctx context.Context, req controlRequest) {
 				if req.Method == "cancelLogin" {
 					result, err = c.logins.cancel(p.AccountID)
 				} else {
-					result = c.logins.status(p.AccountID)
+					result = c.loginState(p.AccountID)
 				}
 			}
 			reply(c, req.ID, result, err)
@@ -294,5 +335,60 @@ func (c *control) removeAccount(ctx context.Context, id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.state.Cooldowns, id)
+	delete(r.state.Verified, id)
+	delete(r.state.Broken, id)
 	return r.persistLocked()
+}
+
+// knownAccount checks the account is configured under the stated provider.
+func (c *control) knownAccount(id string, p provider) error {
+	c.router.mu.Lock()
+	defer c.router.mu.Unlock()
+	if a, exists := c.router.accounts[id]; !exists || a.Provider != p {
+		return errors.New("unknown provider account")
+	}
+	return nil
+}
+
+// loginState is the account's login status with readiness composed from the persisted marks: a usable
+// credential without a verified mark, or with a breakage mark, is not signed in.
+func (c *control) loginState(id string) loginStatus {
+	status := c.logins.status(id)
+	if status.Status != "ready" {
+		return status
+	}
+	c.router.mu.Lock()
+	allowed := c.router.marksAllowLocked(id)
+	c.router.mu.Unlock()
+	if !allowed {
+		return loginStatus{AccountID: id, Status: "sign-in-required"}
+	}
+	return status
+}
+
+// registeredCredentials reports the kind of each account's registered credential and records the
+// breakage of any verified account whose sign-in the SDK rejected without running a hook.
+func (c *control) registeredCredentials() map[string]string {
+	r := c.router
+	r.mu.Lock()
+	accounts := make([]accountInput, 0, len(r.accounts))
+	for _, a := range r.accounts {
+		accounts = append(accounts, a)
+	}
+	r.mu.Unlock()
+	kinds := make(map[string]string, len(accounts))
+	for _, a := range accounts {
+		auth, ok := c.logins.manager.GetByID(authFileID(a.ID))
+		if !ok || auth.Provider != string(a.Provider) {
+			continue
+		}
+		if auth.RequiresSignIn {
+			r.markBroken(a.ID)
+		}
+		kinds[a.ID] = "oauth"
+		if isAPIKey(auth) {
+			kinds[a.ID] = credentialAPIKey
+		}
+	}
+	return kinds
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -175,8 +176,46 @@ func (r *router) Pick(_ context.Context, requestedProvider, _ string, opts coree
 	return nil, errors.New("selected account unavailable")
 }
 
-func (r *router) OnAuthRegistered(context.Context, *coreauth.Auth) {}
-func (r *router) OnAuthUpdated(context.Context, *coreauth.Auth)    {}
+func (r *router) OnAuthRegistered(ctx context.Context, auth *coreauth.Auth) { r.observeAuth(ctx, auth) }
+func (r *router) OnAuthUpdated(ctx context.Context, auth *coreauth.Auth)    { r.observeAuth(ctx, auth) }
+
+// observeAuth runs after the manager commits an auth. It schedules the projection of an API-key
+// record whose executor attributes are missing (the file watcher does not project them) and records
+// the first loss of sign-in as a breakage.
+func (r *router) observeAuth(_ context.Context, auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if r.manager != nil && projectAPIKey(auth.Clone()) {
+		r.projectLater(auth.ID)
+	}
+	if auth.RequiresSignIn {
+		r.markBroken(profileID(auth.ID))
+	}
+}
+
+// projectLater re-registers the stored API-key auth with its executor attributes once the service
+// has published its models. An update inside the registration hook races the service's publication
+// fence and can leave the account without models, so the update waits for the publication.
+func (r *router) projectLater(id string) {
+	r.projectMu.Lock()
+	if r.projecting[id] {
+		r.projectMu.Unlock()
+		return
+	}
+	r.projecting[id] = true
+	r.projectMu.Unlock()
+	go func() {
+		defer func() { r.projectMu.Lock(); delete(r.projecting, id); r.projectMu.Unlock() }()
+		for deadline := time.Now().Add(15 * time.Second); len(cliproxy.GlobalModelRegistry().GetModelsForClient(id)) == 0 && time.Now().Before(deadline); {
+			time.Sleep(20 * time.Millisecond)
+		}
+		// A credential removed meanwhile stays removed: only a registered auth is updated.
+		if current, ok := r.manager.GetByID(id); ok && projectAPIKey(current) {
+			_, _ = r.manager.Update(coreauth.WithSkipPersist(context.Background()), current)
+		}
+	}()
+}
 
 func (r *router) OnResult(_ context.Context, result coreauth.Result) {
 	if result.SkipQuotaObservation {

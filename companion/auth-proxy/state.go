@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type provider string
@@ -23,6 +25,9 @@ const (
 )
 
 func (p provider) valid() bool { return p == claude || p == codex }
+
+// stateSchema 2 adds the Verified and Broken mark maps. The companion never shipped schema 1.
+const stateSchema = 2
 
 var safeID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
 
@@ -72,6 +77,10 @@ type runtimeState struct {
 	Endpoint  string               `json:"endpoint"`
 	Sessions  map[string]binding   `json:"sessions"`
 	Cooldowns map[string]time.Time `json:"cooldowns"`
+	// Verified marks an account whose current credential passed a real provider request.
+	Verified map[string]time.Time `json:"verified"`
+	// Broken marks an account that was verified and later lost its sign-in; cleared by a verified sign-in.
+	Broken map[string]time.Time `json:"broken"`
 }
 
 // rotation is the unsolicited control event for a changed effective account.
@@ -103,6 +112,9 @@ type router struct {
 	removing     map[string]bool
 	rotations    chan rotation
 	readyAccount func(string, provider) bool
+	manager      *coreauth.Manager // set by run; re-registers API-key records with executor attributes
+	projectMu    sync.Mutex
+	projecting   map[string]bool // API-key ids with a pending projection
 	fatal        error
 }
 
@@ -126,8 +138,8 @@ func openRouter(dir string) (*router, error) {
 		_ = lock.Close()
 		return nil, errors.New("another auth proxy owns this data directory")
 	}
-	r := &router{dir: dir, lock: lock, accounts: map[string]accountInput{}, pools: map[provider]poolInput{}, requests: map[string]*admission{}, removing: map[string]bool{}, rotations: make(chan rotation, 64)}
-	r.state = runtimeState{Schema: 1, DataDir: dir, Sessions: map[string]binding{}, Cooldowns: map[string]time.Time{}}
+	r := &router{dir: dir, lock: lock, accounts: map[string]accountInput{}, pools: map[provider]poolInput{}, requests: map[string]*admission{}, removing: map[string]bool{}, projecting: map[string]bool{}, rotations: make(chan rotation, 64)}
+	r.state = runtimeState{Schema: stateSchema, DataDir: dir, Sessions: map[string]binding{}, Cooldowns: map[string]time.Time{}, Verified: map[string]time.Time{}, Broken: map[string]time.Time{}}
 	path := filepath.Join(dir, "auth-proxy-state.json")
 	raw, err := os.ReadFile(path)
 	if err == nil {
@@ -160,7 +172,7 @@ func openRouter(dir string) (*router, error) {
 }
 
 func (r *router) validateState() error {
-	if r.state.Schema != 1 || r.state.DataDir != r.dir || r.state.Sessions == nil || r.state.Cooldowns == nil {
+	if r.state.Schema != stateSchema || r.state.DataDir != r.dir || r.state.Sessions == nil || r.state.Cooldowns == nil || r.state.Verified == nil || r.state.Broken == nil {
 		return errors.New("invalid auth proxy state identity or schema")
 	}
 	if _, err := endpointPort(r.state.Endpoint); err != nil {
@@ -293,6 +305,44 @@ func (r *router) noteRotationLocked(b binding, from string) {
 	case r.rotations <- rotation{Event: "rotated", SessionID: b.Session.SessionID, Provider: b.Session.Provider, FromAccountID: from, ToAccountID: b.Session.EffectiveAccountID, Generation: b.Session.Generation}:
 	default:
 	}
+}
+
+// marksAllowLocked reports whether the persisted marks let the account route: verified and not broken.
+func (r *router) marksAllowLocked(id string) bool {
+	_, verified := r.state.Verified[id]
+	_, broken := r.state.Broken[id]
+	return verified && !broken
+}
+
+// setVerified records a verified sign-in and clears any breakage mark.
+func (r *router) setVerified(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.state.Verified[id] = time.Now().UTC()
+	delete(r.state.Broken, id)
+	return r.persistLocked()
+}
+
+// clearVerified drops the verified mark before a credential is replaced on disk.
+func (r *router) clearVerified(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.state.Verified, id)
+	return r.persistLocked()
+}
+
+// markBroken records the first loss of sign-in for an account that had been verified.
+func (r *router) markBroken(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, verified := r.state.Verified[id]; !verified {
+		return
+	}
+	if _, broken := r.state.Broken[id]; broken {
+		return
+	}
+	r.state.Broken[id] = time.Now().UTC()
+	_ = r.persistLocked()
 }
 
 func (r *router) eligibleLocked(id string, p provider) bool {

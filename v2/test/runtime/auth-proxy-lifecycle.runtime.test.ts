@@ -47,7 +47,7 @@ describe("native companion control lifecycle", () => {
       generation: 1,
     };
     const saved = {
-      schema: 1,
+      schema: 2,
       dataDir: directory,
       endpoint,
       sessions: {
@@ -59,6 +59,8 @@ describe("native companion control lifecycle", () => {
         },
       },
       cooldowns: {},
+      verified: {},
+      broken: {},
     };
     const statePath = join(directory, "auth-proxy-state.json");
     await writeFile(statePath, JSON.stringify(saved), { mode: 0o600 });

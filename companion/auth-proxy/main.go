@@ -69,10 +69,17 @@ func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Re
 		return err
 	}
 	defer r.close()
+	// The credential directory must exist before the first sign-in lists it for identity checks.
+	if err = os.MkdirAll(filepath.Join(r.dir, "auth-proxy-credentials"), 0o700); err != nil {
+		return err
+	}
 	store := tokenStore(r.dir)
 	manager := coreauth.NewManager(store, r, r)
-	logins := &loginManager{dir: r.dir, manager: manager, store: store, attempts: map[string]*loginAttempt{}, client: oauthHTTPClient(transport)}
-	r.readyAccount = logins.ready
+	logins := &loginManager{dir: r.dir, manager: manager, store: store, attempts: map[string]*loginAttempt{}, client: oauthHTTPClient(transport), transport: transport, router: r}
+	r.manager = manager
+	// Ready needs a usable registered credential and no pending attempt (logins) plus a persisted
+	// verified mark and no breakage mark (router). Callers hold r.mu.
+	r.readyAccount = func(id string, p provider) bool { return logins.ready(id, p) && r.marksAllowLocked(id) }
 	port, err := endpointPort(r.state.Endpoint)
 	if err != nil {
 		return err
@@ -105,7 +112,12 @@ func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Re
 	serverDone := make(chan error, 1)
 	go func() {
 		defer close(serverDone)
-		serverDone <- service.Run(ctx)
+		// A test transport also carries the SDK's background refresh traffic, so no fixture credential reaches a real provider.
+		runCtx := ctx
+		if transport != nil {
+			runCtx = context.WithValue(ctx, roundTripperKey, transport)
+		}
+		serverDone <- service.Run(runCtx)
 	}()
 	defer func() {
 		cancel()

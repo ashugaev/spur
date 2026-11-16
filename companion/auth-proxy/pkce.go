@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // Spur-owned Claude PKCE. Same client, redirect and scope as the SDK authenticator, but nothing
@@ -38,20 +39,39 @@ const (
 // claudeCallbackWait bounds the wait for a paste, as the SDK callback server did. Var so tests shorten it.
 var claudeCallbackWait = 5 * time.Minute
 
-type claudeFlow struct{ verifier, challenge, state string }
+// browserFlow is one listener-free browser sign-in: the user opens authorizeURL, signs in, and pastes
+// the address the provider redirected to. redeem exchanges the accepted code for a staged credential.
+type browserFlow interface {
+	authorizeURL() string
+	accept(input string) (code, state string, err error)
+	redeem(ctx context.Context, client *http.Client, id, code, state string) (*coreauth.Auth, error)
+}
 
-func newClaudeFlow() (*claudeFlow, error) {
+// pkceSecrets are the per-attempt verifier and state shared by every provider flow.
+type pkceSecrets struct{ verifier, challenge, state string }
+
+func newPKCESecrets() (pkceSecrets, error) {
 	verifier := make([]byte, 96)
 	state := make([]byte, 16)
 	if _, err := rand.Read(verifier); err != nil {
-		return nil, err
+		return pkceSecrets{}, err
 	}
 	if _, err := rand.Read(state); err != nil {
-		return nil, err
+		return pkceSecrets{}, err
 	}
 	v := base64.RawURLEncoding.EncodeToString(verifier)
 	sum := sha256.Sum256([]byte(v))
-	return &claudeFlow{verifier: v, challenge: base64.RawURLEncoding.EncodeToString(sum[:]), state: hex.EncodeToString(state)}, nil
+	return pkceSecrets{verifier: v, challenge: base64.RawURLEncoding.EncodeToString(sum[:]), state: hex.EncodeToString(state)}, nil
+}
+
+type claudeFlow struct{ pkceSecrets }
+
+func newClaudeFlow() (*claudeFlow, error) {
+	secrets, err := newPKCESecrets()
+	if err != nil {
+		return nil, err
+	}
+	return &claudeFlow{secrets}, nil
 }
 
 func (f *claudeFlow) authorizeURL() string {
@@ -69,12 +89,18 @@ func (f *claudeFlow) authorizeURL() string {
 
 type oauthCallback struct{ code, state, errCode string }
 
-// parseClaudeCallback accepts exactly the forms the SDK accepts (internal/misc ParseOAuthCallback).
+// parseCallback accepts the forms the SDK accepts (internal/misc ParseOAuthCallback) plus the bare
+// code#state the Claude authorization page displays.
 // Blank input never reaches here: loginManager.input keeps waiting on it.
-func parseClaudeCallback(input string) (*oauthCallback, error) {
+func parseCallback(input string) (*oauthCallback, error) {
 	candidate := strings.TrimSpace(input)
 	if candidate == "" {
 		return nil, errors.New("callback URL missing code")
+	}
+	if !strings.ContainsAny(candidate, "=?/:") && strings.Count(candidate, "#") == 1 {
+		if code, state, _ := strings.Cut(candidate, "#"); code != "" && state != "" {
+			return &oauthCallback{code: code, state: state}, nil
+		}
 	}
 	if !strings.Contains(candidate, "://") {
 		switch {
@@ -123,8 +149,8 @@ func firstNonEmpty(a, b string) string {
 }
 
 // accept validates a pasted callback against this attempt. Returns the code and state to exchange.
-func (f *claudeFlow) accept(input string) (code, state string, err error) {
-	parsed, err := parseClaudeCallback(input)
+func (f *pkceSecrets) accept(input string) (code, state string, err error) {
+	parsed, err := parseCallback(input)
 	if err != nil {
 		return "", "", err
 	}
@@ -200,6 +226,19 @@ func (f *claudeFlow) exchange(ctx context.Context, client *http.Client, code, st
 		return nil, errors.New("token exchange response invalid")
 	}
 	return &tokens, nil
+}
+
+// redeem exchanges the code, replays the SDK's advisory account lookups and builds the credential record.
+func (f *claudeFlow) redeem(ctx context.Context, client *http.Client, id, code, state string) (*coreauth.Auth, error) {
+	tokens, err := f.exchange(ctx, client, code, state)
+	if err != nil {
+		return nil, err
+	}
+	inspectClaudeAccount(ctx, client, tokens)
+	if strings.TrimSpace(tokens.Account.EmailAddress) == "" {
+		return nil, errors.New("claude token storage missing account information")
+	}
+	return buildClaudeOAuthRecord(id, tokens, time.Now())
 }
 
 const (
@@ -300,4 +339,124 @@ func readOAuthBody(resp *http.Response) ([]byte, error) {
 
 func oauthHTTPClient(transport http.RoundTripper) *http.Client {
 	return &http.Client{Timeout: 30 * time.Second, Transport: transport}
+}
+
+// Codex browser sign-in: same client, redirect and authorize parameters as the SDK authenticator.
+const (
+	codexAuthURL     = "https://auth.openai.com/oauth/authorize"
+	codexTokenURL    = "https://auth.openai.com/oauth/token"
+	codexClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
+	codexRedirectURI = "http://localhost:1455/auth/callback"
+	codexScope       = "openid email profile offline_access"
+)
+
+type codexFlow struct{ pkceSecrets }
+
+func newCodexFlow() (*codexFlow, error) {
+	secrets, err := newPKCESecrets()
+	if err != nil {
+		return nil, err
+	}
+	return &codexFlow{secrets}, nil
+}
+
+func (f *codexFlow) authorizeURL() string {
+	return codexAuthURL + "?" + url.Values{
+		"client_id":                  {codexClientID},
+		"response_type":              {"code"},
+		"redirect_uri":               {codexRedirectURI},
+		"scope":                      {codexScope},
+		"state":                      {f.state},
+		"code_challenge":             {f.challenge},
+		"code_challenge_method":      {"S256"},
+		"prompt":                     {"login"},
+		"id_token_add_organizations": {"true"},
+		"codex_cli_simplified_flow":  {"true"},
+	}.Encode()
+}
+
+func (f *codexFlow) exchange(ctx context.Context, client *http.Client, code string) (*codexTokens, error) {
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {codexClientID},
+		"code":          {code},
+		"redirect_uri":  {codexRedirectURI},
+		"code_verifier": {f.verifier},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexTokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, errors.New("token exchange request failed")
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, errors.New("token exchange response unreadable")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token exchange failed with status %d", resp.StatusCode)
+	}
+	var tokens codexTokens
+	if err = json.Unmarshal(raw, &tokens); err != nil || tokens.AccessToken == "" {
+		return nil, errors.New("token exchange response invalid")
+	}
+	return &tokens, nil
+}
+
+func (f *codexFlow) redeem(ctx context.Context, client *http.Client, id, code, _ string) (*coreauth.Auth, error) {
+	tokens, err := f.exchange(ctx, client, code)
+	if err != nil {
+		return nil, err
+	}
+	// The id_token came from the token endpoint over TLS; only its payload is read.
+	claims := readIDTokenClaims(tokens.IDToken)
+	tokens.Email, tokens.AccountID, tokens.PlanType = claims.Email, claims.Auth.AccountID, claims.Auth.PlanType
+	if strings.TrimSpace(tokens.Email) == "" || strings.TrimSpace(tokens.AccountID) == "" {
+		return nil, &identityError{missingIdentity}
+	}
+	return buildCodexOAuthRecord(id, tokens, time.Now()), nil
+}
+
+type codexTokens struct {
+	IDToken      string `json:"id_token"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+	Email        string `json:"-"`
+	AccountID    string `json:"-"`
+	PlanType     string `json:"-"`
+}
+
+type idTokenClaims struct {
+	Email string `json:"email"`
+	Auth  struct {
+		AccountID string `json:"chatgpt_account_id"`
+		PlanType  string `json:"chatgpt_plan_type"`
+	} `json:"https://api.openai.com/auth"`
+}
+
+// readIDTokenClaims decodes the payload segment of a JWT without verifying it; unreadable tokens give no claims.
+func readIDTokenClaims(token string) idTokenClaims {
+	var claims idTokenClaims
+	if payload := jwtPayload(token); payload != nil {
+		_ = json.Unmarshal(payload, &claims)
+	}
+	return claims
+}
+
+func jwtPayload(token string) []byte {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return nil
+	}
+	return payload
 }
