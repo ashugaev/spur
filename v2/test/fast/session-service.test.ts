@@ -83327,6 +83327,31 @@ describe("SessionService", () => {
         }
       });
 
+      it("owner failure logs again after the owner disappears from discovery and returns", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        owners("api-1");
+        terminateDetachedSessionProcessesMock.mockResolvedValue({
+          status: "survivors",
+          pids: [77],
+          matched: 1,
+        });
+        const service = await createDisposedSessionService();
+        const events = () => sweepEvents("session.agent_process.survivors");
+        try {
+          await sweeper(service).sweepDetachedOrphans("tick");
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(events()).toHaveLength(1);
+          owners();
+          await sweeper(service).sweepDetachedOrphans("tick");
+          owners("api-1");
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(events()).toHaveLength(2);
+        } finally {
+          service.dispose();
+        }
+      });
+
       it("one owner throwing does not abort later owners and logs the message once", async () => {
         const sessions = createSessionStore();
         sessions.set("api-1", record("api-1", "completed"));
