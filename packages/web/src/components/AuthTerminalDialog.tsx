@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BusyContent } from "@/components/BusyContent";
 import { DirectTerminal } from "@/components/DirectTerminal";
@@ -44,10 +44,17 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
   const queryClient = useQueryClient();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
-  const started = useRef(false);
+  const startedOnMount = useRef(false);
+  // Plain state, not a mutation: a mutation observer detaches when StrictMode replays the mount effect.
+  const [started, setStarted] = useState<TerminalLogin | undefined>(undefined);
+  const [startError, setStartError] = useState<string | null>(null);
+  const [restarting, setRestarting] = useState(false);
+  const terminalId = started?.id;
 
-  const startMutation = useMutation<TerminalLogin, Error>({
-    mutationFn: async () => {
+  const start = useCallback(async () => {
+    setRestarting(true);
+    setStartError(null);
+    try {
       const result = await postAuthJson(
         "/api/auth-terminal-logins",
         "POST",
@@ -55,14 +62,16 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
         "Failed to start terminal sign-in",
       );
       if (!isTerminalLogin(result)) throw new Error("Failed to start terminal sign-in");
-      return result;
-    },
-    // A restart reuses the id: seed the new state so the settled poll resumes.
-    onSuccess: (result) => queryClient.setQueryData(["auth-terminal-login", result.id], result),
-    onSettled: () => void invalidateAuthQueries(queryClient),
-  });
-  const terminalId = startMutation.data?.id;
-  const restarting = startMutation.isPending;
+      // A restart reuses the id: seed the new state so the settled poll resumes.
+      queryClient.setQueryData(["auth-terminal-login", result.id], result);
+      setStarted(result);
+    } catch (error) {
+      setStartError(error instanceof Error ? error.message : "Failed to start terminal sign-in");
+    } finally {
+      setRestarting(false);
+      void invalidateAuthQueries(queryClient);
+    }
+  }, [target, queryClient]);
 
   const statusQuery = useQuery<PollResult>({
     queryKey: ["auth-terminal-login", terminalId],
@@ -92,11 +101,10 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
   });
 
   // Restart posts the same target again; the daemon restarts that terminal.
-  const start = startMutation.mutate;
   useEffect(() => {
-    if (started.current) return;
-    started.current = true;
-    start();
+    if (startedOnMount.current) return;
+    startedOnMount.current = true;
+    void start();
   }, [start]);
 
   const stopMutation = useMutation<unknown, Error>({
@@ -115,7 +123,7 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
   });
 
   const polled = statusQuery.data;
-  const login = polled === "gone" ? undefined : (polled ?? startMutation.data);
+  const login = polled === "gone" ? undefined : (polled ?? started);
   const status = login?.status;
   const ended = !restarting && (polled === "gone" || status === "not_signed_in");
 
@@ -165,6 +173,7 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
             <DirectTerminal
               agent={provider}
               agentInputEnabled={false}
+              hideHeader
               sessionId={login.tmuxSession}
             />
           </div>
@@ -176,8 +185,8 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
           data-testid="auth-terminal-status"
           role="status"
         >
-          {startMutation.isError ? (
-            <span className="text-[var(--color-status-error)]">{startMutation.error.message}</span>
+          {startError !== null ? (
+            <span className="text-[var(--color-status-error)]">{startError}</span>
           ) : restarting ? (
             <WaitLine live={false}>Opening terminal…</WaitLine>
           ) : status === "ready" ? (
@@ -235,12 +244,12 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
               >
                 Close
               </button>
-              {ended || startMutation.isError ? (
+              {ended || startError !== null ? (
                 <button
                   className={PRIMARY_BUTTON_CLASS}
                   disabled={closing || restarting}
                   type="button"
-                  onClick={() => start()}
+                  onClick={() => void start()}
                 >
                   <BusyContent busy={restarting}>Restart terminal</BusyContent>
                 </button>

@@ -1,6 +1,6 @@
 import { fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { type ReactNode } from "react";
+import { type ReactNode, StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthTerminalDialog } from "@/components/AuthTerminalDialog";
 import type { TerminalLogin } from "@/lib/types";
@@ -9,11 +9,17 @@ vi.mock("@/components/DirectTerminal", () => ({
   DirectTerminal: ({
     sessionId,
     agentInputEnabled,
+    hideHeader,
   }: {
     sessionId: string;
     agentInputEnabled?: boolean;
+    hideHeader?: boolean;
   }) => (
-    <div data-input={String(agentInputEnabled)} data-testid="direct-terminal">
+    <div
+      data-hide-header={String(hideHeader)}
+      data-input={String(agentInputEnabled)}
+      data-testid="direct-terminal"
+    >
       {sessionId}
     </div>
   ),
@@ -46,6 +52,7 @@ function terminal(
 
 function render(
   target: { accountId: string } | { host: "claude" | "codex" } = { accountId: "claude-work" },
+  strict = false,
 ) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
@@ -55,8 +62,18 @@ function render(
   );
   return rtlRender(
     <AuthTerminalDialog label="work" provider="claude" target={target} onClose={onClose} />,
-    { wrapper: Wrapper },
+    { wrapper: strict ? StrictWrapper(Wrapper) : Wrapper },
   );
+}
+
+function StrictWrapper(Inner: ({ children }: { children: ReactNode }) => ReactNode) {
+  return function Strict({ children }: { children: ReactNode }) {
+    return (
+      <StrictMode>
+        <Inner>{children}</Inner>
+      </StrictMode>
+    );
+  };
 }
 
 function reply(key: string, status: TerminalLogin["status"], reason?: TerminalLogin["reason"]) {
@@ -110,6 +127,33 @@ describe("AuthTerminalDialog", () => {
     expect(screen.queryByRole("button", { name: "Continue in terminal" })).toBeNull();
   });
 
+  it("reaches the waiting state and polls the status under StrictMode", async () => {
+    reply("POST /api/auth-terminal-logins", "running");
+    reply(`GET /api/auth-terminal-logins/${ID}`, "running");
+    render({ accountId: "claude-work" }, true);
+
+    expect(await screen.findByTestId("direct-terminal")).toBeTruthy();
+    expect(screen.getByTestId("auth-terminal-status").textContent).toContain(
+      "Waiting for terminal sign-in…",
+    );
+    await waitFor(
+      () =>
+        expect(calls.some((call) => call.method === "GET" && call.url.endsWith(`/${ID}`))).toBe(
+          true,
+        ),
+      { timeout: 5_000 },
+    );
+  }, 10_000);
+
+  it("hides the embedded terminal's own header", async () => {
+    reply("POST /api/auth-terminal-logins", "running");
+    render();
+
+    expect((await screen.findByTestId("direct-terminal")).getAttribute("data-hide-header")).toBe(
+      "true",
+    );
+  });
+
   it("starts a host terminal for the provider", async () => {
     reply("POST /api/auth-terminal-logins", "running");
     render({ host: "codex" });
@@ -156,8 +200,9 @@ describe("AuthTerminalDialog", () => {
   it("restarts by posting the same target again", async () => {
     reply("POST /api/auth-terminal-logins", "not_signed_in", "exited");
     render();
-    fireEvent.click(await screen.findByRole("button", { name: "Restart terminal" }));
+    const restart = await screen.findByRole("button", { name: "Restart terminal" });
     reply("POST /api/auth-terminal-logins", "running");
+    fireEvent.click(restart);
 
     expect(await screen.findByTestId("direct-terminal")).toBeTruthy();
     expect(calls.filter((call) => call.method === "POST").map((call) => call.body)).toEqual([
