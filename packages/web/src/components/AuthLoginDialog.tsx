@@ -78,7 +78,7 @@ type View =
   | "verifying"
   | "verified"
   | "error";
-type Begin = { method: Exclude<SignInMethod, "api_key"> } | { method: "api_key"; apiKey: string };
+type Begin = { method: SignInMethod };
 type Dismissal = "close" | "terminal" | "back";
 
 interface AuthLoginDialogProps {
@@ -101,18 +101,22 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
   const [pasted, setPasted] = useState("");
   const [label, setLabel] = useState(account.label ?? "");
   const [apiKey, setApiKey] = useState("");
+  // The submitted key lives here only until the request starts, never in mutation variables.
+  const sentKeyRef = useRef("");
   const [copied, setCopied] = useState(false);
   const accountPath = `/api/auth-accounts/${encodeURIComponent(account.id)}`;
   const loginKey = ["auth-account-login", account.id, attempt];
 
   const beginMutation = useMutation<AuthLogin, Error, Begin & { attempt: number }>({
     mutationFn: async (begin) => {
+      const sentKey = sentKeyRef.current;
+      sentKeyRef.current = "";
       const result =
         begin.method === "api_key"
           ? await postAuthJson(
               `${accountPath}/api-key`,
               "POST",
-              { label: label.trim(), apiKey: begin.apiKey },
+              { label: label.trim(), apiKey: sentKey },
               "Failed to save API key",
             )
           : await postAuthJson(
@@ -175,15 +179,15 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
         "Failed to cancel sign-in",
       ),
     onSuccess: (_result, dismissal) => {
-      if (dismissal === "close") onClose();
       if (dismissal === "back") {
         beginMutation.reset();
         setPhase("picker");
       }
     },
-    // The terminal start cancels server-side too, so a failed cancel never blocks it.
+    // The daemon forgets a cancelled attempt anyway, so a failed cancel never blocks leaving.
     onSettled: (_result, _error, dismissal) => {
       void invalidateAuthQueries(queryClient);
+      if (dismissal === "close") onClose();
       if (dismissal === "terminal") onContinueInTerminal();
     },
   });
@@ -210,11 +214,14 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
   }, [view, onClose]);
 
   useEffect(() => {
-    (view === "verified" ? doneRef : inputRef).current?.focus();
+    // Views without a field keep focus inside the dialog on the panel.
+    ((view === "verified" ? doneRef : inputRef).current ?? panelRef.current)?.focus();
   }, [view]);
 
   const busy = beginMutation.isPending || inputMutation.isPending || cancelMutation.isPending;
-  const dismiss = () => (view === "verified" ? onClose() : cancelMutation.mutate("close"));
+  // Only an attempt started here is cancelled; a CLI or other-tab sign-in is left alone.
+  const dismiss = () =>
+    phase === "attempt" && view !== "verified" ? cancelMutation.mutate("close") : onClose();
   useDialogFocus({ panelRef, initialRef: inputRef, onEscape: dismiss, escapeBlocked: busy });
 
   const begin = (next: Begin) => beginMutation.mutate({ ...next, attempt: attempt + 1 });
@@ -228,10 +235,9 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
   };
   const goBack = () => (phase === "attempt" ? cancelMutation.mutate("back") : setPhase("picker"));
   const submitKey = () => {
-    const key = apiKey.trim();
-    // The key leaves component state as soon as it is sent.
+    sentKeyRef.current = apiKey.trim();
     setApiKey("");
-    begin({ method: "api_key", apiKey: key });
+    begin({ method: "api_key" });
   };
 
   const name = getAgentDisplayName(account.provider);
@@ -302,7 +308,8 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
     >
       <div
         ref={panelRef}
-        className="max-h-[calc(100dvh-2rem)] w-[min(26rem,calc(100vw-2rem))] overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]"
+        tabIndex={-1}
+        className="max-h-[calc(100dvh-2rem)] w-[min(26rem,calc(100vw-2rem))] overflow-y-auto outline-none border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]"
       >
         <div className="mb-3 flex items-center gap-2">
           <h2
@@ -314,7 +321,12 @@ export function AuthLoginDialog({ account, onClose, onContinueInTerminal }: Auth
           {view === "verified" ? null : (
             <TerminalIconButton disabled={busy} onClick={() => cancelMutation.mutate("terminal")} />
           )}
-          <IconCloseButton label="Close sign-in" onClick={dismiss} disabled={busy} />
+          <IconCloseButton
+            disabled={busy}
+            idleTextClass="text-[var(--color-text-secondary)]"
+            label="Close sign-in"
+            onClick={dismiss}
+          />
         </div>
         <div className="flex flex-col gap-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
           {view === "picker" ? (

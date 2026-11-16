@@ -337,7 +337,13 @@ describe("AuthAccountsMenu", () => {
     });
   });
 
-  it("cancels sign-in through login-input", async () => {
+  it("cancels a started sign-in through login-input", async () => {
+    routes["POST /api/auth-accounts/codex-new/login"] = () => ({
+      payload: { accountId: "codex-new", status: "pending", userCode: "ABCD-1234" },
+    });
+    routes["GET /api/auth-accounts/codex-new/login-status"] = () => ({
+      payload: { accountId: "codex-new", status: "pending", userCode: "ABCD-1234" },
+    });
     routes["POST /api/auth-accounts/codex-new/login-input"] = () => ({
       payload: { accountId: "codex-new", status: "sign-in-required" },
     });
@@ -345,6 +351,8 @@ describe("AuthAccountsMenu", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Sign in codex account Fresh" }));
     const dialog = within(await screen.findByRole("dialog", { name: /Sign in codex/ }));
+    fireEvent.click(dialog.getByRole("button", { name: "Continue" }));
+    await dialog.findByTestId("auth-login-user-code");
     fireEvent.click(dialog.getByRole("button", { name: "Cancel" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -390,10 +398,7 @@ describe("AuthAccountsMenu", () => {
     expect(row.queryByText("signing in")).toBeNull();
   });
 
-  it("focuses the selected method and cancels sign-in on Escape", async () => {
-    routes["POST /api/auth-accounts/codex-new/login-input"] = () => ({
-      payload: { accountId: "codex-new", status: "sign-in-required" },
-    });
+  it("focuses the selected method and closes the picker on Escape without cancelling", async () => {
     await openMenu();
 
     fireEvent.click(await screen.findByRole("button", { name: "Sign in codex account Fresh" }));
@@ -402,11 +407,7 @@ describe("AuthAccountsMenu", () => {
     fireEvent.keyDown(window, { key: "Escape" });
 
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(calls).toContainEqual({
-      url: "/api/auth-accounts/codex-new/login-input",
-      method: "POST",
-      body: { cancel: true },
-    });
+    expect(calls.some((call) => call.url.endsWith("/login-input"))).toBe(false);
   });
 
   it("reports a failed sign-in and restarts it on Try again", async () => {

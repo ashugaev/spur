@@ -3370,9 +3370,9 @@ export function Dashboard() {
             />
           ) : null}
 
-          {loading ? <CenteredLoader className="flex-1" label="Loading dashboard" /> : null}
-
           <AuthAlertsBanner />
+
+          {loading ? <CenteredLoader className="flex-1" label="Loading dashboard" /> : null}
 
           {!loading && !hasVisibleSessions && !hasVisibleBacklog ? (
             <section className="mt-5">

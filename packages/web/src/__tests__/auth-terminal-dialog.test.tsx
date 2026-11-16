@@ -222,7 +222,8 @@ describe("AuthTerminalDialog", () => {
     });
     render();
 
-    expect((await screen.findByRole("alert")).textContent).toBe("tmux unavailable");
+    expect((await screen.findByRole("status")).textContent).toBe("tmux unavailable");
+    expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByRole("button", { name: "Restart terminal" })).toBeTruthy();
   });
 });

@@ -23,8 +23,10 @@ function pending(extra: Partial<AuthLogin> = {}, accountId = CLAUDE.id): AuthLog
   return { accountId, status: "pending", ...extra };
 }
 
+let client: QueryClient;
+
 function render(account: typeof CLAUDE | typeof CODEX = CLAUDE) {
-  const client = new QueryClient({
+  client = new QueryClient({
     defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
   });
   const Wrapper = ({ children }: { children: ReactNode }) => (
@@ -253,6 +255,23 @@ describe("AuthLoginDialog API key", () => {
       label: "ci-key",
       apiKey: "sk-ant-key-12345",
     });
+    // The key never rests in the mutation cache or in cached query data.
+    expect(
+      JSON.stringify(
+        client
+          .getMutationCache()
+          .getAll()
+          .map((m) => m.state),
+      ),
+    ).not.toContain("sk-ant-key-12345");
+    expect(
+      JSON.stringify(
+        client
+          .getQueryCache()
+          .getAll()
+          .map((q) => q.state),
+      ),
+    ).not.toContain("sk-ant-key-12345");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(((await screen.findByLabelText("API key")) as HTMLInputElement).value).toBe("");
     expect((screen.getByLabelText("Label (required)") as HTMLInputElement).value).toBe("ci-key");
@@ -444,6 +463,32 @@ describe("AuthLoginDialog terminal handoff and dismissal", () => {
     fireEvent.click(terminalIcon());
 
     await waitFor(() => expect(onContinueInTerminal).toHaveBeenCalledTimes(1));
+  });
+
+  it("closes without cancelling when no attempt was started here", async () => {
+    render(CLAUDE);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close sign-in" }));
+
+    expect(onClose).toHaveBeenCalledTimes(3);
+    expect(calls).toEqual([]);
+  });
+
+  it("closes during an attempt even when the cancel request fails", async () => {
+    await startClaudeLink();
+    route("POST", "/api/auth-accounts/claude-new/login-input", () => ({
+      status: 502,
+      payload: { error: "cancel failed" },
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Close sign-in" }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(callsTo("POST", "/api/auth-accounts/claude-new/login-input")[0]?.body).toEqual({
+      cancel: true,
+    });
   });
 
   it("cancels and closes on Escape", async () => {

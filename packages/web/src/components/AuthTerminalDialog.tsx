@@ -152,7 +152,12 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
           >
             Sign in {name} · {label} · Terminal
           </h2>
-          <IconCloseButton label="Close terminal sign-in" onClick={close} disabled={closing} />
+          <IconCloseButton
+            disabled={closing}
+            idleTextClass="text-[var(--color-text-secondary)]"
+            label="Close terminal sign-in"
+            onClick={close}
+          />
         </div>
 
         {running && login ? (
@@ -172,11 +177,9 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
           role="status"
         >
           {startMutation.isError ? (
-            <span className="text-[var(--color-status-error)]" role="alert">
-              {startMutation.error.message}
-            </span>
+            <span className="text-[var(--color-status-error)]">{startMutation.error.message}</span>
           ) : restarting ? (
-            <WaitLine>Opening terminal…</WaitLine>
+            <WaitLine live={false}>Opening terminal…</WaitLine>
           ) : status === "ready" ? (
             <span className="font-bold text-[var(--color-status-ready)]">
               ✓ Signed in · verified by test request
@@ -195,10 +198,10 @@ export function AuthTerminalDialog({ target, provider, label, onClose }: AuthTer
               </span>
             </>
           ) : status === "verifying" ? (
-            <WaitLine>Verifying sign-in…</WaitLine>
+            <WaitLine live={false}>Verifying sign-in…</WaitLine>
           ) : (
             <span className="flex flex-col gap-1">
-              <WaitLine>
+              <WaitLine live={false}>
                 {login
                   ? "Waiting for terminal sign-in… success shows after Spur verifies the account."
                   : "Opening terminal…"}

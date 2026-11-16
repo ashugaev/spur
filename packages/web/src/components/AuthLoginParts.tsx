@@ -17,9 +17,14 @@ export function StepLine({ n, children }: { n: number; children: ReactNode }) {
   );
 }
 
-export function WaitLine({ children }: { children: ReactNode }) {
+/** `live={false}` inside a parent that is already a live region. */
+export function WaitLine({ children, live = true }: { children: ReactNode; live?: boolean }) {
   return (
-    <div aria-live="polite" className="flex items-center gap-2" role="status">
+    <div
+      aria-live={live ? "polite" : undefined}
+      className="flex items-center gap-2"
+      role={live ? "status" : undefined}
+    >
       <Spinner className="h-3 w-3 shrink-0 text-[var(--color-status-working)]" strokeWidth={1.5} />
       <span>{children}</span>
     </div>
@@ -38,11 +43,7 @@ export function Checklist({ items }: { items: ChecklistItem[] }) {
       data-testid="auth-login-checklist"
     >
       {items.map((item) => (
-        <li
-          key={item.label}
-          className={`flex items-center gap-2 ${item.state === "todo" ? "text-[var(--color-text-tertiary)]" : ""}`}
-          data-state={item.state}
-        >
+        <li key={item.label} className="flex items-center gap-2" data-state={item.state}>
           {item.state === "active" ? (
             <Spinner
               className="h-3 w-3 shrink-0 text-[var(--color-status-working)]"
@@ -51,7 +52,7 @@ export function Checklist({ items }: { items: ChecklistItem[] }) {
           ) : (
             <span
               aria-hidden="true"
-              className={`w-3 shrink-0 text-center ${item.state === "done" ? "text-[var(--color-status-ready)]" : ""}`}
+              className={`w-3 shrink-0 text-center ${item.state === "done" ? "text-[var(--color-status-ready)]" : "text-[var(--color-text-tertiary)]"}`}
             >
               {item.state === "done" ? "✓" : "·"}
             </span>
