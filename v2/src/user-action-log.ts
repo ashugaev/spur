@@ -29,6 +29,8 @@ export interface BuildUserActionInput {
   statusCode: number;
   error?: string;
   latencyMs: number;
+  /** Session that made the request on its own behalf; absent for a person. */
+  callerSession?: string;
 }
 
 const USER_ACTION_LOG_FILE = "user-actions.jsonl";
@@ -375,6 +377,8 @@ function buildParams(action: string, body: unknown): Record<string, unknown> | u
 export function buildUserActionRecord(input: BuildUserActionInput): UserActionRecord | null {
   const decoded = decodeAction(input.method, input.path, input.body);
   if (!decoded) return null;
+  // An agent's handoff is not a user action; the session.handoff.* events carry its actor.
+  if (decoded.action === "session.handoff" && input.callerSession) return null;
   const ok = input.statusCode >= 200 && input.statusCode < 300;
   const params = buildParams(decoded.action, input.body);
   return {

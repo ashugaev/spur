@@ -1,6 +1,6 @@
 # Work snapshots
 
-> Scope: how-to for agent work snapshots: when Spur asks for one, what counts as work, config keys. Caveman, no overhead.
+> Scope: how-to for agent work snapshots: when Spur asks for one, what counts as work, reading them, config keys. Caveman, no overhead.
 
 A snapshot is a full Markdown handoff of the session's state, stored as the next numbered version. Write one so a successor, a compaction, or a human can resume without the transcript.
 
@@ -32,6 +32,21 @@ Providers:
 - Claude, Codex: per-entry timestamps, exact rule above.
 - Cursor, OpenCode: no per-entry timestamps. No request when the latest turn started from a Spur reminder; otherwise last activity time counts.
 
+## Read
+
+`spur snapshot show|list|latest --link` ([commands](commands.md#todo-snapshot)); `GET /sessions/:id/snapshots/:version`, `GET /snapshots/latest` ([daemon-api](daemon-api.md)). Reads take no lock, never restore or wake a session, work for live, completed, stale-parked and archived ones.
+
+Each read carries `freshness`, measured from that version's own snapshot time:
+
+- `ageSeconds`: whole seconds since the snapshot.
+- `activitySince`: time of the agent's first own work after the snapshot, rule above; `null` when none. Cursor, OpenCode: transcript last write time when the newest turn counts as work.
+- `stale`: newest work lies more than `freshnessMinutes` past the snapshot. Computed with `enabled: false` too.
+- `commitsSince`: commits on HEAD after the snapshot's head. `null`: no recorded head or branch, worktree gone, HEAD on another branch, or head no longer an ancestor (amend, rebase).
+
+`done` (`includeDone`): completed ToDo items in ledger order, `[]` without a ledger; in `latest`, an unreadable ledger gives that entry `done: null`.
+
+`latest` entry: `status` is the record status; `state` is the last observed state, not re-checked, `null` when never observed.
+
 ## Config
 
 Per project, `projects.<id>.snapshots` ([configuration](configuration.md#field-reference)); defaults from `v2/src/snapshots.ts`:
@@ -39,7 +54,7 @@ Per project, `projects.<id>.snapshots` ([configuration](configuration.md#field-r
 - `enabled` (`true`): `false` stops pane and Claude hook requests and the `requireFinal` gate. CLI and HTTP snapshot writes stay usable. `enabled: false` alone is valid.
 - `freshnessMinutes` (`30`): N.
 - `maxBytes` (`32768`, max `131072`): bytes per snapshot.
-- `requireFinal` (`false`): agent `complete`/`self-destruct` need a `--final` snapshot, `handoff` any, else `409 work_snapshot_required`. An explicit `requireFinal: true` with `enabled: false` fails config load, error names both keys.
+- `requireFinal` (`false`): agent `complete`/`self-destruct` need a `--final` snapshot, agent self-`handoff` of a running source any, else `409 work_snapshot_required`. `handoff` inlines the source's latest snapshot with freshness in the successor prompt up to 16384 bytes; a larger one is replaced by a `spur snapshot show` pointer (`v2/src/handoff-prompt.ts`). An explicit `requireFinal: true` with `enabled: false` fails config load, error names both keys.
 
 ```yaml
 projects:

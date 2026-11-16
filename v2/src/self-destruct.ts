@@ -44,5 +44,5 @@ export function withSelfDestructInstructions(
 
 Self-destruct:
 - When ${condition}, run \`"$SPUR_SESSION_TOOL_DIR/${SELF_DESTRUCT_TOOL_NAME}"\`.
-- This completes and removes the temporary Spur agent session. Run it only after the condition above is satisfied.`;
+- This closes and removes the temporary Spur agent session. Run it only after the condition above is satisfied.`;
 }

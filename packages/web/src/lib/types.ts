@@ -13,6 +13,7 @@ export type SpurSessionStatus =
 export type SpurSessionState =
   | "working"
   | "waiting"
+  | "completed"
   | "needs_input"
   | "rate_limited"
   | "stale"
@@ -681,6 +682,11 @@ export interface SpurTodoHistoryEvent {
   blocker?: { kind: "external" } | { kind: "human"; requiredAction: string };
 }
 
+export interface SpurTodoHandoffRef {
+  sessionId: string;
+  itemId: string;
+}
+
 export interface SpurTodoProjection {
   revision: string;
   status: "active" | "held" | "resolved";
@@ -690,6 +696,8 @@ export interface SpurTodoProjection {
     text: string;
     status: "open" | "held" | "completed" | "cancelled";
     added: { reason: string; actor: SpurTodoActor; at: string };
+    handoffFrom?: SpurTodoHandoffRef;
+    handoffTo?: SpurTodoHandoffRef;
     latestTransition?: {
       type: "completed" | "cancelled" | "held" | "resumed";
       reason?: string;
@@ -754,6 +762,13 @@ function todoOptionalTransition(value: unknown): boolean {
   );
 }
 
+function todoOptionalHandoffRef(value: unknown): boolean {
+  if (value === undefined) return true;
+  return (
+    todoRecord(value) && typeof value.sessionId === "string" && typeof value.itemId === "string"
+  );
+}
+
 export function isSpurTodoProjection(value: unknown): value is SpurTodoProjection {
   if (!todoRecord(value) || !todoRecord(value.counts)) return false;
   const counts = value.counts;
@@ -783,6 +798,8 @@ export function isSpurTodoProjection(value: unknown): value is SpurTodoProjectio
       typeof item.added.at === "string" &&
       todoActor(item.added.actor) &&
       todoOptionalTransition(item.latestTransition) &&
+      todoOptionalHandoffRef(item.handoffFrom) &&
+      todoOptionalHandoffRef(item.handoffTo) &&
       Array.isArray(item.history) &&
       item.history.every(
         (event) =>
@@ -964,6 +981,7 @@ export type AttentionLevel =
   | "respond"
   | "working"
   | "pending"
+  | "completed"
   | "stopped"
   | "done";
 
@@ -973,6 +991,7 @@ export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
   "respond",
   "working",
   "pending",
+  "completed",
   "stopped",
   "done",
 ];
@@ -992,12 +1011,17 @@ export const ATTENTION_LANE_META: Record<AttentionLevel, AttentionLaneMeta> = {
   respond: { label: "Needs Input", color: "var(--color-status-error)" },
   working: { label: "Working", color: "var(--color-status-working)" },
   pending: { label: "Waiting", color: "var(--color-status-attention)" },
+  completed: { label: "Completed", color: "var(--color-status-ready)" },
   stopped: {
     label: "Stopped",
     color: "var(--color-text-tertiary)",
     dividerColor: "var(--color-border-subtle)",
   },
-  done: { label: "Completed", color: "var(--color-status-ready)" },
+  done: {
+    label: "Closed",
+    color: "var(--color-text-tertiary)",
+    dividerColor: "var(--color-border-subtle)",
+  },
 };
 
 export function worstAttentionLevel(levels: readonly AttentionLevel[]): AttentionLevel {
@@ -1354,6 +1378,10 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
 
   if (session.state === "waiting") {
     return "pending";
+  }
+
+  if (session.state === "completed") {
+    return "completed";
   }
 
   return "working";

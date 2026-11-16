@@ -335,6 +335,7 @@ const isGitWorktreeMock: Mock = vi.fn();
 const hasUnpushedCommitsMock: Mock = vi.fn();
 const readCurrentBranchMock: Mock = vi.fn();
 const readWorktreeHeadMock: Mock = vi.fn();
+const countCommitsSinceMock: Mock = vi.fn();
 const readBranchDestinationMock: Mock = vi.fn();
 const readRemoteUrlsMock: Mock = vi.fn();
 const removeWorktreeMock: Mock = vi.fn();
@@ -752,6 +753,7 @@ vi.mock("../../src/metadata.js", async (importOriginal) => {
     listServiceInstances: listServiceInstancesMock,
     listServiceInstancesForSession: listServiceInstancesForSessionMock,
     listSessions: listSessionsMock,
+    listArchivedSessions: actual.listArchivedSessions,
     readAvailableBacklogItems: readAvailableBacklogItemsMock,
     readServiceInstance: readServiceInstanceMock,
     readSession: readSessionMock,
@@ -1028,6 +1030,7 @@ vi.mock("../../src/workspace.js", () => ({
   pruneRepoWorktrees: pruneRepoWorktreesMock,
   readCurrentBranch: readCurrentBranchMock,
   readWorktreeHead: readWorktreeHeadMock,
+  countCommitsSince: countCommitsSinceMock,
   readBranchDestination: readBranchDestinationMock,
   readRemoteUrls: readRemoteUrlsMock,
   removeWorktree: removeWorktreeMock,
@@ -1830,6 +1833,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   isGitWorktreeMock.mockReset().mockResolvedValue(true);
   readCurrentBranchMock.mockReset().mockResolvedValue("main");
   readWorktreeHeadMock.mockReset().mockResolvedValue({ branch: null, headSha: null, dirty: null });
+  countCommitsSinceMock.mockReset().mockResolvedValue(null);
   readBranchDestinationMock
     .mockReset()
     .mockImplementation(async (_path: string, branch: string) => ({
@@ -2165,6 +2169,7 @@ export {
   hasUnpushedCommitsMock,
   readCurrentBranchMock,
   readWorktreeHeadMock,
+  countCommitsSinceMock,
   readBranchDestinationMock,
   removeWorktreeMock,
   pruneRepoWorktreesMock,
@@ -2255,6 +2260,7 @@ export {
   serviceKey,
   mockClaudeJsonlState,
   mockClaudeSessionStatus,
+  findLatestClaudeSessionFileMock,
   runningSession,
   sessionServiceInternals,
   SUBMITTED,

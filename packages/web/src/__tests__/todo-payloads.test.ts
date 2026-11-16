@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isTodoLedgerEmptyPayload, isTodoOpenWorkPayload } from "@/lib/types";
+import { isSpurTodoProjection, isTodoLedgerEmptyPayload, isTodoOpenWorkPayload } from "@/lib/types";
 
 describe("isTodoOpenWorkPayload", () => {
   it("accepts the real daemon shape", () => {
@@ -83,5 +83,47 @@ describe("isTodoLedgerEmptyPayload", () => {
 
   it("rejects a wrong code", () => {
     expect(isTodoLedgerEmptyPayload({ code: "todo_open_work" })).toBe(false);
+  });
+});
+
+describe("isSpurTodoProjection handoff refs", () => {
+  const actor = { kind: "system", source: "handoff" };
+  function projection(extra: Record<string, unknown>) {
+    return {
+      revision: "r1",
+      status: "active",
+      counts: { total: 1, open: 1, held: 0, completed: 0, cancelled: 0 },
+      items: [
+        {
+          id: "new-1",
+          text: "Wire CLI",
+          status: "open",
+          added: { reason: "Why", actor, at: "2026-11-01T00:00:00.000Z" },
+          history: [],
+          ...extra,
+        },
+      ],
+      finishOverrides: [],
+    };
+  }
+
+  it("accepts payloads with and without handoff refs", () => {
+    expect(isSpurTodoProjection(projection({}))).toBe(true);
+    expect(
+      isSpurTodoProjection(
+        projection({
+          handoffFrom: { sessionId: "api-1", itemId: "old-1" },
+          handoffTo: { sessionId: "api-3", itemId: "new-3" },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects a malformed handoffFrom or handoffTo", () => {
+    expect(isSpurTodoProjection(projection({ handoffFrom: { sessionId: "api-1" } }))).toBe(false);
+    expect(isSpurTodoProjection(projection({ handoffFrom: "api-1" }))).toBe(false);
+    expect(isSpurTodoProjection(projection({ handoffTo: { sessionId: 1, itemId: "x" } }))).toBe(
+      false,
+    );
   });
 });

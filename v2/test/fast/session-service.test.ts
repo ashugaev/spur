@@ -185,6 +185,8 @@ import {
   readTelegramBindingsMock,
   readTelegramReplyTargetMock,
   readArchivedSessionMock,
+  countCommitsSinceMock,
+  readWorktreeHeadMock,
   listTelegramTopicSessionIdsMock,
   readTelegramTopicGcClockMock,
   writeTelegramTopicGcClockMock,
@@ -210,6 +212,7 @@ import {
   createSessionStore,
   serviceKey,
   mockClaudeJsonlState,
+  findLatestClaudeSessionFileMock,
   mockClaudeSessionStatus,
   runningSession,
   sessionServiceInternals,
@@ -235,6 +238,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   utimesSync,
@@ -313,10 +317,10 @@ const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const TODO_PROMPT = `Spur ToDo:
 - Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.
-- The ledger starts empty. You own every item; nothing is added for you.
+- The ledger starts empty unless a handoff moved items to you (listed under Inherited ToDo). You own every item.
 - One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.
 - Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.
-- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.
+- Cannot finish, self-destruct, or hand off yourself with an empty ledger; cannot finish or self-destruct with open/held work. Handoff moves open/held items to the successor.
 
 Spur snapshot:
 - Keep a backward-looking Markdown snapshot of your work: \`"$SPUR_SNAPSHOT_COMMAND" write --file <path>\` (\`--file -\` reads stdin). Each write stores a full new version.
@@ -602,6 +606,278 @@ async function useRealTodoLedger(): Promise<void> {
 }
 
 describe("SessionService", () => {
+  describe("task-status", () => {
+    async function setup() {
+      mockClaudeJsonlState("waiting");
+      workspaceExistsMock.mockReturnValue(true);
+      const sessions = createSessionStore(runningSession({ agentLaunchId: "launch-a" }));
+      const service = await createDisposedSessionService();
+      return { sessions, service };
+    }
+
+    it.each(["completed", "needs_input"] as const)(
+      "accepts a direct reply after %s and retires its declaration",
+      async (state) => {
+        const { service } = await setup();
+        try {
+          await service.writeTaskStatus("api-1", { state, revision: 0, agentLaunchId: "launch-a" });
+          await service.send("api-1", { message: "continue this task", queue: false });
+          expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([
+            "continue this task",
+          ]);
+          expect(await service.readTaskStatus("api-1")).toEqual({ revision: 1 });
+          await expect(
+            service.writeTaskStatus("api-1", {
+              state: "completed",
+              revision: 0,
+              agentLaunchId: "launch-a",
+            }),
+          ).rejects.toMatchObject({ code: "stale_task_status" });
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it("declares completed across views without stopping runtime or removing artifacts", async () => {
+      const { sessions, service } = await setup();
+      try {
+        const before = sessions.get("api-1");
+        expect(await service.readTaskStatus("api-1")).toEqual({ revision: 0 });
+        expect((await service.get("api-1")).state).toBe("waiting");
+        expect(
+          await service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: 0,
+            agentLaunchId: "launch-a",
+          }),
+        ).toEqual({ revision: 0, state: "completed" });
+        const detail = await service.get("api-1");
+        expect(detail).toMatchObject({
+          status: "running",
+          state: "completed",
+          runtimeAlive: true,
+          workspaceExists: true,
+        });
+        expect(detail).not.toHaveProperty("taskStatus");
+        expect(detail).not.toHaveProperty("taskStatusRevision");
+        expect((await service.list({ view: "dashboard" }))[0]?.state).toBe("completed");
+        expect((await service.list())[0]?.state).toBe("completed");
+        expect(sessions.get("api-1")).toMatchObject({
+          status: before?.status,
+          worktreePath: before?.worktreePath,
+          agentLaunchId: "launch-a",
+        });
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, event]) =>
+              event.event === "session.state.transition" &&
+              event.details?.toState === "completed" &&
+              event.details?.source === "task_status",
+          ),
+        ).toBe(true);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("hides completed during raw working inside the waiting hold and restores it after the helper tail", async () => {
+      const { service } = await setup();
+      try {
+        await service.writeTaskStatus("api-1", {
+          state: "completed",
+          revision: 0,
+          agentLaunchId: "launch-a",
+        });
+        mockClaudeJsonlState("working");
+        expect((await service.get("api-1")).state).toBe("working");
+        mockClaudeJsonlState("waiting");
+        expect((await service.get("api-1")).state).toBe("completed");
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("rejects stale launch/revision and refuses completed with open or empty work", async () => {
+      const { service } = await setup();
+      try {
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: 1,
+            agentLaunchId: "launch-a",
+          }),
+        ).rejects.toMatchObject({ code: "stale_task_status" });
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: 0,
+            agentLaunchId: "old",
+          }),
+        ).rejects.toMatchObject({ code: "stale_task_status" });
+        await mockTodoLedger({
+          revision: "",
+          status: "resolved",
+          counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
+          items: [],
+          finishOverrides: [],
+        });
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: 0,
+            agentLaunchId: "launch-a",
+          }),
+        ).rejects.toMatchObject({ code: "todo_ledger_empty" });
+        await mockTodoLedger(heldProjection("held", "answer"));
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: 0,
+            agentLaunchId: "launch-a",
+          }),
+        ).rejects.toMatchObject({ code: "todo_open_work" });
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "needs_input",
+            revision: 0,
+            agentLaunchId: "launch-a",
+          }),
+        ).resolves.toMatchObject({ state: "needs_input" });
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "clear",
+            revision: 0,
+            agentLaunchId: "launch-a",
+          }),
+        ).resolves.toEqual({ revision: 0 });
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("uses absent latest task fields instead of reviving a stale base declaration", async () => {
+      const { service } = await setup();
+      const internals = service as unknown as {
+        appendQueuedMessage(
+          record: SessionRecord,
+          message: string,
+          awaiting: boolean,
+        ): SessionRecord;
+      };
+      try {
+        const stale = runningSession({
+          agentLaunchId: "launch-a",
+          taskStatusRevision: 99,
+          taskStatus: {
+            state: "completed",
+            revision: 99,
+            agentLaunchId: "launch-a",
+            updatedAt: "2026-11-15T00:00:00Z",
+          },
+        });
+        const accepted = internals.appendQueuedMessage(stale, "new task", true);
+        expect(accepted.taskStatusRevision).toBe(1);
+        expect(accepted).not.toHaveProperty("taskStatus");
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("invalidates on unique queue acceptance, not a duplicate, and separates preaccepted tasks at delivery", async () => {
+      const { sessions, service } = await setup();
+      const internals = service as unknown as {
+        appendQueuedMessage(
+          record: SessionRecord,
+          message: string,
+          awaiting: boolean,
+        ): SessionRecord;
+        runDeliveryTransaction(
+          id: string,
+          message: string,
+          intent: { kind: "queued-drain"; message: string },
+          options: { recoverOnLiveAckTimeout: boolean },
+        ): Promise<unknown>;
+      };
+      try {
+        await service.writeTaskStatus("api-1", {
+          state: "completed",
+          revision: 0,
+          agentLaunchId: "launch-a",
+        });
+        const first = internals.appendQueuedMessage(sessions.get("api-1")!, "task A", true);
+        expect(first.taskStatusRevision).toBe(1);
+        expect(first.taskStatus).toBeUndefined();
+        expect(internals.appendQueuedMessage(first, "task A", true).taskStatusRevision).toBe(1);
+        const second = internals.appendQueuedMessage(first, "task B", true);
+        expect(second.taskStatusRevision).toBe(2);
+        await internals.runDeliveryTransaction(
+          "api-1",
+          "task A",
+          { kind: "queued-drain", message: "task A" },
+          { recoverOnLiveAckTimeout: true },
+        );
+        const tokenA = (await service.readTaskStatus("api-1")).revision;
+        expect(tokenA).toBe(3);
+        await service.writeTaskStatus("api-1", {
+          state: "needs_input",
+          revision: tokenA,
+          agentLaunchId: "launch-a",
+        });
+        await internals.runDeliveryTransaction(
+          "api-1",
+          "task B",
+          { kind: "queued-drain", message: "task B" },
+          { recoverOnLiveAckTimeout: true },
+        );
+        const tokenB = (await service.readTaskStatus("api-1")).revision;
+        expect(tokenB).toBe(4);
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: tokenA,
+            agentLaunchId: "launch-a",
+          }),
+        ).rejects.toMatchObject({ code: "stale_task_status" });
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: tokenB,
+            agentLaunchId: "launch-a",
+          }),
+        ).resolves.toMatchObject({ state: "completed" });
+        expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([
+          "task A",
+          "task B",
+        ]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("clears declaration when the agent reopens its ledger without invalidating its task token", async () => {
+      const { service } = await setup();
+      try {
+        await service.writeTaskStatus("api-1", {
+          state: "completed",
+          revision: 0,
+          agentLaunchId: "launch-a",
+        });
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "more", reason: "new work" },
+          { kind: "agent", sessionId: "api-1", agent: "claude" },
+        );
+        expect(await service.readTaskStatus("api-1")).toEqual({ revision: 0 });
+      } finally {
+        service.dispose();
+      }
+    });
+  });
+
   describe("explicit PR alert owner", () => {
     function configurePrAlerts() {
       const config = {
@@ -3103,6 +3379,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -4578,6 +4855,330 @@ describe("SessionService", () => {
           details: { kind: "snapshot_corrupt", version: 1 },
         });
         service.dispose();
+      });
+
+      describe("snapshot reads", () => {
+        const iso = (offsetMinutes: number) => new Date(at(offsetMinutes)).toISOString();
+        const tail = (entries: TranscriptEntry[], mtimeMinutes: number, startIndex = 0) =>
+          readClaudeConversationTailMock.mockResolvedValue({
+            entries,
+            state: "waiting",
+            totalEntries: startIndex + entries.length,
+            startIndex,
+            hasMore: false,
+            reader: { lastMtimeMs: at(mtimeMinutes) },
+          });
+        const untimedMessage = (role: "user" | "assistant", text: string): TranscriptEntry => ({
+          kind: "message",
+          role,
+          text,
+        });
+
+        async function readSetup(
+          overrides: Partial<SessionRecord> = {},
+          freshnessMinutes?: number,
+        ) {
+          if (freshnessMinutes !== undefined) {
+            const config = baseConfig();
+            loadConfigMock.mockReturnValue({
+              ...config,
+              projects: { api: { ...config.projects.api, snapshots: { freshnessMinutes } } },
+            });
+          }
+          const sessions = createSessionStore();
+          const session = runningSession(overrides);
+          sessions.set(session.id, session);
+          const { SessionService } = await loadSessionServiceModule();
+          const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+          vi.setSystemTime(T0);
+          await service.writeSnapshot(session.id, { content: "# Notes", final: false });
+          const read = (version: number | "latest" = "latest") =>
+            service.readSnapshot(session.id, version, { includeDone: false });
+          const firstWorkCache = (service as unknown as { firstWorkCache: Map<string, unknown> })
+            .firstWorkCache;
+          return { sessions, session, service, read, firstWorkCache };
+        }
+
+        it.each([
+          [
+            "text after the snapshot, then a tool past the window",
+            [userEntry("go", 0), textEntry(0.5), toolEntry(40)],
+            iso(0.5),
+            true,
+          ],
+          ["only text after the snapshot", [userEntry("go", 0), textEntry(0.5)], iso(0.5), false],
+          [
+            "a non-Spur tool in a reminder turn after Spur-only entries",
+            [
+              userEntry("go", 0),
+              userEntry(reminderText, 5),
+              textEntry(5.5),
+              toolEntry(6, { spurCall: true }),
+              toolEntry(8),
+            ],
+            iso(8),
+            false,
+          ],
+          [
+            "only reminder replies",
+            [
+              userEntry("go", 0),
+              userEntry(reminderText, 5),
+              toolEntry(6, { spurCall: true }),
+              textEntry(7),
+            ],
+            null,
+            false,
+          ],
+        ])("reports first work and staleness for %s", async (_name, entries, since, stale) => {
+          const { read, service } = await readSetup();
+          tail(entries, 41);
+
+          const { freshness } = await read();
+
+          expect(freshness.activitySince).toBe(since);
+          expect(freshness.stale).toBe(stale);
+          service.dispose();
+        });
+
+        it("follows the project's freshnessMinutes", async () => {
+          const { read, service } = await readSetup({}, 20);
+          tail([userEntry("go", 0), toolEntry(25)], 26);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(25), stale: true });
+          service.dispose();
+        });
+
+        it("finds no activity when the transcript was last written before the snapshot", async () => {
+          const { read, service } = await readSetup();
+          tail([userEntry("go", -10), toolEntry(-5)], -1);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+          expect(readAgentConversationMock).not.toHaveBeenCalled();
+          service.dispose();
+        });
+
+        it("counts commits from the recorded head and branch", async () => {
+          readWorktreeHeadMock.mockResolvedValue({ branch: "main", headSha: "abc", dirty: false });
+          const { read, session, service } = await readSetup();
+          countCommitsSinceMock.mockResolvedValue(3);
+
+          expect((await read()).freshness.commitsSince).toBe(3);
+          expect(countCommitsSinceMock).toHaveBeenCalledWith(session.worktreePath, "abc", "main");
+          service.dispose();
+        });
+
+        it("reports age in whole seconds", async () => {
+          const { read, service } = await readSetup();
+          vi.setSystemTime(new Date(T0.getTime() + 90_900));
+
+          expect((await read()).freshness.ageSeconds).toBe(90);
+          service.dispose();
+        });
+
+        it("rescans the full transcript when the tail starts above the snapshot", async () => {
+          const { read, service } = await readSetup();
+          tail([userEntry("go", 2), textEntry(3), toolEntry(40)], 41, 5);
+          readAgentConversationMock.mockResolvedValue([
+            userEntry("go", -5),
+            textEntry(1),
+            userEntry("again", 2),
+            textEntry(3),
+            toolEntry(40),
+          ]);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(1), stale: true });
+          expect(readAgentConversationMock).toHaveBeenCalledTimes(1);
+          service.dispose();
+        });
+
+        it("serves a cached first work without a repeat full read", async () => {
+          const { read, service, firstWorkCache, session } = await readSetup();
+          tail([userEntry("go", 2), textEntry(3), toolEntry(10)], 11, 5);
+          readAgentConversationMock.mockResolvedValue([
+            userEntry("go", -5),
+            textEntry(1),
+            userEntry("again", 2),
+            textEntry(3),
+            toolEntry(10),
+          ]);
+          await read();
+          expect(readAgentConversationMock).toHaveBeenCalledTimes(1);
+          expect(firstWorkCache.has(session.id)).toBe(true);
+
+          expect((await read()).freshness.activitySince).toBe(iso(1));
+          expect(readAgentConversationMock).toHaveBeenCalledTimes(1);
+          service.dispose();
+        });
+
+        it("skips every transcript read when the cached first work already makes it stale", async () => {
+          const { read, service } = await readSetup();
+          tail([userEntry("go", 0), toolEntry(31)], 32);
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(31), stale: true });
+          readClaudeConversationTailMock.mockClear();
+          readAgentConversationMock.mockClear();
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(31), stale: true });
+          expect(readClaudeConversationTailMock).not.toHaveBeenCalled();
+          expect(readAgentConversationMock).not.toHaveBeenCalled();
+          service.dispose();
+        });
+
+        it("keeps the cached first work when the transcript tail is gone", async () => {
+          const { read, service } = await readSetup();
+          tail([userEntry("go", 0), textEntry(5)], 6);
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(5), stale: false });
+          readClaudeConversationTailMock.mockResolvedValue(null);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(5), stale: false });
+          service.dispose();
+        });
+
+        it("rereads for a newer snapshot version", async () => {
+          const { read, service, session } = await readSetup();
+          tail([userEntry("go", 0), toolEntry(31)], 32);
+          await read();
+          vi.setSystemTime(new Date(at(35)));
+          await service.writeSnapshot(session.id, { content: "# Two", final: false });
+          readClaudeConversationTailMock.mockClear();
+          tail([userEntry("go", 0), toolEntry(31), textEntry(36)], 37);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(36), stale: false });
+          expect(readClaudeConversationTailMock).toHaveBeenCalled();
+          service.dispose();
+        });
+
+        it("reads archived sessions through no cached reader", async () => {
+          const { read, service, session, sessions, firstWorkCache } = await readSetup();
+          const snapshots = join(TEST_DATA_DIR, "sessions", session.id);
+          const archived = join(TEST_DATA_DIR, "sessions-archive", session.project, session.id);
+          mkdirSync(dirname(archived), { recursive: true });
+          renameSync(snapshots, archived);
+          sessions.delete(session.id);
+          readArchivedSessionMock.mockReturnValue(session);
+          tail([userEntry("go", 0), toolEntry(31)], 32);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(31), stale: true });
+          expect(readClaudeConversationTailMock).toHaveBeenCalledWith(
+            session.worktreePath,
+            undefined,
+            session.agentSessionId,
+          );
+          expect(firstWorkCache.has(session.id)).toBe(false);
+          service.dispose();
+        });
+
+        describe("codex freshness", () => {
+          // Only a read pinned to the owning thread sees the quiet rollout; an unpinned read
+          // finds the newer rollout of an unrelated session.
+          const ownRollout = {
+            entries: [userEntry("go", -2)],
+            totalEntries: 1,
+            startIndex: 0,
+            reader: { filePath: "/own.jsonl", cursor: { mtimeMs: at(-1) } },
+          };
+          const unrelatedRollout = {
+            entries: [userEntry("other", 30), toolEntry(40)],
+            totalEntries: 2,
+            startIndex: 0,
+            reader: { filePath: "/other.jsonl", cursor: { mtimeMs: at(41) } },
+          };
+          const pinTail = () =>
+            readCodexConversationTailMock.mockImplementation(
+              async (_dir: string, _reader: unknown, threadId?: string) =>
+                threadId === "thread-own" ? ownRollout : unrelatedRollout,
+            );
+
+          it.each(["live", "archived"] as const)(
+            "ignores an unrelated newer rollout for a %s session",
+            async (location) => {
+              const { read, service, session, sessions } = await readSetup({
+                agent: "codex",
+                agentSessionId: "thread-own",
+              });
+              if (location === "archived") {
+                const archived = join(
+                  TEST_DATA_DIR,
+                  "sessions-archive",
+                  session.project,
+                  session.id,
+                );
+                mkdirSync(dirname(archived), { recursive: true });
+                renameSync(join(TEST_DATA_DIR, "sessions", session.id), archived);
+                sessions.delete(session.id);
+                readArchivedSessionMock.mockReturnValue(session);
+              }
+              pinTail();
+
+              expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+              expect(readCodexConversationTailMock).toHaveBeenCalledWith(
+                expect.stringContaining(session.id),
+                undefined,
+                "thread-own",
+              );
+              service.dispose();
+            },
+          );
+
+          it("reads no rollout when the session has no codex thread id", async () => {
+            const { read, service } = await readSetup({ agent: "codex" });
+            pinTail();
+
+            expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+            expect(readCodexConversationTailMock).not.toHaveBeenCalled();
+            service.dispose();
+          });
+        });
+
+        it("uses the Cursor transcript write time, not record or dashboard activity", async () => {
+          const { read, service, session, sessions } = await readSetup({
+            agent: "cursor",
+            agentSessionId: "chat-1",
+            updatedAt: iso(20),
+          });
+          sessions.set(session.id, { ...session, updatedAt: iso(20) });
+          const cursorState = (mtimeMinutes: number) => ({
+            state: "waiting",
+            reader: { filePath: "/tmp/chat.jsonl", lastMtimeMs: at(mtimeMinutes) },
+            rateLimit: null,
+          });
+          readAgentConversationMock.mockResolvedValue([
+            untimedMessage("user", "go"),
+            untimedMessage("assistant", "done"),
+          ]);
+
+          readCursorJsonlStateMock.mockResolvedValue(cursorState(-1));
+          expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+          expect(readCursorJsonlStateMock).toHaveBeenCalled();
+          expect(readAgentConversationMock).not.toHaveBeenCalled();
+
+          readCursorJsonlStateMock.mockResolvedValue(cursorState(40));
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(40), stale: true });
+          service.dispose();
+        });
+
+        it("uses the OpenCode export's activity time", async () => {
+          const { read, service } = await readSetup({
+            agent: "opencode",
+            agentSessionId: "ses_1",
+            updatedAt: iso(20),
+          });
+          const opencodeState = (activityMinutes: number) => ({
+            state: { state: "waiting", reason: "idle", activityMs: at(activityMinutes) },
+          });
+          readAgentConversationMock.mockResolvedValue([
+            untimedMessage("user", "go"),
+            untimedMessage("assistant", "done"),
+          ]);
+
+          readOpenCodeStructuredStateMock.mockResolvedValue(opencodeState(-1));
+          expect((await read()).freshness).toMatchObject({ activitySince: null, stale: false });
+          expect(readOpenCodeStructuredStateMock).toHaveBeenCalled();
+
+          readOpenCodeStructuredStateMock.mockResolvedValue(opencodeState(5));
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(5), stale: false });
+          service.dispose();
+        });
       });
     });
 
@@ -11424,6 +12025,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -42763,6 +43365,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -49332,6 +49935,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -49951,6 +50555,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -51375,6 +51980,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -58332,7 +58938,7 @@ describe("SessionService", () => {
       await expectResourceWait(service, competing);
     });
 
-    it("serializes add-first against handoff before side effects", async () => {
+    it("moves only open items on handoff; completed items stay behind", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       const source = sessionRecord({
@@ -58364,12 +58970,965 @@ describe("SessionService", () => {
         { kind: "agent", agent: "claude", sessionId: source.id },
       );
 
-      await expect(service.handoff(source.id, { agent: "cursor" })).rejects.toMatchObject({
-        code: "todo_open_work",
-      });
-      expect(killTmuxSessionMock).not.toHaveBeenCalled();
-      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+
+      const response = await service.handoff(source.id, { agent: "cursor" });
+
+      expect(response.movedTodoItems).toBe(1);
+      const successor = await service.readTodo("api-2");
+      expect(successor.items.map((item) => [item.text, item.status])).toEqual([
+        ["Late requested work", "open"],
+      ]);
+      expect((await service.readTodo(source.id)).items.map((item) => item.status)).toEqual([
+        "completed",
+        "cancelled",
+      ]);
       service.dispose();
+    });
+
+    describe("ToDo inheritance and stalled handoff", () => {
+      const sourceAgent = { kind: "agent", agent: "claude", sessionId: "api-1" } as const;
+      const otherAgent = { kind: "agent", agent: "codex", sessionId: "api-9" } as const;
+
+      async function seedHandoff(
+        overrides: Partial<SessionRecord> = {},
+        options: { items?: boolean; requireFinal?: boolean } = {},
+      ) {
+        mockClaudeJsonlState("waiting");
+        if (options.requireFinal) {
+          const config = baseConfig();
+          loadConfigMock.mockReturnValue({
+            ...config,
+            projects: {
+              api: { ...config.projects.api, snapshots: { requireFinal: true } },
+            },
+          });
+        }
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          sessionRecord({
+            id: "api-1",
+            status: "running",
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+            ...overrides,
+          }),
+        );
+        workspaceExistsMock.mockReturnValue(true);
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+        await useRealTodoLedger();
+        const service = await createDisposedSessionService();
+        const sourceIds: string[] = [];
+        if (options.items !== false) {
+          await service.mutateTodo(
+            "api-1",
+            { action: "add", text: "Open work", reason: "Why open" },
+            sourceAgent,
+          );
+          const held = await service.mutateTodo(
+            "api-1",
+            { action: "add", text: "Held work", reason: "Why held" },
+            sourceAgent,
+          );
+          const heldId = held.items[1]?.id;
+          if (!heldId) throw new Error("Expected held item");
+          const projection = await service.mutateTodo(
+            "api-1",
+            {
+              action: "hold",
+              itemId: heldId,
+              reason: "Waiting",
+              blocker: "human",
+              requiredHumanAction: "Approve the plan",
+            },
+            sourceAgent,
+          );
+          sourceIds.push(...projection.items.map((item) => item.id));
+        }
+        return { sessions, service, sourceIds };
+      }
+
+      it("moves open and held items to the successor before launch and cancels source items after finalize", async () => {
+        const { service, sourceIds } = await seedHandoff();
+        const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
+        let ledgerAtLaunch: TodoProjection | null | undefined;
+        sendMessageToTmuxMock.mockImplementation(async (name: string) => {
+          if (name === "api-2" && ledgerAtLaunch === undefined) {
+            ledgerAtLaunch = actualTodo.readTodoIfPresent(TEST_DATA_DIR, "api-2");
+          }
+        });
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.movedTodoItems).toBe(2);
+        expect(ledgerAtLaunch?.items).toHaveLength(2);
+        const successor = await service.readTodo("api-2");
+        expect(successor.items.map((item) => [item.text, item.status])).toEqual([
+          ["Open work", "open"],
+          ["Held work", "held"],
+        ]);
+        expect(successor.items.map((item) => item.handoffFrom)).toEqual(
+          sourceIds.map((itemId) => ({ sessionId: "api-1", itemId })),
+        );
+        expect(successor.items[0]?.added.actor).toEqual({ kind: "system", source: "handoff" });
+        expect(successor.items[1]?.latestTransition?.blocker).toEqual({
+          kind: "human",
+          requiredAction: "Approve the plan",
+        });
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(source.items.map((item) => item.latestTransition?.reason)).toEqual([
+          "handed off to api-2",
+          "handed off to api-2",
+        ]);
+        expect(source.items.map((item) => item.handoffTo)).toEqual(
+          successor.items.map((item) => ({ sessionId: "api-2", itemId: item.id })),
+        );
+        const sent = sendMessageToTmuxMock.mock.calls.find(([name]) => name === "api-2");
+        for (const item of successor.items) expect(sent?.[1]).toContain(item.id);
+        service.dispose();
+      });
+
+      it("spawn failure cancels inherited copies and leaves source items open; retry moves each item exactly once", async () => {
+        const { service, sourceIds } = await seedHandoff();
+        reserveNextSessionIdMock
+          .mockReset()
+          .mockResolvedValueOnce("api-2")
+          .mockResolvedValueOnce("api-3");
+        createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow("tmux boom");
+
+        const failed = await service.readTodo("api-2");
+        expect(failed.items).toHaveLength(2);
+        expect(failed.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(failed.items[0]?.latestTransition?.reason).toMatch(
+          /failed; item stays open in api-1/,
+        );
+        expect(failed.items[0]?.handoffTo).toBeUndefined();
+        const afterFailure = await service.readTodo("api-1");
+        expect(afterFailure.items.map((item) => item.status)).toEqual(["open", "held"]);
+        expect(afterFailure.items.map((item) => item.id)).toEqual(sourceIds);
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.id).toBe("api-3");
+        const retried = await service.readTodo("api-3");
+        expect(retried.items.map((item) => item.status)).toEqual(["open", "held"]);
+        expect(retried.items.map((item) => item.handoffFrom?.itemId)).toEqual(sourceIds);
+        const finalSource = await service.readTodo("api-1");
+        expect(finalSource.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(finalSource.counts.cancelled).toBe(2);
+        service.dispose();
+      });
+
+      it("finalize failure before source commit rolls back successor copies", async () => {
+        const { sessions, service } = await seedHandoff();
+        const internals = sessionServiceInternals(service);
+        agentWaitsForSubmitAckMock.mockImplementation((agent: string) => agent === "cursor");
+        createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+        vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+          const source = sessions.get("api-1");
+          if (!source) throw new Error("Expected source");
+          sessions.set("api-1", { ...source, updatedAt: "2026-03-18T10:30:00.000Z" });
+          return { found: true, lastScannedFile: null };
+        });
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+          /state changed before finalization/,
+        );
+
+        const successor = await service.readTodo("api-2");
+        expect(successor.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["open", "held"]);
+        service.dispose();
+      });
+
+      async function expectRolledBack(service: Awaited<ReturnType<typeof seedHandoff>>["service"]) {
+        const successor = await service.readTodo("api-2");
+        expect(successor.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(successor.items[0]?.latestTransition?.reason).toMatch(
+          /failed; item stays open in api-1/,
+        );
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["open", "held"]);
+      }
+
+      it("rolls back successor copies when a launched successor is retained after a failure", async () => {
+        const { service } = await seedHandoff();
+        waitForTmuxReadyMock.mockRejectedValueOnce(new Error("agent never became ready"));
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+          "agent never became ready",
+        );
+
+        await expectRolledBack(service);
+        service.dispose();
+      });
+
+      it("rolls back successor copies when the spawn receipt is unavailable after spawn", async () => {
+        const { service } = await seedHandoff();
+        const internals = sessionServiceInternals(service);
+        vi.spyOn(internals.foregroundSpawnReceipts, "get").mockReturnValue(undefined);
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+          /receipt unavailable for api-2/,
+        );
+
+        await expectRolledBack(service);
+        service.dispose();
+      });
+
+      // The daemon stopped after the successor went live and before the source was cancelled.
+      async function seedCrashWindow(
+        successorStatus: SessionRecord["status"] = "running",
+        sourceOverrides: Partial<SessionRecord> = { status: "stopped", stopReason: "manual_pause" },
+        successorOverrides: Partial<SessionRecord> = {},
+      ) {
+        const seeded = await seedHandoff(sourceOverrides);
+        const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
+        const source = await seeded.service.readTodo("api-1");
+        seeded.sessions.set(
+          "api-2",
+          sessionRecord({
+            id: "api-2",
+            workspaceId: "api-1",
+            status: successorStatus,
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+            ...successorOverrides,
+          }),
+        );
+        actualTodo.inheritTodo(
+          TEST_DATA_DIR,
+          { id: "api-2", project: "api" },
+          actualTodo.planHandoffTodo(source, "api-1"),
+        );
+        return seeded;
+      }
+
+      it("a retried handoff after the crash window cancels the source items instead of copying them again", async () => {
+        const { service } = await seedCrashWindow();
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.movedTodoItems).toBe(0);
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(source.items.map((item) => item.latestTransition?.reason)).toEqual([
+          "handed off to api-2",
+          "handed off to api-2",
+        ]);
+        const first = await service.readTodo("api-2");
+        expect(first.items.map((item) => item.status)).toEqual(["open", "held"]);
+        expect(source.items.map((item) => item.handoffTo?.itemId)).toEqual(
+          first.items.map((item) => item.id),
+        );
+        expect((await service.readTodo("api-3")).items).toEqual([]);
+        service.dispose();
+      });
+
+      it("startup recovery cancels source items already held by a live successor", async () => {
+        const { service } = await seedCrashWindow();
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect((await service.readTodo("api-2")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.handoff.todo_reconciled",
+            details: expect.objectContaining({ successorId: "api-2" }),
+          }),
+        );
+        service.dispose();
+      });
+
+      it("startup recovery reconciles a paused source against a launched successor", async () => {
+        const { service } = await seedCrashWindow("running", { status: "paused" });
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "cancelled",
+          "cancelled",
+        ]);
+        service.dispose();
+      });
+
+      it("startup recovery rolls back copies of an unlaunched successor, and a retry moves them once", async () => {
+        const { service: seeder } = await seedCrashWindow("spawning");
+        seeder.dispose();
+        // Construction rolls the unlaunched copies back synchronously.
+        const service = await createDisposedSessionService();
+
+        await expectRolledBack(service);
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+        const response = await service.handoff("api-1", { agent: "cursor" });
+        expect(response.id).toBe("api-3");
+        expect(response.movedTodoItems).toBe(2);
+        expect((await service.readTodo("api-3")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "cancelled",
+          "cancelled",
+        ]);
+        expect((await service.readTodo("api-2")).items.map((item) => item.status)).toEqual([
+          "cancelled",
+          "cancelled",
+        ]);
+        service.dispose();
+      });
+
+      it("boot drift of an unlaunched successor to stopped cannot make it the owner", async () => {
+        const { service: seeder, sessions } = await seedCrashWindow("spawning");
+        seeder.dispose();
+        const { SessionService } = await loadSessionServiceModule();
+        // Construct and drift in one synchronous span, before any microtask recovery can run.
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        const successor = sessions.get("api-2");
+        if (!successor) throw new Error("Expected successor");
+        sessions.set("api-2", { ...successor, status: "stopped", stopReason: "manual_pause" });
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+        const response = await service.handoff("api-1", { agent: "cursor" });
+        expect(response.movedTodoItems).toBe(2);
+        service.dispose();
+      });
+
+      it("recovery re-reads a successor killed while it waited for the lock", async () => {
+        const { service, sessions } = await seedCrashWindow();
+        const internals = service as unknown as {
+          recoverHandoffTodo(): Promise<void>;
+          withWorkspaceLifecycleLocks<T>(id: string, task: () => Promise<T>): Promise<T>;
+        };
+        let release: () => void = () => {};
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const held = internals.withWorkspaceLifecycleLocks("api-1", () => gate);
+        const recovery = internals.recoverHandoffTodo();
+        // Timers may be faked here: yield microtasks so recovery reaches the lock wait.
+        for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+        const successor = sessions.get("api-2");
+        if (!successor) throw new Error("Expected successor");
+        sessions.set("api-2", { ...successor, status: "killed" });
+
+        release();
+        await Promise.all([held, recovery]);
+
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        service.dispose();
+      });
+
+      it("launch evidence: a spawning successor that began its launch keeps its copies at boot", async () => {
+        const { service: seeder } = await seedCrashWindow(
+          "spawning",
+          { status: "stopped", stopReason: "manual_pause" },
+          { agentLaunchId: "launch-1" },
+        );
+        seeder.dispose();
+        const service = await createDisposedSessionService();
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        expect((await service.readTodo("api-2")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(source.items.every((item) => item.handoffTo?.sessionId === "api-2")).toBe(true);
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+        const response = await service.handoff("api-1", { agent: "cursor" });
+        expect(response.movedTodoItems).toBe(0);
+        service.dispose();
+      });
+
+      it("on-launch provider: the successor record carries agentLaunchId before the process starts", async () => {
+        const { sessions, service } = await seedHandoff({}, { items: false });
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Work", reason: "Why" },
+          sourceAgent,
+        );
+        buildAgentLaunchPlanMock.mockImplementationOnce((agent: string) => ({
+          agent,
+          launchCommand: "cursor --prompt",
+          initialMessage: "",
+          initialMessageDeliveredOnLaunch: true,
+          readyMarkers: ["ready"],
+        }));
+        let launchIdAtCreate: string | undefined;
+        createTmuxSessionMock.mockImplementationOnce(async () => {
+          launchIdAtCreate = sessions.get("api-2")?.agentLaunchId;
+        });
+
+        await service.handoff("api-1", { agent: "cursor" });
+
+        expect(launchIdAtCreate).toEqual(expect.any(String));
+        service.dispose();
+      });
+
+      it("launch evidence: the successor record carries agentLaunchId before the prompt is sent", async () => {
+        const { sessions, service } = await seedHandoff({}, { items: false });
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Work", reason: "Why" },
+          sourceAgent,
+        );
+        let launchIdAtSend: string | undefined;
+        sendMessageToTmuxMock.mockImplementation(async (name: string) => {
+          if (name === "api-2") launchIdAtSend = sessions.get("api-2")?.agentLaunchId;
+        });
+
+        await service.handoff("api-1", { agent: "cursor" });
+
+        expect(launchIdAtSend).toEqual(expect.any(String));
+        service.dispose();
+      });
+
+      it("a retried handoff does not treat an unlaunched successor as the owner", async () => {
+        const { service } = await seedCrashWindow("spawning");
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.movedTodoItems).toBe(2);
+        service.dispose();
+      });
+
+      // Crash points of A -> B and A -> B -> C. Each row is entered through both recovery paths.
+      type Seeded = Awaited<ReturnType<typeof seedCrashWindow>>;
+
+      async function addC(
+        seeded: Seeded,
+        c: {
+          status: SessionRecord["status"];
+          agentLaunchId?: string;
+          movedOn?: boolean;
+          bRolledBack?: boolean;
+        },
+      ): Promise<Seeded> {
+        const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
+        const toC = actualTodo.planHandoffTodo(
+          actualTodo.replayTodo(TEST_DATA_DIR, "api-2"),
+          "api-2",
+        );
+        seeded.sessions.set(
+          "api-3",
+          sessionRecord({
+            id: "api-3",
+            workspaceId: "api-1",
+            status: c.status,
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+            ...(c.agentLaunchId ? { agentLaunchId: c.agentLaunchId } : {}),
+          }),
+        );
+        actualTodo.inheritTodo(TEST_DATA_DIR, { id: "api-3", project: "api" }, toC);
+        if (c.bRolledBack) {
+          actualTodo.closeTodoItems(
+            TEST_DATA_DIR,
+            { id: "api-2", project: "api" },
+            toC.map((item) => ({ itemId: item.from.itemId })),
+            "handoff to api-2 failed; item stays open in api-1",
+          );
+        }
+        if (c.movedOn) {
+          actualTodo.closeTodoItems(
+            TEST_DATA_DIR,
+            { id: "api-2", project: "api" },
+            toC.map((item) => ({
+              itemId: item.from.itemId,
+              handoffTo: { sessionId: "api-3", itemId: item.itemId },
+            })),
+            "handed off to api-3",
+          );
+        }
+        return seeded;
+      }
+
+      const migrated = { todoLedgerVersion: 1 } as const;
+      const stopped = { status: "stopped", stopReason: "manual_pause" } as const;
+      const crashPoints: Array<{
+        name: string;
+        build: () => Promise<Seeded>;
+        closedAgainst?: string;
+        retryMoves: number;
+      }> = [
+        {
+          name: "A->B before the copy",
+          build: () => seedHandoff({ ...stopped }) as unknown as Promise<Seeded>,
+          retryMoves: 2,
+        },
+        {
+          name: "A->B after the copy, before tmux",
+          build: () => seedCrashWindow("spawning"),
+          retryMoves: 2,
+        },
+        {
+          name: "A->B after tmux start, before the prompt is confirmed",
+          build: () => seedCrashWindow("spawning", undefined, { agentLaunchId: "launch-1" }),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+        {
+          name: "A->B after running, before the source close",
+          build: () => seedCrashWindow("running"),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+        {
+          name: "A->B->C B handed off to C and completed",
+          build: async () =>
+            addC(await seedCrashWindow("completed", undefined, migrated), {
+              status: "running",
+              movedOn: true,
+            }),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+        {
+          name: "A->B->C B killed after C launched, B copies still open",
+          build: async () =>
+            addC(await seedCrashWindow("killed", undefined, migrated), { status: "running" }),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+        {
+          name: "A->B->C B's finalize rolled its copies back after B handed off to C",
+          build: async () =>
+            addC(await seedCrashWindow("running"), { status: "running", bRolledBack: true }),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+        {
+          name: "A->B->C C unlaunched",
+          build: async () => addC(await seedCrashWindow("running"), { status: "spawning" }),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+      ];
+
+      // Open/held copies of one A item, across every ledger, that a live session holds.
+      async function liveCopies(seeded: Seeded, itemId: string): Promise<number> {
+        const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
+        const found = new Set([`api-1\0${itemId}`]);
+        let live = 0;
+        let grew = true;
+        while (grew) {
+          grew = false;
+          for (let n = 1; n <= 9; n += 1) {
+            const id = `api-${n}`;
+            const ledger = actualTodo.readTodoIfPresent(TEST_DATA_DIR, id);
+            if (!ledger) continue;
+            for (const item of ledger.items) {
+              const key = `${id}\0${item.id}`;
+              const fromKey = item.handoffFrom
+                ? `${item.handoffFrom.sessionId}\0${item.handoffFrom.itemId}`
+                : undefined;
+              if (found.has(key) || !fromKey || !found.has(fromKey)) continue;
+              found.add(key);
+              grew = true;
+            }
+          }
+        }
+        for (const key of found) {
+          const [id, copyId] = key.split("\0");
+          const record = seeded.sessions.get(id ?? "");
+          const item = actualTodo
+            .readTodoIfPresent(TEST_DATA_DIR, id ?? "")
+            ?.items.find((candidate) => candidate.id === copyId);
+          const sessionLive =
+            record !== undefined &&
+            !["completed", "killed"].includes(record.status) &&
+            !(record.status === "spawning" && !record.agentLaunchId);
+          if (sessionLive && (item?.status === "open" || item?.status === "held")) live += 1;
+        }
+        return live;
+      }
+
+      it.each(
+        crashPoints.flatMap((row) => [
+          [row.name, "startup", row] as const,
+          [row.name, "retry", row] as const,
+        ]),
+      )("crash point: %s, recovered by %s", async (_name, entry, row) => {
+        const seeded = await row.build();
+        const aItemIds = (await seeded.service.readTodo("api-1")).items.map((item) => item.id);
+        let service = seeded.service;
+        if (entry === "startup") {
+          seeded.service.dispose();
+          service = await createDisposedSessionService();
+          await (
+            service as unknown as { recoverHandoffTodo(): Promise<void> }
+          ).recoverHandoffTodo();
+          const afterBoot = await service.readTodo("api-1");
+          if (row.closedAgainst) {
+            expect(afterBoot.items.map((item) => item.handoffTo?.sessionId)).toEqual([
+              row.closedAgainst,
+              row.closedAgainst,
+            ]);
+          } else {
+            expect(afterBoot.items.map((item) => item.status)).toEqual(["open", "held"]);
+          }
+        }
+
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-9");
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.movedTodoItems).toBe(row.retryMoves);
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        if (row.closedAgainst) {
+          expect(
+            source.items.every((item) => item.handoffTo?.sessionId === row.closedAgainst),
+          ).toBe(true);
+        }
+        for (const itemId of aItemIds) expect(await liveCopies(seeded, itemId)).toBe(1);
+        service.dispose();
+      });
+
+      it("startup recovery ignores a terminal successor whose copies are still open", async () => {
+        const { service } = await seedCrashWindow("killed");
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+
+        await internals.recoverHandoffTodo();
+
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+        service.dispose();
+      });
+
+      it("recovers an interrupted handoff when the service starts", async () => {
+        const { service: seeder } = await seedCrashWindow();
+        seeder.dispose();
+        const service = await createDisposedSessionService();
+
+        await vi.waitFor(async () =>
+          expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+            "cancelled",
+            "cancelled",
+          ]),
+        );
+        service.dispose();
+      });
+
+      it("logs a distinct warning when startup recovery fails for a source", async () => {
+        const { service } = await seedCrashWindow();
+        const internals = service as unknown as {
+          recoverHandoffTodo(): Promise<void>;
+          reconcileHandoffTodoLocked(): void;
+        };
+        vi.spyOn(internals, "reconcileHandoffTodoLocked").mockImplementation(() => {
+          throw new Error("ledger unreadable");
+        });
+
+        await internals.recoverHandoffTodo();
+
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.handoff.todo_reconcile_failed",
+            level: "warn",
+            sessionId: "api-1",
+          }),
+        );
+        service.dispose();
+      });
+
+      it("rejects a second handoff while one is in flight and leaves the first one's rollback intact", async () => {
+        const { service } = await seedHandoff();
+        const internals = service as unknown as { recoverHandoffTodo(): Promise<void> };
+        let failLaunch: () => void = () => {};
+        waitForTmuxReadyMock.mockImplementationOnce(
+          () =>
+            new Promise<void>((_resolve, reject) => {
+              failLaunch = () => reject(new Error("agent never became ready"));
+            }),
+        );
+        const first = service.handoff("api-1", { agent: "cursor" });
+        const firstOutcome = first.then(
+          () => new Error("Expected the first handoff to reject"),
+          (error: unknown) => error,
+        );
+        await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+          /already in flight/,
+        );
+        await internals.recoverHandoffTodo();
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "open",
+          "held",
+        ]);
+
+        failLaunch();
+        await expect(firstOutcome).resolves.toMatchObject({
+          message: expect.stringContaining("agent never became ready"),
+        });
+
+        await expectRolledBack(service);
+        service.dispose();
+      });
+
+      it("refuses to hand off the successor while its own handoff is in flight", async () => {
+        const { service } = await seedHandoff();
+        let launchReady: () => void = () => {};
+        waitForTmuxReadyMock.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              launchReady = resolve;
+            }),
+        );
+        const first = service.handoff("api-1", { agent: "cursor" });
+        await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+
+        await expect(service.handoff("api-2", { agent: "cursor" })).rejects.toThrow(
+          /already in flight for api-2/,
+        );
+
+        launchReady();
+        await expect(first).resolves.toMatchObject({ id: "api-2", movedTodoItems: 2 });
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+        await expect(service.handoff("api-2", { agent: "cursor" })).resolves.toMatchObject({
+          id: "api-3",
+          movedTodoItems: 2,
+        });
+        service.dispose();
+      });
+
+      it("keeps successor copies when completing the source fails after the commit", async () => {
+        const { service } = await seedHandoff();
+        const internals = service as unknown as {
+          applyManualStatusLocked(): Promise<SessionView>;
+        };
+        vi.spyOn(internals, "applyManualStatusLocked").mockRejectedValueOnce(
+          new Error("complete failed"),
+        );
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+          "complete failed",
+        );
+
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        const successor = await service.readTodo("api-2");
+        expect(successor.items.map((item) => item.status)).toEqual(["open", "held"]);
+        service.dispose();
+      });
+
+      it("handoff with no open or held items writes no ToDo events", async () => {
+        const { service } = await seedHandoff({}, { items: false });
+        const added = await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Done work", reason: "Why" },
+          sourceAgent,
+        );
+        const itemId = added.items[0]?.id;
+        if (!itemId) throw new Error("Expected item");
+        await service.mutateTodo(
+          "api-1",
+          { action: "complete", itemId, reason: "Done" },
+          sourceAgent,
+        );
+        const before = await service.readTodo("api-1");
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.movedTodoItems).toBe(0);
+        const after = await service.readTodo("api-1");
+        expect(after.revision).toBe(before.revision);
+        expect((await service.readTodo("api-2")).items).toEqual([]);
+        service.dispose();
+      });
+
+      it("agent hands off another stalled session; 403 when target is healthy", async () => {
+        const { sessions, service } = await seedHandoff({}, { items: false, requireFinal: true });
+
+        await expect(
+          service.handoff("api-1", { agent: "cursor" }, { todoActor: otherAgent }),
+        ).rejects.toMatchObject({
+          statusCode: 403,
+          code: "handoff_target_not_stalled",
+          payload: { code: "handoff_target_not_stalled", sessionId: "api-1", status: "running" },
+        });
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.handoff.failed",
+            level: "warn",
+            details: { kind: "handoff_target_not_stalled" },
+          }),
+        );
+        expect(sessions.get("api-1")?.status).toBe("running");
+
+        const source = sessions.get("api-1");
+        if (!source) throw new Error("Expected source");
+        sessions.set("api-1", { ...source, rateLimitedAt: "2026-03-18T10:02:00.000Z" });
+        const response = await service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: otherAgent },
+        );
+
+        expect(response.id).toBe("api-2");
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.handoff.completed",
+            details: expect.objectContaining({ snapshotGate: "skipped_source_cannot_write" }),
+          }),
+        );
+        service.dispose();
+      });
+
+      it.each([
+        ["stopped", { status: "stopped", stopReason: "manual_pause" }],
+        ["paused", { status: "paused" }],
+        ["server erroring", { status: "running", serverErrorAt: "2026-03-18T10:02:00.000Z" }],
+      ] as Array<[string, Partial<SessionRecord>]>)(
+        "agent hands off a %s session with an empty ledger",
+        async (_label, overrides) => {
+          const { sessions, service } = await seedHandoff(overrides, {
+            items: false,
+            requireFinal: true,
+          });
+
+          const response = await service.handoff(
+            "api-1",
+            { agent: "cursor" },
+            { todoActor: otherAgent },
+          );
+
+          expect(response.id).toBe("api-2");
+          expect(sessions.get("api-1")?.status).toBe("completed");
+          service.dispose();
+        },
+      );
+
+      it("agent hands off an errored session with an existing workspace", async () => {
+        const { sessions, service } = await seedHandoff(
+          { status: "errored", error: "agent crashed", errorSource: "other" },
+          { items: false },
+        );
+
+        const response = await service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: otherAgent },
+        );
+
+        expect(response.id).toBe("api-2");
+        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+        expect(deleteServiceInstancesForSessionMock).toHaveBeenCalledWith(
+          expect.anything(),
+          "api-1",
+        );
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("captures agent history when stopping a running source", async () => {
+        const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "handoff-source.jsonl");
+        mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+        writeFileSync(sourceHistoryPath, '{"type":"assistant","message":"tail"}\n', "utf8");
+        const { service } = await seedHandoff({ agent: "claude" }, { items: false });
+        findLatestClaudeSessionFileMock.mockResolvedValue(sourceHistoryPath);
+        const capturesAtKill: string[][] = [];
+        killTmuxSessionMock.mockImplementation(async () => {
+          const dir = artifactDirForSession("api-1");
+          capturesAtKill.push(
+            (existsSync(dir) ? readdirSync(dir) : []).filter((name) =>
+              name.startsWith("agent-history-api-1-"),
+            ),
+          );
+        });
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Work", reason: "Why" },
+          sourceAgent,
+        );
+
+        await service.handoff("api-1", { agent: "cursor" });
+
+        expect(capturesAtKill[0]).toEqual([]);
+        const captures = readdirSync(artifactDirForSession("api-1")).filter((name) =>
+          /^agent-history-api-1-.*-to-stopped\.jsonl$/.test(name),
+        );
+        expect(captures).toHaveLength(1);
+        service.dispose();
+      });
+
+      it("records actor, caller and moved items on handoff events", async () => {
+        const { service, sourceIds } = await seedHandoff({
+          status: "stopped",
+          stopReason: "manual_pause",
+        });
+
+        await service.handoff("api-1", { agent: "cursor" }, { todoActor: otherAgent });
+
+        const events = logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.sessionId === "api-1");
+        const started = events.find((entry) => entry.event === "session.handoff.started");
+        const completed = events.find((entry) => entry.event === "session.handoff.completed");
+        const successor = await service.readTodo("api-2");
+        const expected = {
+          actor: otherAgent,
+          callerSessionId: "api-9",
+          movedItems: sourceIds.map((from, index) => ({ from, to: successor.items[index]?.id })),
+        };
+        expect(started?.details).toMatchObject(expected);
+        expect(completed?.details).toMatchObject(expected);
+        service.dispose();
+      });
+
+      it("hands off with a corrupt latest snapshot", async () => {
+        const { service } = await seedHandoff({}, { items: false });
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Work", reason: "Why" },
+          sourceAgent,
+        );
+        await service.writeSnapshot("api-1", { content: "# Notes", final: false });
+        const snapshotDir = join(TEST_DATA_DIR, "sessions", "api-1", "snapshots");
+        for (const name of readdirSync(snapshotDir)) {
+          writeFileSync(join(snapshotDir, name), "not a snapshot", "utf8");
+        }
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.id).toBe("api-2");
+        const sent = sendMessageToTmuxMock.mock.calls.find(([name]) => name === "api-2");
+        expect(sent?.[1]).toContain("latest snapshot unreadable:");
+        service.dispose();
+      });
     });
 
     it("keeps the source ledger responsive while handoff successor acknowledgement is pending", async () => {
@@ -58666,8 +60225,15 @@ describe("SessionService", () => {
         counter += 1;
         return `api-${counter}`;
       });
+      workspaceExistsMock.mockReturnValue(true);
+      await useRealTodoLedger();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await service.mutateTodo(
+        "api-1",
+        { action: "add", text: "Chained work", reason: "Why" },
+        { kind: "agent", agent: "claude", sessionId: "api-1" },
+      );
 
       const first = await service.handoff("api-1", { agent: "claude" });
       expect(first.id).toBe("api-2");
@@ -58682,6 +60248,9 @@ describe("SessionService", () => {
       expect(secondPrompt).toContain("ORIGINAL USER TASK: build the export endpoint");
       expect(secondPrompt.split("Task handoff from").length - 1).toBe(1);
       expect(secondPrompt.split("You continue in the same workspace").length - 1).toBe(1);
+      expect(secondPrompt.split("Inherited ToDo (moved from").length - 1).toBe(1);
+      expect(secondPrompt).toContain("Inherited ToDo (moved from api-2;");
+      expect((await service.readTodo("api-3")).items.map((item) => item.status)).toEqual(["open"]);
       expect(sessions.get("api-3")?.originalTaskPrompt).toBe(
         "ORIGINAL USER TASK: build the export endpoint",
       );

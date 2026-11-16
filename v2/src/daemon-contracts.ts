@@ -87,6 +87,8 @@ const storeExpectedRev = field(
 const storeLimit = field("limit", "integer 1..500", "Page size.", false, 100);
 const pageSummaryResponse =
   'PageSummary {id,title,icon?,agent,path,url,source?:{path:string},sync?:{state:"pending"|"syncing"|"synced"|"error",root?:string,lastSyncedAt?:string,error?:string}}. Sync appears only for sourced Pages; lastSyncedAt is the last successful reconciliation ISO time and is retained on errors; error appears only in error state.';
+const taskStatusResponse =
+  'TaskStatusView {revision:number,state?:"completed"|"needs_input"}. Revision is a nonnegative safe integer (0 on legacy records); state is present only for a current running launch and revision. Clearing omits state; runtime and artifacts remain.';
 const storeTooLarge: ContractResponse = {
   status: 413,
   contentType: "application/json",
@@ -106,7 +108,7 @@ const subscriptionFields = [
   field("targetSessionId", "string", "Session whose state transitions trigger delivery.", true),
   field(
     "states",
-    '("working"|"waiting"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[]',
+    '("working"|"waiting"|"completed"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[]',
     "Nonempty target states.",
     true,
   ),
@@ -154,7 +156,7 @@ const spawn = body("SpawnSessionRequest", [
   field("claudeAccountId", "string", "Claude account ID used for launch."),
   field(
     "subscriptions",
-    '{targetSessionId:string,states:("working"|"waiting"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[],message?:string}[]',
+    '{targetSessionId:string,states:("working"|"waiting"|"completed"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[],message?:string}[]',
     "At most 20 state subscriptions; referenced sessions must exist.",
   ),
 ]);
@@ -311,6 +313,26 @@ const requestBodies = {
       "resume:{action,itemId}",
     ],
   ),
+  taskStatus: body("TaskStatusRequest", [
+    field(
+      "state",
+      '"completed"|"needs_input"|"clear"',
+      "Declared outcome; clear removes it. Completed requires nonempty resolved ToDo; 409 todo_ledger_empty or todo_open_work otherwise.",
+      true,
+    ),
+    field(
+      "revision",
+      "integer 0..9007199254740991",
+      "Retained task-start revision; stale values return 409 stale_task_status.",
+      true,
+    ),
+    field(
+      "agentLaunchId",
+      "string",
+      "Nonblank current launch identity; mismatched launch or non-running lifecycle returns 409 stale_task_status. Does not supply caller identity.",
+      true,
+    ),
+  ]),
   snapshot: body("WriteSnapshotRequest", [
     field(
       "content",
@@ -1224,8 +1246,20 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "list_snapshots",
     "GET",
     "/sessions/{sessionId}/snapshots",
-    "List work snapshot metadata, ascending by version.",
-    { response: "WorkSnapshotMeta[]; content omitted.", source: "v2/src/snapshots.ts" },
+    "List work snapshot metadata, ascending by version unless order=desc; works for archived sessions.",
+    {
+      query: [
+        field("order", "string", "asc or desc.", false, "asc"),
+        field("limit", "integer", "Versions to return, 1..100; omitted returns all.", false),
+        field("before", "integer", "Exclusive upper version bound.", false),
+        field("after", "integer", "Exclusive lower version bound.", false),
+      ],
+      examples: [
+        { pathParams: { sessionId: "example-sessionId" }, query: { order: "desc", limit: "5" } },
+      ],
+      response: "WorkSnapshotMeta[]; content omitted; invalid query 400.",
+      source: "v2/src/snapshots.ts",
+    },
   ),
   operation(
     "write_snapshot",
@@ -1254,11 +1288,52 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "get_snapshot",
     "GET",
     "/sessions/{sessionId}/snapshots/{version}",
-    "Read one work snapshot; version is a positive integer or latest.",
+    "Read one work snapshot with freshness; version is a positive integer or latest; works for archived sessions.",
     {
+      query: [field("includeDone", "string", "1 adds the completed ToDo items as done.", false)],
       examples: [{ pathParams: { sessionId: "example-sessionId", version: "latest" } }],
-      response: "WorkSnapshot including content; 404 when none exists.",
+      response:
+        "WorkSnapshotRead: WorkSnapshot with content plus freshness {ageSeconds,activitySince,commitsSince,stale}; 404 when none exists.",
       source: "v2/src/snapshots.ts",
+    },
+  ),
+  operation(
+    "get_latest_snapshots_by_link",
+    "GET",
+    "/snapshots/latest",
+    "Latest snapshot of every session whose links match, newest first, for live, completed and archived sessions.",
+    {
+      query: [
+        field("link", "string[]", "Repeatable S5 link label or label=URL; all must match.", true),
+        field("includeDone", "string", "1 adds the completed ToDo items as done.", false),
+      ],
+      examples: [{ query: { link: "pr=https://example.com/pull/42" } }],
+      response:
+        "LatestSnapshotEntry[] {sessionId,status,state,snapshot: WorkSnapshotRead}; state is last observed, null when never observed; no link 400.",
+      source: "v2/src/snapshots.ts",
+    },
+  ),
+  operation(
+    "get_task_status",
+    "GET",
+    "/sessions/{sessionId}/task-status",
+    "Read the retained task revision and current declaration.",
+    { response: taskStatusResponse, source: "v2/src/task-status.ts" },
+  ),
+  operation(
+    "set_task_status",
+    "POST",
+    "/sessions/{sessionId}/task-status",
+    "Declare or clear task status. Agent-only: requires matching caller-session header; operator MCP has none and returns 403 task_status_forbidden.",
+    {
+      body: requestBodies.taskStatus,
+      response: taskStatusResponse,
+      source: "v2/src/task-status.ts",
+      examples: [
+        { body: { state: "completed", revision: 0, agentLaunchId: "current-launch-id" } },
+        { body: { state: "needs_input", revision: 0, agentLaunchId: "current-launch-id" } },
+        { body: { state: "clear", revision: 0, agentLaunchId: "current-launch-id" } },
+      ],
     },
   ),
   operation(

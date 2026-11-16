@@ -2415,6 +2415,41 @@ describe("readCodexConversationTail", () => {
     vi.restoreAllMocks();
   });
 
+  describe("pinned to a thread id", () => {
+    const pinnedDir = () =>
+      makeMultiFileSessionsDir([
+        {
+          filename: "rollout-own.jsonl",
+          content: rollout([sessionMeta("thread-own"), userLine("mine")]),
+          mtimeMs: Date.parse("2026-06-28T08:00:00.000Z"),
+        },
+        {
+          filename: "rollout-other.jsonl",
+          content: rollout([sessionMeta("thread-other"), userLine("theirs")]),
+          mtimeMs: Date.parse("2026-06-28T09:00:00.000Z"),
+        },
+      ]);
+
+    it("reads the owning rollout, not the newer rollout of another thread", async () => {
+      const sessionsDir = await pinnedDir();
+
+      const tail = await readCodexConversationTail(sessionsDir, undefined, "thread-own");
+      const entries = await readCodexTranscriptEntries(sessionsDir, "thread-own");
+
+      expect(tail?.reader.filePath).toBe(rolloutPath(sessionsDir, "rollout-own.jsonl"));
+      expect(tail?.reader.cursor.mtimeMs).toBe(Date.parse("2026-06-28T08:00:00.000Z"));
+      expect(JSON.stringify(tail?.entries)).toContain("mine");
+      expect(JSON.stringify(entries)).not.toContain("theirs");
+    });
+
+    it("reads nothing when no rollout belongs to the thread", async () => {
+      const sessionsDir = await pinnedDir();
+
+      expect(await readCodexConversationTail(sessionsDir, undefined, "thread-gone")).toBeNull();
+      expect(await readCodexTranscriptEntries(sessionsDir, "thread-gone")).toBeNull();
+    });
+  });
+
   it("returns the cached window without reading or parsing an unchanged rollout", async () => {
     const lines = [userLine("one"), toolCall("call-a"), toolOutput("call-a", "out")];
     const sessionsDir = await makeSessionsDir(rollout(lines));

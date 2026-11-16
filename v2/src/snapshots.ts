@@ -109,7 +109,7 @@ export const SNAPSHOT_REMINDER_PREFIXES: readonly string[] = [
 
 /** RegExp source matching a command that touches the session's Spur tools. The hook script embeds it. */
 export const SPUR_SESSION_TOOL_PATTERN =
-  "SPUR_(?:TODO|SNAPSHOT|SLOT)_COMMAND|SPUR_SESSION_TOOL_DIR|/session-tools/|spur-(?:todo|snapshot|slots)";
+  "SPUR_(?:TODO|SNAPSHOT|SLOT|STATUS)_COMMAND|SPUR_SESSION_TOOL_DIR|/session-tools/|spur-(?:todo|snapshot|slots|status)";
 
 const SPUR_SESSION_TOOL_REGEX = new RegExp(SPUR_SESSION_TOOL_PATTERN);
 
@@ -165,6 +165,15 @@ function isSpurToolEntry(entry: Extract<TranscriptEntry, { kind: "tool" }>): boo
 }
 
 /**
+ * One work classification: in a Spur-reminder turn only non-Spur tool calls count, in any other
+ * turn every non-user entry counts, Spur tool calls included.
+ */
+function countsAsWork(entry: TranscriptEntry, reminderTurn: boolean): boolean {
+  if (entry.kind === "message" && entry.role === "user") return false;
+  return !reminderTurn || (entry.kind === "tool" && !isSpurToolEntry(entry));
+}
+
+/**
  * Newest agent work above floorMs, walking entries backward. A user message opens a turn; in a
  * Spur-reminder turn only non-Spur tool calls count, never text, reasoning or Spur calls.
  * workMs is null when nothing counts; complete is false when the slice ended before the answer
@@ -210,7 +219,7 @@ export function lastAgentWorkMs(
       pending.push(untimedActivityMs);
       continue;
     } else if (ts > floorMs) {
-      if (entry.kind === "tool" && !isSpurToolEntry(entry)) return { workMs: ts, complete: true };
+      if (countsAsWork(entry, true)) return { workMs: ts, complete: true };
       pending.push(ts);
       continue;
     }
@@ -224,6 +233,37 @@ export function lastAgentWorkMs(
     : { workMs: null, complete: false };
 }
 
+/**
+ * First agent work above floorMs, scanning forward, same classification as lastAgentWorkMs.
+ * complete is false when the slice may hide earlier work or the turn opener of the first
+ * counting entry: no entry at or below the floor precedes it, or its opener is not in the slice
+ * (unless atStart). The caller then rescans the full transcript. Untimed entries never count.
+ */
+export function firstAgentWorkMs(
+  entries: readonly TranscriptEntry[],
+  options: { floorMs: number; atStart: boolean },
+): { workMs: number | null; complete: boolean } {
+  const { floorMs, atStart } = options;
+  let opener: "none" | "reminder" | "user" = "none";
+  let seenFloor = false;
+  let seenTimed = false;
+  for (const entry of entries) {
+    const ts = entry.timestampMs;
+    if (ts !== undefined) {
+      seenTimed = true;
+      if (ts <= floorMs) seenFloor = true;
+    }
+    if (entry.kind === "message" && entry.role === "user") {
+      opener = isSpurReminder(entry.text) ? "reminder" : "user";
+      continue;
+    }
+    if (ts === undefined || ts <= floorMs) continue;
+    if (!atStart && (!seenFloor || opener === "none")) return { workMs: null, complete: false };
+    if (countsAsWork(entry, opener === "reminder")) return { workMs: ts, complete: true };
+  }
+  return { workMs: null, complete: atStart || seenFloor || !seenTimed };
+}
+
 export function snapshotDir(dataDir: string, sessionId: string, project?: string): string {
   const live = join(dataDir, "sessions", sessionId);
   if (!existsSync(live) && project) {
@@ -231,6 +271,26 @@ export function snapshotDir(dataDir: string, sessionId: string, project?: string
     if (existsSync(archived)) return join(archived, "snapshots");
   }
   return join(live, "snapshots");
+}
+
+export type SnapshotLocation = "live" | "archived";
+
+/**
+ * Explicit owner location. snapshotDir guesses from which directory exists, and logging recreates
+ * an empty live directory for archived ids, so readers resolve the record first and pass this.
+ */
+export function snapshotDirAt(
+  dataDir: string,
+  session: Pick<SessionRecord, "id" | "project">,
+  location: SnapshotLocation,
+): string {
+  return location === "live"
+    ? join(dataDir, "sessions", session.id, "snapshots")
+    : join(dataDir, "sessions-archive", session.project, session.id, "snapshots");
+}
+
+export function snapshotAgeSeconds(at: string, nowMs: number): number {
+  return Math.max(0, Math.floor((nowMs - Date.parse(at)) / 1000));
 }
 
 function listVersions(dir: string): number[] {
@@ -297,9 +357,76 @@ function toMeta(snapshot: WorkSnapshot): WorkSnapshotMeta {
   return meta;
 }
 
-export function listSnapshots(dataDir: string, session: SessionRecord): WorkSnapshotMeta[] {
-  const dir = snapshotDir(dataDir, session.id, session.project);
-  return listVersions(dir).map((version) => toMeta(readVersion(dir, session.id, version)));
+export interface SnapshotListQuery {
+  order: "asc" | "desc";
+  limit?: number;
+  /** Exclusive upper version bound. */
+  before?: number;
+  /** Exclusive lower version bound. */
+  after?: number;
+}
+
+const MAX_SNAPSHOT_LIST_LIMIT = 100;
+
+function singleParam(params: URLSearchParams, key: string): string | undefined {
+  const values = params.getAll(key);
+  if (values.length > 1) throw new InvalidSnapshotRequestError(`${key} may be given once`);
+  return values[0];
+}
+
+function integerParam(params: URLSearchParams, key: string, max?: number): number | undefined {
+  const raw = singleParam(params, key);
+  if (raw === undefined) return undefined;
+  const value = /^[1-9][0-9]*$/.test(raw) ? Number(raw) : 0;
+  if (!Number.isSafeInteger(value) || value < 1 || (max !== undefined && value > max)) {
+    throw new InvalidSnapshotRequestError(
+      `${key} must be a positive integer${max === undefined ? "" : ` up to ${max}`}`,
+    );
+  }
+  return value;
+}
+
+/** Query of GET /sessions/:id/snapshots; no parameters means every version, oldest first. */
+export function parseSnapshotListQuery(params: URLSearchParams): SnapshotListQuery {
+  const order = singleParam(params, "order") ?? "asc";
+  if (order !== "asc" && order !== "desc") {
+    throw new InvalidSnapshotRequestError('order must be "asc" or "desc"');
+  }
+  const limit = integerParam(params, "limit", MAX_SNAPSHOT_LIST_LIMIT);
+  const before = integerParam(params, "before");
+  const after = integerParam(params, "after");
+  return {
+    order,
+    ...(limit !== undefined ? { limit } : {}),
+    ...(before !== undefined ? { before } : {}),
+    ...(after !== undefined ? { after } : {}),
+  };
+}
+
+export function parseSnapshotIncludeDone(params: URLSearchParams): boolean {
+  const raw = singleParam(params, "includeDone");
+  if (raw !== undefined && raw !== "1")
+    throw new InvalidSnapshotRequestError("includeDone must be 1");
+  return raw === "1";
+}
+
+/** Versions in the range, ordered, first `limit`; reads only the selected files. */
+export function listSnapshots(
+  dataDir: string,
+  session: SessionRecord,
+  location: SnapshotLocation,
+  query: SnapshotListQuery,
+): WorkSnapshotMeta[] {
+  const dir = snapshotDirAt(dataDir, session, location);
+  const { before, after } = query;
+  const versions = listVersions(dir).filter(
+    (version) =>
+      (before === undefined || version < before) && (after === undefined || version > after),
+  );
+  if (query.order === "desc") versions.reverse();
+  return versions
+    .slice(0, query.limit)
+    .map((version) => toMeta(readVersion(dir, session.id, version)));
 }
 
 /** Undefined when the requested version (or any version for `latest`) does not exist. */
@@ -307,8 +434,9 @@ export function readSnapshot(
   dataDir: string,
   session: SessionRecord,
   version: number | "latest",
+  location: SnapshotLocation,
 ): WorkSnapshot | undefined {
-  const dir = snapshotDir(dataDir, session.id, session.project);
+  const dir = snapshotDirAt(dataDir, session, location);
   const target = version === "latest" ? listVersions(dir).at(-1) : version;
   if (target === undefined || !existsSync(join(dir, `${target}.json`))) return undefined;
   return readVersion(dir, session.id, target);

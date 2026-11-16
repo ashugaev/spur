@@ -19,6 +19,7 @@ export type SessionStatus = (typeof SESSION_STATUSES)[number];
 export const SESSION_STATES = [
   "working",
   "waiting",
+  "completed",
   "needs_input",
   "rate_limited",
   "stale",
@@ -36,7 +37,31 @@ export function isStaleParked(session: Pick<SessionRecord, "status" | "stopReaso
   return session.status === "stopped" && session.stopReason === "stale_timeout";
 }
 
-export type StateSource = "jsonl" | "codex_stale" | "hook" | "claude_status" | "status";
+export type StateSource =
+  | "jsonl"
+  | "codex_stale"
+  | "hook"
+  | "claude_status"
+  | "status"
+  | "task_status";
+
+export interface TaskStatusDeclaration {
+  state: "completed" | "needs_input";
+  revision: number;
+  agentLaunchId: string;
+  updatedAt: string;
+}
+
+export interface TaskStatusView {
+  revision: number;
+  state?: TaskStatusDeclaration["state"];
+}
+
+export interface TaskStatusRequest {
+  state: TaskStatusDeclaration["state"] | "clear";
+  revision: number;
+  agentLaunchId: string;
+}
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -270,7 +295,7 @@ export interface AvailableBacklogItem {
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
 
 interface WorkItemLifecycleBase extends WorkItemEventData {
-  autoComplete: boolean;
+  autoClose: boolean;
   createdAt: string;
 }
 
@@ -605,7 +630,7 @@ export interface TriggerSpawnBlockConfig {
 
 export interface TriggerSpawnConfig {
   blocks: TriggerSpawnBlockConfig[];
-  autoComplete?: boolean;
+  autoClose?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
 }
@@ -1294,6 +1319,8 @@ export interface SessionRecord {
   launchCommand: string;
   /** Opaque identity shared only by one agent launch and its process tree. */
   agentLaunchId?: string;
+  taskStatusRevision?: number;
+  taskStatus?: TaskStatusDeclaration;
   status: SessionStatus;
   /** "memory_shed" is written only by the critical memory shed's session stop. */
   stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget" | "runtime_lost";
@@ -1494,6 +1521,8 @@ export interface SessionView extends Omit<
   | "prAlertTransfer"
   | "agentLaunchId"
   | "claudeStatusOwner"
+  | "taskStatusRevision"
+  | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
   | "blockedTriggerNotices"
@@ -1562,6 +1591,8 @@ export type DashboardOmittedField =
   | "agentSessionId"
   | "agentLaunchId"
   | "claudeStatusOwner"
+  | "taskStatusRevision"
+  | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
   | "blockedTriggerNotices"
@@ -1856,6 +1887,11 @@ export type TodoActor =
 
 export type TodoBlocker = { kind: "external" } | { kind: "human"; requiredAction: string };
 
+export interface TodoHandoffRef {
+  sessionId: string;
+  itemId: string;
+}
+
 interface TodoEventBase {
   version: 1;
   eventId: string;
@@ -1870,11 +1906,18 @@ export type TodoEvent =
       itemId: string;
       text: string;
       reason: string;
+      handoffFrom?: TodoHandoffRef;
     })
   | (TodoEventBase & {
-      type: "item_completed" | "item_cancelled";
+      type: "item_completed";
       itemId: string;
       reason: string;
+    })
+  | (TodoEventBase & {
+      type: "item_cancelled";
+      itemId: string;
+      reason: string;
+      handoffTo?: TodoHandoffRef;
     })
   | (TodoEventBase & {
       type: "item_held";
@@ -1897,6 +1940,8 @@ export interface TodoItemProjection {
   text: string;
   status: "open" | "held" | "completed" | "cancelled";
   added: { reason: string; actor: TodoActor; at: string };
+  handoffFrom?: TodoHandoffRef;
+  handoffTo?: TodoHandoffRef;
   latestTransition?: {
     type: "completed" | "cancelled" | "held" | "resumed";
     reason?: string;
@@ -1954,6 +1999,31 @@ export interface WorkSnapshotMeta {
 
 export interface WorkSnapshot extends WorkSnapshotMeta {
   content: string;
+}
+
+export interface WorkSnapshotFreshness {
+  /** Whole seconds since the snapshot, never negative. */
+  ageSeconds: number;
+  /** ISO instant of the agent's first own work after `at`; null when none. */
+  activitySince: string | null;
+  /** Commits on HEAD after the snapshot's headSha; null when not countable. */
+  commitsSince: number | null;
+  /** The agent worked more than freshnessMinutes after `at`. */
+  stale: boolean;
+}
+
+export interface WorkSnapshotRead extends WorkSnapshot {
+  freshness: WorkSnapshotFreshness;
+  /** Completed ToDo items; present only when requested. Null: ledger unreadable. */
+  done?: TodoItemProjection[] | null;
+}
+
+export interface LatestSnapshotEntry {
+  sessionId: string;
+  status: SessionStatus;
+  /** Last observed state, not re-checked; null when never observed. */
+  state: SessionState | null;
+  snapshot: WorkSnapshotRead;
 }
 
 export interface WriteSnapshotRequest {
@@ -2023,6 +2093,10 @@ export interface HandoffSessionRequest {
   model?: string;
   reasoningEffort?: ProviderReasoningEffort | null;
   notes?: string;
+}
+
+export interface HandoffSessionResponse extends SessionView {
+  movedTodoItems: number;
 }
 
 export interface UpdateSessionSlotsRequest {

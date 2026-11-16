@@ -127,6 +127,7 @@ import {
   findLatestCodexSessionFile,
   readCodexConversationTail,
   readCodexRolloutState,
+  readCodexTranscriptEntries,
   type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
@@ -206,6 +207,7 @@ import {
   extractBareUserTask,
   renderHandoffPrompt,
   wrapShepherdSpawnPrompt,
+  type HandoffPromptSnapshot,
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import {
@@ -295,6 +297,7 @@ import {
   writeSession,
   observeSessionWrites,
   withSessionWriteGuard,
+  listArchivedSessions,
 } from "./metadata.js";
 import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
@@ -355,6 +358,7 @@ import {
   SLOT_TOOL_NAME,
   SNAPSHOT_TOOL_NAME,
   TODO_TOOL_NAME,
+  TASK_STATUS_TOOL_NAME,
   applyNormalizedSlotsUpdate,
   applySlotsUpdate,
   ensureSessionSlotTool,
@@ -527,6 +531,7 @@ import {
   type ProjectBranchNamingConfig,
   type ProjectConfig,
   type HandoffSessionRequest,
+  type HandoffSessionResponse,
   type RespawnSessionRequest,
   type RestoreSessionRequest,
   type RunServiceRequest,
@@ -611,11 +616,30 @@ import {
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
   type TodoProjection,
+  type LatestSnapshotEntry,
+  type SessionLinkFilter,
+  type TodoItemProjection,
   type WorkSnapshot,
+  type WorkSnapshotFreshness,
   type WorkSnapshotMeta,
+  type TaskStatusRequest,
+  type TaskStatusView,
+  type WorkSnapshotRead,
 } from "./types.js";
 import {
+  clearTaskStatus,
+  projectTaskStatus,
+  readTaskStatus as taskStatusView,
+  TaskStatusError,
+} from "./task-status.js";
+import {
+  closeTodoItems,
   ensureTodoLedger,
+  inheritTodo,
+  planHandoffReconcile,
+  planHandoffTodo,
+  readTodoIfPresent,
+  type HandoffTodoItem,
   mutateTodo as applyTodoMutation,
   TodoEmptyLedgerError,
   TodoLedgerCorruptError,
@@ -627,7 +651,10 @@ import {
 import {
   listSnapshots,
   readSnapshot as readSnapshotVersion,
+  firstAgentWorkMs,
   lastAgentWorkMs,
+  snapshotAgeSeconds,
+  snapshotDirAt,
   snapshotDue,
   snapshotGateBlock,
   snapshotRequestMessage,
@@ -636,6 +663,8 @@ import {
   SnapshotConflictError,
   SnapshotCorruptError,
   WorkSnapshotRequiredError,
+  type SnapshotListQuery,
+  type SnapshotLocation,
 } from "./snapshots.js";
 import { cursorShowsReadyPrompt } from "./cursor-state.js";
 import { readCursorTokenUsage } from "./cursor-token-usage.js";
@@ -666,11 +695,13 @@ import {
   isGitWorktree,
   readCurrentBranch,
   readWorktreeHead,
+  countCommitsSince,
   removeWorktree,
   workspaceExists,
   probeWorkspace,
   worktreePathFor,
 } from "./workspace.js";
+import { createConcurrencyGate } from "./concurrency-gate.js";
 import { renderSelfMarker } from "./review-providers/github.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 import { getVersion } from "./version.js";
@@ -681,6 +712,8 @@ import { startDeploySwitch } from "./deploy-switch.js";
 import { getReleases } from "./releases-cache.js";
 import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./update-ledger.js";
 
+// Concurrent freshness reads for one by-link snapshot request.
+const SNAPSHOT_READ_CONCURRENCY = 4;
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const STATUS_DETECTION_ERROR_PREFIX = "Session status detection failed: ";
 const REPORTING_DETECTION_ERROR_PREFIX = STATUS_DETECTION_ERROR_PREFIX + "Resource readout ";
@@ -1127,6 +1160,23 @@ export class GithubPrCheckUnavailableError extends Error {
   }
 }
 
+export class HandoffTargetNotStalledError extends Error {
+  readonly statusCode = 403;
+  readonly code = "handoff_target_not_stalled";
+  readonly payload: {
+    code: "handoff_target_not_stalled";
+    sessionId: string;
+    status: string;
+    error: string;
+  };
+
+  constructor(sessionId: string, status: string) {
+    const message = `Session ${sessionId} is ${status}, not stalled. An agent can hand off only its own session, or another session that is stopped, paused, errored, rate limited or erroring.`;
+    super(message);
+    this.payload = { code: this.code, sessionId, status, error: message };
+  }
+}
+
 export class SessionNotRestorableError extends Error {
   readonly statusCode = 409;
   readonly payload: SessionNotRestorablePayload;
@@ -1431,7 +1481,17 @@ type HandoffSourceStamp = Pick<
   "id" | "workspaceId" | "status" | "stopReason" | "updatedAt" | "tmuxSession"
 >;
 
+type HandoffEventDetails = {
+  actor: TodoActor | null;
+  callerSessionId?: string;
+  movedItems: Array<{ from: string; to: string }>;
+  snapshotVersion?: number;
+  snapshotGate?: "applied" | "skipped_source_cannot_write";
+};
+
 type PreparedHandoff = {
+  inheritedTodo: HandoffTodoItem[];
+  handoffDetails: HandoffEventDetails;
   token: symbol;
   lifecycleIds: string[];
   sourceStamp: HandoffSourceStamp;
@@ -1449,6 +1509,7 @@ type PreparedHandoff = {
     closeoutOwnerTransfer: boolean;
     validatedLaunchSelection: AgentLaunchSelection;
     receiptToken: symbol;
+    inheritedTodo?: HandoffTodoItem[];
   };
 };
 
@@ -2592,7 +2653,7 @@ function buildInitialMessage(
   if (branchNamingRegex) {
     base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
   }
-  const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty. You own every item; nothing is added for you.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
+  const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty unless a handoff moved items to you (listed under Inherited ToDo). You own every item.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, self-destruct, or hand off yourself with an empty ledger; cannot finish or self-destruct with open/held work. Handoff moves open/held items to the successor.`;
   const snapshotInstructions = `Spur snapshot:\n- Keep a backward-looking Markdown snapshot of your work: \`"$SPUR_SNAPSHOT_COMMAND" write --file <path>\` (\`--file -\` reads stdin). Each write stores a full new version.\n- Write one after each finished step and before you stop. Suggested sections: Now, Established, Tried, Next, Questions and risks, References.\n- When the project requires it, finishing or self-destruct needs a \`--final\` snapshot written after your last ToDo change; handoff needs any snapshot written after it.`;
   base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
   base = `${base}\n\n${snapshotInstructions}`;
@@ -2863,6 +2924,7 @@ function buildSessionEnv(args: {
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_TODO_COMMAND: join(args.sessionToolDir, TODO_TOOL_NAME),
     SPUR_SNAPSHOT_COMMAND: join(args.sessionToolDir, SNAPSHOT_TOOL_NAME),
+    SPUR_STATUS_COMMAND: join(args.sessionToolDir, TASK_STATUS_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
@@ -3409,6 +3471,8 @@ interface SessionSpawnOptions {
   closeoutOwnerTransfer?: boolean;
   prAlertOwnerTransfer?: PrAlertTransfer;
   receiptToken?: symbol;
+  /** Handoff only: source ToDo items written into the successor ledger before launch. */
+  inheritedTodo?: HandoffTodoItem[];
   /** HTTP accepts a spawning identity when admission must wait. */
   acceptQueued?: boolean;
   /** Set by source adapters, never from the HTTP body. */
@@ -4079,6 +4143,9 @@ export class SessionService {
       phase: "waiting" | "activating";
     }
   >();
+  // Successor id -> source id while a handoff is in flight: the successor cannot be handed off
+  // itself until its own handoff settles (it would kill the pane the finalize still checks).
+  private readonly handoffSuccessors = new Map<string, string>();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
@@ -4174,6 +4241,8 @@ export class SessionService {
     string,
     { activityMs: number; floorMs: number; workMs: number | null }
   >();
+  // First agent work after a live session's snapshot, valid for that snapshot version.
+  private readonly firstWorkCache = new Map<string, { version: number; workMs: number }>();
   // Live sessions whose tools this daemon process already rewrote.
   private readonly toolsRefreshed = new Set<string>();
   private readonly toolsRefreshFailedLogged = new Set<string>();
@@ -6454,9 +6523,12 @@ export class SessionService {
         (entry) => !removeIds.has(entry.id),
       ),
     }));
-    this.protectDurableSpawns();
+    const sessions = listSessions(this.config.dataDir);
+    this.protectDurableSpawns(sessions);
+    this.rollbackUnlaunchedHandoffCopies(sessions);
     queueMicrotask(() => {
       if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverDurableSpawns());
+      if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverHandoffTodo(sessions));
     });
     this.resumeSessionDelivery();
   }
@@ -6747,6 +6819,13 @@ export class SessionService {
     return createRuntimeInfo(this.config, this.startedAt, this.lifecycle.instanceId);
   }
 
+  // Handoff: the spawned session is not a target, so the result passes through untouched.
+  private runLifecycle(
+    action: LifecycleAction,
+    targetIds: string[],
+    operationId: string | undefined,
+    work: () => Promise<HandoffSessionResponse>,
+  ): Promise<HandoffSessionResponse>;
   private runLifecycle(
     action: LifecycleAction,
     targetIds: string[],
@@ -8047,7 +8126,7 @@ export class SessionService {
             }
             continue;
           }
-          await this.checkPrForSession(session, view.state);
+          await this.checkPrForSession(session, classified.state);
           if (this.isDeliveryStopped()) return;
           if (detectionOnlyError) {
             const previousAttention = this.attentionStates.get(view.id);
@@ -8079,7 +8158,7 @@ export class SessionService {
             shouldParkForStale(
               {
                 status: view.status,
-                state: view.state,
+                state: classified.state,
                 lastActivityAt: parkActivityAt.toISOString(),
               },
               this.resolveStaleAfterMs(session),
@@ -8192,6 +8271,9 @@ export class SessionService {
     }
     for (const sessionId of this.snapshotWorkCache.keys()) {
       if (!liveIds.has(sessionId)) this.snapshotWorkCache.delete(sessionId);
+    }
+    for (const sessionId of this.firstWorkCache.keys()) {
+      if (!liveIds.has(sessionId)) this.firstWorkCache.delete(sessionId);
     }
     for (const sessionId of this.toolsRefreshed) {
       if (!liveIds.has(sessionId)) this.toolsRefreshed.delete(sessionId);
@@ -10193,7 +10275,7 @@ export class SessionService {
     if (!settings.enabled || activityAt === null) return null;
     let latest;
     try {
-      latest = readSnapshotVersion(this.config.dataDir, session, "latest");
+      latest = readSnapshotVersion(this.config.dataDir, session, "latest", "live");
     } catch (error) {
       // prepareSnapshotRequest logs the corrupt snapshot.
       if (error instanceof SnapshotCorruptError) return activityAt;
@@ -10250,7 +10332,7 @@ export class SessionService {
     if (workAt === null) return null;
     let latest;
     try {
-      latest = readSnapshotVersion(this.config.dataDir, session, "latest");
+      latest = readSnapshotVersion(this.config.dataDir, session, "latest", "live");
     } catch (error) {
       if (!(error instanceof SnapshotCorruptError)) throw error;
       if (this.snapshotCorruptLogged.get(session.id) !== error.version) {
@@ -14092,6 +14174,7 @@ export class SessionService {
     let prAlertReservation: string | undefined;
     let prAlertLaunchStarted = false;
     let prAlertBirthConfirmed = false;
+    let inheritedWritten = false;
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
     let resolvedModel: string | undefined;
@@ -14227,6 +14310,9 @@ export class SessionService {
         ? await this.preflightUsageStore.claim(preflightBatchId, request.project, sessionId)
         : aggregatePreflightAttempts([]);
       this.spawnsInFlight.add(sessionId);
+      if (options?.replacingSessionId) {
+        this.handoffSuccessors.set(sessionId, options.replacingSessionId);
+      }
       if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -14363,6 +14449,10 @@ export class SessionService {
       );
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
+      if (options?.inheritedTodo?.length) {
+        inheritedWritten = true;
+        inheritTodo(this.config.dataDir, placeholder, options.inheritedTodo);
+      }
       // Before the launch prompt exists: an agent that replies ahead of the
       // source's own bind step must answer the chat that asked for it.
       if (options?.telegramOrigin) {
@@ -14593,6 +14683,10 @@ export class SessionService {
         );
         launchCandidate = runningRecord;
         prAlertLaunchStarted = true;
+        // The prompt leaves with the process start when it rides the launch command, so the
+        // launch evidence (`agentLaunchId`, read by handoff recovery) must be durable first.
+        if (promptDeliveredOnLaunch)
+          this.writeSpawnRecord({ ...runningRecord, status: "spawning" });
         await createTmuxSession({
           sessionName: tmuxSession,
           cwd: workspacePath,
@@ -14609,6 +14703,8 @@ export class SessionService {
           runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
         }
         launchedRecord = runningRecord;
+        // This write persists `agentLaunchId` before the launch prompt is sent: handoff recovery
+        // reads it as the evidence that the successor began its launch and owns its ToDo copies.
         this.writeSpawnRecord({ ...runningRecord, status: "spawning" });
         this.logEvent("session.spawn.tmux_created", {
           level: "info",
@@ -14766,6 +14862,29 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
+      // Handoff copies must not outlive a failed successor: the source keeps the open items.
+      const inheritedItems = options?.inheritedTodo;
+      const failedLifecycleIds = (failedId: string): string[] =>
+        this.lifecycleIdsFor({
+          id: failedId,
+          workspaceId: reuseCtx?.workspaceId ?? failedId,
+          ...(options?.prAlertOwnerTransfer
+            ? { prAlertTransfer: options.prAlertOwnerTransfer }
+            : {}),
+        });
+      let rolledBack = false;
+      const rollbackInherited = (failedId: string, failedProject: string): void => {
+        if (!inheritedWritten || rolledBack || !inheritedItems) return;
+        rolledBack = true;
+        this.rollbackInheritedTodoLocked({ id: failedId, project: failedProject }, inheritedItems);
+      };
+      const rollbackInheritedLocking = async (): Promise<void> => {
+        if (!inheritedWritten || !sessionId) return;
+        const failedId = sessionId;
+        await this.withSessionLifecycleLocks(failedLifecycleIds(failedId), async () =>
+          rollbackInherited(failedId, request.project),
+        );
+      };
       if (error instanceof SpawnAdmissionCancelledError) throw error;
       const failureReceipt = options?.receiptToken
         ? this.foregroundSpawnReceipts.get(options.receiptToken)
@@ -14784,7 +14903,10 @@ export class SessionService {
       }
       if (launchedRecord && !failureReceipt && !(sessionId && this.spawnWasKilled(sessionId))) {
         const retained = await this.retainLaunchedError(launchedRecord, error);
-        if (!isTerminalSessionStatus(retained.status)) throw error;
+        if (!isTerminalSessionStatus(retained.status)) {
+          await rollbackInheritedLocking();
+          throw error;
+        }
       }
       if (sessionId && project && placeholderState.written && agent) {
         const failedSessionId = sessionId;
@@ -14812,6 +14934,7 @@ export class SessionService {
             },
             { failOnSurvivors: false },
           );
+          rollbackInherited(sessionId, request.project);
           await this.terminateDetachedSessionProcesses({ id: sessionId });
           // Non-mcp project sidecars are desk-shared: a sibling can already be
           // attached to this still-spawning anchor (or, for a failing sibling,
@@ -14935,6 +15058,7 @@ export class SessionService {
                   workspaceIdOf(latest) !== failureReceipt.workspaceId ||
                   !(await this.paneGenerationMatches(latest, failureReceipt.generation))
                 ) {
+                  rollbackInherited(failureReceipt.sessionId, request.project);
                   const message = error instanceof Error ? error.message : String(error);
                   throw new Error(
                     `Failed to spawn ${sessionId}: ${message}; successor generation changed before cleanup`,
@@ -14947,13 +15071,7 @@ export class SessionService {
           );
         }
         return await this.withSessionLifecycleLocks(
-          this.lifecycleIdsFor({
-            id: sessionId,
-            workspaceId: reuseCtx?.workspaceId ?? sessionId,
-            ...(options?.prAlertOwnerTransfer
-              ? { prAlertTransfer: options.prAlertOwnerTransfer }
-              : {}),
-          }),
+          failedLifecycleIds(sessionId),
           cleanupFailedSpawn,
         );
       }
@@ -15176,7 +15294,13 @@ export class SessionService {
         id: classified.session.id,
         agent: classified.session.agent,
         status: classified.session.status,
-        state: this.stabilizeState(classified.session.id, classified.state),
+        state: projectTaskStatus(
+          classified.session,
+          classified.state,
+          this.stabilizeState(classified.session.id, classified.state),
+          classified.runtime.runtimeAlive,
+          classified.workspacePresent,
+        ),
         runtimeAlive: classified.runtime.runtimeAlive,
       });
     }
@@ -16827,8 +16951,10 @@ export class SessionService {
     }
   }
 
-  private protectDurableSpawns(): void {
-    for (const record of listSessions(this.config.dataDir).sort((a, b) =>
+  private protectDurableSpawns(
+    sessions: readonly SessionRecord[] = listSessions(this.config.dataDir),
+  ): void {
+    for (const record of [...sessions].sort((a, b) =>
       (a.spawnReceipt?.acceptedAt ?? a.createdAt).localeCompare(
         b.spawnReceipt?.acceptedAt ?? b.createdAt,
       ),
@@ -18631,7 +18757,16 @@ export class SessionService {
       return record;
     }
     const record = withQueuedMessages(
-      { ...acceptedBase, updatedAt: nowIso() },
+      {
+        ...clearTaskStatus(
+          {
+            ...acceptedBase,
+            taskStatusRevision: latest.taskStatusRevision ?? 0,
+          },
+          true,
+        ),
+        updatedAt: nowIso(),
+      },
       [...latestQueued, message],
       awaitingPrompt,
     );
@@ -19383,6 +19518,13 @@ export class SessionService {
             (await this.paneGenerationMatches(current, prepared.generation)),
           );
         });
+      let taskRevisionRetired = false;
+      const retireTaskRevision = (current: SessionRecord): void => {
+        if (taskRevisionRetired) return;
+        writeSession(this.config.dataDir, clearTaskStatus(current, true));
+        this.dashboardCache.delete(sessionId);
+        taskRevisionRetired = true;
+      };
       const authorizeGenerationResend = (send: () => Promise<void>) =>
         this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           const current = readSession(this.config.dataDir, sessionId);
@@ -19394,6 +19536,7 @@ export class SessionService {
             return false;
           }
           if (options?.allowDelivery?.() === false) return false;
+          retireTaskRevision(current);
           options?.observeDelivery?.("input-started");
           await send();
           return true;
@@ -19458,6 +19601,7 @@ export class SessionService {
                 return false;
               }
               if (options?.allowDelivery?.() === false) return false;
+              retireTaskRevision(current);
               options?.observeDelivery?.("input-started");
               await send();
               return true;
@@ -19586,7 +19730,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const latest = readSession(this.config.dataDir, readySession.id) ?? readySession;
     const record = withQueuedMessages(
-      { ...readySession, status: "running", updatedAt: nowIso() },
+      { ...clearTaskStatus(latest, true), status: "running", updatedAt: nowIso() },
       [message, ...removeFirstOccurrence(queuedMessages(latest), message)],
       true,
     );
@@ -20473,6 +20617,52 @@ export class SessionService {
     });
   }
 
+  async readTaskStatus(sessionId: string): Promise<TaskStatusView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      return taskStatusView(session);
+    });
+  }
+
+  async writeTaskStatus(sessionId: string, request: TaskStatusRequest): Promise<TaskStatusView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      let session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (
+        session.status !== "running" ||
+        session.agentLaunchId !== request.agentLaunchId ||
+        (session.taskStatusRevision ?? 0) !== request.revision
+      ) {
+        throw new TaskStatusError("Task or agent launch changed", 409, "stale_task_status");
+      }
+      if (request.state === "completed") {
+        const projection = ensureTodoLedger(this.config.dataDir, session);
+        const block = todoLedgerBlock(projection);
+        if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
+        if (block) throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
+        // ensureTodoLedger can install its version marker; retain that write.
+        session = readSession(this.config.dataDir, sessionId) ?? session;
+      }
+      const record =
+        request.state === "clear"
+          ? clearTaskStatus(session)
+          : {
+              ...session,
+              taskStatus: {
+                state: request.state,
+                revision: request.revision,
+                agentLaunchId: request.agentLaunchId,
+                updatedAt: nowIso(),
+              },
+            };
+      writeSession(this.config.dataDir, record);
+      this.dashboardCache.delete(sessionId);
+      await this.refreshDashboardCacheEntry(record);
+      return taskStatusView(record);
+    });
+  }
+
   async mutateTodo(
     sessionId: string,
     request: TodoMutationRequest,
@@ -20488,20 +20678,41 @@ export class SessionService {
           "Session handoff is already in progress",
         );
       }
-      return applyTodoMutation(this.config.dataDir, session, request, actor);
+      const projection = applyTodoMutation(this.config.dataDir, session, request, actor);
+      if (request.action === "add" || request.action === "resume") {
+        const latest = readSession(this.config.dataDir, sessionId) ?? session;
+        writeSession(this.config.dataDir, clearTaskStatus(latest));
+        this.dashboardCache.delete(sessionId);
+      }
+      return projection;
     });
   }
 
-  readSnapshots(sessionId: string): WorkSnapshotMeta[] {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    return listSnapshots(this.config.dataDir, session);
+  // Snapshot reads take no lock and never touch the pane or the record: versions are write-once,
+  // and the owner location is resolved per call (live record first, then the archive).
+  private readSnapshotOwner(sessionId: string): {
+    session: SessionRecord;
+    location: SnapshotLocation;
+  } {
+    const live = readSession(this.config.dataDir, sessionId);
+    if (live) return { session: live, location: "live" };
+    const archived = readArchivedSession(this.config.dataDir, sessionId);
+    if (archived) return { session: archived, location: "archived" };
+    throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
   }
 
-  readSnapshot(sessionId: string, version: number | "latest"): WorkSnapshot {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    const snapshot = readSnapshotVersion(this.config.dataDir, session, version);
+  readSnapshots(sessionId: string, query: SnapshotListQuery): WorkSnapshotMeta[] {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    return listSnapshots(this.config.dataDir, session, location, query);
+  }
+
+  async readSnapshot(
+    sessionId: string,
+    version: number | "latest",
+    options: { includeDone: boolean },
+  ): Promise<WorkSnapshotRead> {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    const snapshot = readSnapshotVersion(this.config.dataDir, session, version, location);
     if (!snapshot) {
       throw new SessionResourceNotFoundError(
         version === "latest"
@@ -20509,7 +20720,211 @@ export class SessionService {
           : `Snapshot ${version} not found for session ${sessionId}`,
       );
     }
-    return snapshot;
+    const read = await this.withFreshness(session, location, snapshot);
+    return options.includeDone ? { ...read, done: this.doneItems(session.id) } : read;
+  }
+
+  /** One entry per session matching every link, its latest snapshot, newest first. */
+  async latestSnapshotsByLink(
+    links: readonly SessionLinkFilter[],
+    options: { includeDone: boolean },
+  ): Promise<LatestSnapshotEntry[]> {
+    const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
+      ...listSessions(this.config.dataDir).map((session) => ({
+        session,
+        location: "live" as const,
+      })),
+      ...listArchivedSessions(this.config.dataDir, (project, id) =>
+        existsSync(snapshotDirAt(this.config.dataDir, { id, project }, "archived")),
+      ).map((session) => ({ session, location: "archived" as const })),
+    ];
+    const gate = createConcurrencyGate(SNAPSHOT_READ_CONCURRENCY);
+    const entries = await Promise.all(
+      candidates
+        .filter(({ session }) =>
+          matchesSessionLinks(this.displaySlotsForSession(session)?.links ?? [], links),
+        )
+        .map(({ session, location }) =>
+          gate.run(async (): Promise<LatestSnapshotEntry | null> => {
+            const snapshot = readSnapshotVersion(this.config.dataDir, session, "latest", location);
+            if (!snapshot) return null;
+            const read = await this.withFreshness(session, location, snapshot);
+            return {
+              sessionId: session.id,
+              status: session.status,
+              state: this.transitionsBinding?.store.observedState(session.id) ?? null,
+              snapshot: options.includeDone
+                ? { ...read, done: this.tolerantDoneItems(session.id) }
+                : read,
+            };
+          }),
+        ),
+    );
+    return entries
+      .filter((entry): entry is LatestSnapshotEntry => entry !== null)
+      .sort((a, b) => Date.parse(b.snapshot.at) - Date.parse(a.snapshot.at));
+  }
+
+  private doneItems(sessionId: string): TodoItemProjection[] {
+    const projection = readTodoIfPresent(this.config.dataDir, sessionId);
+    return projection?.items.filter((item) => item.status === "completed") ?? [];
+  }
+
+  // A damaged ledger costs its own entry the done list, not the whole response.
+  private tolerantDoneItems(sessionId: string): TodoItemProjection[] | null {
+    try {
+      return this.doneItems(sessionId);
+    } catch (error) {
+      if (error instanceof TodoLedgerCorruptError) return null;
+      throw error;
+    }
+  }
+
+  private async withFreshness(
+    session: SessionRecord,
+    location: SnapshotLocation,
+    snapshot: WorkSnapshot,
+  ): Promise<WorkSnapshotRead> {
+    const freshnessMs =
+      snapshotSettings(this.resolveProjectForSession(session)).freshnessMinutes * 60_000;
+    const [activity, commitsSince] = await Promise.all([
+      this.snapshotActivity(session, location, snapshot, freshnessMs),
+      countCommitsSince(session.worktreePath, snapshot.headSha, snapshot.branch),
+    ]);
+    const freshness: WorkSnapshotFreshness = {
+      ageSeconds: snapshotAgeSeconds(snapshot.at, Date.now()),
+      activitySince:
+        activity.firstWorkMs === null ? null : new Date(activity.firstWorkMs).toISOString(),
+      commitsSince,
+      stale: snapshotDue({
+        latestAt: snapshot.at,
+        sessionCreatedAt: session.createdAt,
+        activityAt: activity.newestWorkMs === null ? null : new Date(activity.newestWorkMs),
+        freshnessMs,
+      }),
+    };
+    return { ...snapshot, freshness };
+  }
+
+  /**
+   * First and newest agent work after the snapshot, by the rule that decides snapshot requests.
+   * Transcript write time gates the entry read; Cursor and OpenCode carry no entry times, so
+   * their transcript write time stands in for the work instant.
+   */
+  private async snapshotActivity(
+    session: SessionRecord,
+    location: SnapshotLocation,
+    snapshot: WorkSnapshot,
+    freshnessMs: number,
+  ): Promise<{ firstWorkMs: number | null; newestWorkMs: number | null }> {
+    const none = { firstWorkMs: null, newestWorkMs: null };
+    const floorMs = Date.parse(snapshot.at);
+    const cached = location === "live" ? this.firstWorkCache.get(session.id) : undefined;
+    const cachedFirstMs = cached?.version === snapshot.version ? cached.workMs : null;
+    // Newest work is never earlier than the first, so a late first work already makes it stale.
+    if (cachedFirstMs !== null && cachedFirstMs - floorMs > freshnessMs) {
+      return { firstWorkMs: cachedFirstMs, newestWorkMs: cachedFirstMs };
+    }
+    let slice: { entries: TranscriptEntry[]; startIndex: number } | null = null;
+    let activityMs: number | null;
+    if (session.agent === "claude" || session.agent === "codex") {
+      const tail = await this.readTranscriptTail(session, location);
+      if (!tail) return { firstWorkMs: cachedFirstMs, newestWorkMs: cachedFirstMs };
+      slice = tail;
+      activityMs = tail.mtimeMs;
+    } else {
+      activityMs = await this.untimedTranscriptActivityMs(session);
+    }
+    if (activityMs === null || activityMs <= floorMs) return none;
+    const untimedActivityMs = activityMs;
+    let fullEntries: Promise<TranscriptEntry[]> | undefined;
+    const scan = async (
+      run: (
+        entries: readonly TranscriptEntry[],
+        atStart: boolean,
+      ) => { workMs: number | null; complete: boolean },
+    ): Promise<number | null> => {
+      if (slice) {
+        const result = run(slice.entries, slice.startIndex === 0);
+        if (result.complete) return result.workMs;
+      }
+      fullEntries ??=
+        session.agent === "codex" && session.agentSessionId
+          ? readCodexTranscriptEntries(
+              this.codexSessionsDir(session.id),
+              session.agentSessionId,
+            ).then((entries) => entries ?? [])
+          : this.readFullConversationEntries(session);
+      return run(await fullEntries, true).workMs;
+    };
+    let firstWorkMs = cachedFirstMs;
+    if (firstWorkMs === null) {
+      firstWorkMs = await scan((entries, atStart) =>
+        firstAgentWorkMs(entries, { floorMs, atStart }),
+      );
+      if (firstWorkMs !== null && location === "live") {
+        this.firstWorkCache.set(session.id, { version: snapshot.version, workMs: firstWorkMs });
+      }
+    }
+    const newestWorkMs = await scan((entries, atStart) =>
+      lastAgentWorkMs(entries, { untimedActivityMs, floorMs, atStart }),
+    );
+    return {
+      firstWorkMs: firstWorkMs ?? newestWorkMs,
+      newestWorkMs: newestWorkMs ?? firstWorkMs,
+    };
+  }
+
+  // Live sessions share the incremental reader; archived ones bypass every reader map, which
+  // only eviction at archive time would ever clear.
+  private async readTranscriptTail(
+    session: SessionRecord,
+    location: SnapshotLocation,
+  ): Promise<{ entries: TranscriptEntry[]; startIndex: number; mtimeMs: number } | null> {
+    if (session.agent === "codex") {
+      // Pinned to the owning thread's rollout: the shared reader also follows the newest
+      // rollout in the global dir. It reuses a live cursor but never stores one.
+      if (!session.agentSessionId) return null;
+      const result = await readCodexConversationTail(
+        this.codexSessionsDir(session.id),
+        location === "live" ? this.codexConversationReaders.get(session.id) : undefined,
+        session.agentSessionId,
+      );
+      return result && { ...result, mtimeMs: result.reader.cursor.mtimeMs };
+    }
+    if (location === "live") {
+      const tail = await this.readConversationSerialized(session);
+      // The serialized read leaves its reader in the map; the reader carries the file's write time.
+      const mtimeMs = this.conversationReaders.get(session.id)?.lastMtimeMs;
+      return tail && mtimeMs !== undefined ? { ...tail, mtimeMs } : null;
+    }
+    const result = await readClaudeConversationTail(
+      session.worktreePath,
+      undefined,
+      session.agentSessionId,
+    );
+    return result && { ...result, mtimeMs: result.reader.lastMtimeMs };
+  }
+
+  private async untimedTranscriptActivityMs(session: SessionRecord): Promise<number | null> {
+    if (session.agent === "cursor") {
+      const chatId = await this.cursorTranscriptId(session);
+      const result = chatId
+        ? await readCursorJsonlState(
+            session.worktreePath,
+            undefined,
+            chatId,
+            session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {},
+          )
+        : null;
+      return result?.reader.lastMtimeMs ?? null;
+    }
+    const { state } = await readOpenCodeStructuredState(
+      session.agentSessionId,
+      session.worktreePath,
+      null,
+    );
+    return state?.activityMs ?? null;
   }
 
   async writeSnapshot(
@@ -21899,6 +22314,7 @@ export class SessionService {
     const gateError =
       error instanceof TodoEmptyLedgerError ||
       error instanceof TodoOpenWorkError ||
+      error instanceof HandoffTargetNotStalledError ||
       error instanceof WorkSnapshotRequiredError
         ? error
         : undefined;
@@ -21933,6 +22349,7 @@ export class SessionService {
       retainInList?: boolean;
       skipEnrichment?: false;
       todoActor?: TodoActor;
+      handoffDetails?: HandoffEventDetails;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
@@ -21946,6 +22363,7 @@ export class SessionService {
       retainInList?: boolean;
       skipEnrichment?: boolean;
       todoActor?: TodoActor;
+      handoffDetails?: HandoffEventDetails;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
@@ -22118,6 +22536,7 @@ export class SessionService {
       message: `${targetStatus === "stopped" ? "Stopped" : "Completed"} ${sessionId}`,
       details: {
         worktree: session.worktree,
+        ...(eventAction === "handoff" && options?.handoffDetails ? options.handoffDetails : {}),
       },
     });
     return options?.skipEnrichment ? undefined : this.enrich(record);
@@ -25018,18 +25437,19 @@ export class SessionService {
     sessionId: string,
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
-  ): Promise<SessionView> {
+  ): Promise<HandoffSessionResponse> {
     // Refuse before queueing for admission; handoffTransaction rechecks after the wait.
     this.assertNoHeldCloseoutTake(sessionId);
     const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
-      const session = this.validateHandoffSource(sessionId, options);
+      // Before validation: validation reconciles ToDo, which a handoff in flight must own.
+      if (this.handoffsInFlight.has(sessionId) || this.handoffSuccessors.has(sessionId)) {
+        throw new Error(`Handoff already in flight for ${sessionId}`);
+      }
+      const { session } = this.validateHandoffSource(sessionId, options);
       // A take may have landed while this call waited on the lock.
       this.assertNoHeldCloseoutTake(sessionId);
       if (this.prAlertTransferFrom(session, "handoff")?.kind === "owner")
         assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
-      if (this.handoffsInFlight.has(sessionId)) {
-        throw new Error(`Handoff already in flight for ${sessionId}`);
-      }
       const agent = parseAgentName(request.agent);
       const token = Symbol(`handoff:${sessionId}`);
       this.handoffsInFlight.set(sessionId, {
@@ -25083,6 +25503,9 @@ export class SessionService {
       if (reservation !== undefined) this.admissionReservations.delete(reservation);
       if (this.handoffsInFlight.get(sessionId)?.token === waiting.token) {
         this.handoffsInFlight.delete(sessionId);
+        for (const [successorId, sourceId] of this.handoffSuccessors) {
+          if (sourceId === sessionId) this.handoffSuccessors.delete(successorId);
+        }
       }
     }
   }
@@ -25101,7 +25524,7 @@ export class SessionService {
     request: HandoffSessionRequest,
     options: { todoActor?: TodoActor } | undefined,
     waiting: HandoffAdmission,
-  ): Promise<SessionView> {
+  ): Promise<HandoffSessionResponse> {
     // Persisted background takes refuse now; only foreground takes wait.
     this.assertNoHeldCloseoutTake(sessionId);
     await this.waitForCloseoutTakeFrom(sessionId);
@@ -25116,8 +25539,24 @@ export class SessionService {
     const prepared = await this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.prepareHandoffLocked(sessionId, request, options, admitted),
     );
+    // spawnOnce rolls back its own failures. From here, the successor holds the copies until the
+    // source commit: any earlier failure cancels them, any later one keeps them (successor is live).
+    let successorId: string | undefined;
+    let sourceCommitted = false;
+    let rolledBack = false;
+    const rollbackCopies = (): void => {
+      if (!successorId || sourceCommitted || rolledBack || prepared.inheritedTodo.length === 0) {
+        return;
+      }
+      rolledBack = true;
+      this.rollbackInheritedTodoLocked(
+        { id: successorId, project: prepared.sourceProject },
+        prepared.inheritedTodo,
+      );
+    };
     try {
       const spawned = await this.spawn(prepared.spawnRequest, prepared.spawnOptions);
+      successorId = spawned.id;
       const receipt = this.foregroundSpawnReceipts.get(prepared.receiptToken);
       if (!receipt || receipt.sessionId !== spawned.id) {
         throw new Error(`Handoff successor receipt unavailable for ${spawned.id}`);
@@ -25133,62 +25572,97 @@ export class SessionService {
         this.withSessionLifecycleLocks(
           [...prepared.lifecycleIds, spawned.id],
           async (): Promise<SessionRecord> => {
-            const claim = this.handoffsInFlight.get(sessionId);
-            const source = readSession(this.config.dataDir, sessionId);
-            const successor = readSession(this.config.dataDir, spawned.id);
-            const sourceMatches =
-              source !== null &&
-              source.id === prepared.sourceStamp.id &&
-              workspaceIdOf(source) === prepared.sourceStamp.workspaceId &&
-              source.status === prepared.sourceStamp.status &&
-              source.stopReason === prepared.sourceStamp.stopReason &&
-              source.updatedAt === prepared.sourceStamp.updatedAt &&
-              source.tmuxSession === prepared.sourceStamp.tmuxSession;
-            const successorMatches =
-              successor !== null &&
-              successor.id === receipt.sessionId &&
-              workspaceIdOf(successor) === receipt.workspaceId &&
-              successor.tmuxSession === receipt.generation.tmuxSession &&
-              (await this.paneGenerationMatches(successor, receipt.generation));
-            if (claim?.token !== prepared.token || !sourceMatches || !successorMatches) {
-              throw new Error(`Handoff state changed before finalization for ${sessionId}`);
-            }
+            try {
+              const claim = this.handoffsInFlight.get(sessionId);
+              const source = readSession(this.config.dataDir, sessionId);
+              const successor = readSession(this.config.dataDir, spawned.id);
+              const sourceMatches =
+                source !== null &&
+                source.id === prepared.sourceStamp.id &&
+                workspaceIdOf(source) === prepared.sourceStamp.workspaceId &&
+                source.status === prepared.sourceStamp.status &&
+                source.stopReason === prepared.sourceStamp.stopReason &&
+                source.updatedAt === prepared.sourceStamp.updatedAt &&
+                source.tmuxSession === prepared.sourceStamp.tmuxSession;
+              const successorMatches =
+                successor !== null &&
+                successor.id === receipt.sessionId &&
+                workspaceIdOf(successor) === receipt.workspaceId &&
+                successor.tmuxSession === receipt.generation.tmuxSession &&
+                (await this.paneGenerationMatches(successor, receipt.generation));
+              if (claim?.token !== prepared.token || !sourceMatches || !successorMatches) {
+                throw new Error(`Handoff state changed before finalization for ${sessionId}`);
+              }
 
-            if (prepared.carryTags.length > 0) {
-              const workspaceState = resolveWorkspaceState(this.config.dataDir, successor);
-              const slots = applySlotsUpdate(workspaceState.slots, { tags: prepared.carryTags });
-              this.writeWorkspaceStateWithLegacyMirror(successor, {
-                ...(workspaceState.prAlertOwner
-                  ? { prAlertOwner: workspaceState.prAlertOwner }
-                  : {}),
-                ...(slots ? { slots } : {}),
-                ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
+              if (prepared.carryTags.length > 0) {
+                const workspaceState = resolveWorkspaceState(this.config.dataDir, successor);
+                const slots = applySlotsUpdate(workspaceState.slots, { tags: prepared.carryTags });
+                this.writeWorkspaceStateWithLegacyMirror(successor, {
+                  ...(workspaceState.prAlertOwner
+                    ? { prAlertOwner: workspaceState.prAlertOwner }
+                    : {}),
+                  ...(slots ? { slots } : {}),
+                  ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
+                });
+              }
+              const successorAfterTags = readSession(this.config.dataDir, spawned.id);
+              if (!successorAfterTags) {
+                throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
+              }
+              writeSession(this.config.dataDir, {
+                ...successorAfterTags,
+                ...(prepared.sourcePr ? { pr: prepared.sourcePr } : {}),
+                originalTaskPrompt: prepared.originalTask,
+                updatedAt: nowIso(),
               });
+              if (prepared.inheritedTodo.length > 0) {
+                sourceCommitted = true;
+                closeTodoItems(
+                  this.config.dataDir,
+                  { id: sessionId, project: prepared.sourceProject },
+                  prepared.inheritedTodo.map((item) => ({
+                    itemId: item.from.itemId,
+                    handoffTo: { sessionId: spawned.id, itemId: item.itemId },
+                  })),
+                  `handed off to ${spawned.id}`,
+                );
+              }
+              this.clearCloseoutOwner(sessionId);
+              await this.applyManualStatusLocked(
+                sessionId,
+                "completed",
+                { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+                {
+                  retainInList: true,
+                  eventAction: "handoff",
+                  handoffDetails: prepared.handoffDetails,
+                },
+              );
+              const latest = readSession(this.config.dataDir, spawned.id);
+              if (!latest)
+                throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
+              return latest;
+            } catch (error) {
+              rollbackCopies();
+              throw error;
             }
-            const successorAfterTags = readSession(this.config.dataDir, spawned.id);
-            if (!successorAfterTags) {
-              throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
-            }
-            writeSession(this.config.dataDir, {
-              ...successorAfterTags,
-              ...(prepared.sourcePr ? { pr: prepared.sourcePr } : {}),
-              originalTaskPrompt: prepared.originalTask,
-              updatedAt: nowIso(),
-            });
-            this.clearCloseoutOwner(sessionId);
-            await this.applyManualStatusLocked(
-              sessionId,
-              "completed",
-              { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-              { retainInList: true, eventAction: "handoff" },
-            );
-            const latest = readSession(this.config.dataDir, spawned.id);
-            if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
-            return latest;
           },
         ),
       );
-      return await this.enrich(finalized);
+      return {
+        ...(await this.enrich(finalized)),
+        movedTodoItems: prepared.inheritedTodo.length,
+      };
+    } catch (error) {
+      // rollbackCopies re-checks sourceCommitted and rolledBack; they are set inside closures.
+      if (successorId && prepared.inheritedTodo.length > 0) {
+        const failedSuccessorId = successorId;
+        await this.withSessionLifecycleLocks(
+          [...prepared.lifecycleIds, failedSuccessorId],
+          async () => rollbackCopies(),
+        );
+      }
+      throw error;
     } finally {
       this.foregroundSpawnReceipts.delete(prepared.receiptToken);
     }
@@ -25197,7 +25671,11 @@ export class SessionService {
   private validateHandoffSource(
     sessionId: string,
     options?: { todoActor?: TodoActor },
-  ): SessionRecord {
+  ): {
+    session: SessionRecord;
+    projection: TodoProjection;
+    snapshotGate?: HandoffEventDetails["snapshotGate"];
+  } {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -25206,7 +25684,8 @@ export class SessionService {
       session.status !== "running" &&
       session.status !== "spawning" &&
       session.status !== "paused" &&
-      session.status !== "stopped"
+      session.status !== "stopped" &&
+      session.status !== "errored"
     ) {
       throw new Error(
         `Session ${sessionId} is not eligible for handoff (status: ${session.status})`,
@@ -25215,22 +25694,235 @@ export class SessionService {
     if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
     }
-    const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
-    const handoffBlock = todoLedgerBlock(handoffProjection);
-    if (handoffBlock && options?.todoActor?.kind !== "human") {
-      const error =
-        handoffBlock === "empty"
-          ? new TodoEmptyLedgerError([sessionId])
-          : new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(handoffProjection) }]);
+    const actor = options?.todoActor;
+    const human = actor?.kind === "human";
+    // No actor is an unattributed caller: it keeps the agent gates of its own session.
+    const otherAgent = actor?.kind === "agent" && actor.sessionId !== sessionId;
+    const markerless = !session.rateLimitedAt && !session.serverErrorAt;
+    const stalled =
+      session.status === "stopped" ||
+      session.status === "paused" ||
+      session.status === "errored" ||
+      !markerless;
+    if (otherAgent && !stalled) {
+      const error = new HandoffTargetNotStalledError(sessionId, session.status);
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    if (this.snapshotGateBlocks(session, handoffProjection.revision, "any", options?.todoActor)) {
+    this.reconcileHandoffTodoLocked(session, () =>
+      listSessions(this.config.dataDir).filter(
+        (candidate) => workspaceIdOf(candidate) === workspaceIdOf(session),
+      ),
+    );
+    const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
+    if (!human && !otherAgent && todoLedgerBlock(handoffProjection) === "empty") {
+      const error = new TodoEmptyLedgerError([sessionId]);
+      this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
+      throw error;
+    }
+    if (human || !snapshotSettings(this.resolveProjectForSession(session)).requireFinal) {
+      return { session, projection: handoffProjection };
+    }
+    // Only a healthy running source can still write the snapshot the gate asks for.
+    const sourceCanWrite =
+      !otherAgent && (session.status === "running" || session.status === "spawning") && markerless;
+    if (
+      sourceCanWrite &&
+      this.snapshotGateBlocks(session, handoffProjection.revision, "any", actor)
+    ) {
       const error = new WorkSnapshotRequiredError([sessionId], "any");
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    return session;
+    return {
+      session,
+      projection: handoffProjection,
+      snapshotGate: sourceCanWrite ? "applied" : "skipped_source_cannot_write",
+    };
+  }
+
+  // A handoff that stopped after the successor went live but before the source cancel leaves open
+  // copies in both ledgers. The successor's `handoffFrom` refs say which source items it holds, so
+  // cancel those. The source session stays stopped: the successor owns the work, and a person or
+  // agent can complete the source. Caller holds the source's workspace lifecycle lock.
+  // A handoff in flight for the source owns its copies (they roll back on failure): never reconcile
+  // against them. `sameWorkspace` is read only when the source still has open or held items.
+  private reconcileHandoffTodoLocked(
+    source: SessionRecord,
+    sameWorkspace: () => readonly SessionRecord[],
+  ): void {
+    if (this.handoffsInFlight.has(source.id)) return;
+    const projection = readTodoIfPresent(this.config.dataDir, source.id);
+    if (!projection || projection.counts.open + projection.counts.held === 0) return;
+    const ledgers: Array<{ sessionId: string; projection: TodoProjection; live: boolean }> = [];
+    for (const candidate of sameWorkspace()) {
+      if (candidate.id === source.id) continue;
+      // Live: not terminal and, while `spawning`, past the start of its launch (`agentLaunchId`).
+      const live =
+        !isTerminalSessionStatus(candidate.status) &&
+        !(candidate.status === "spawning" && !candidate.agentLaunchId);
+      try {
+        const candidateProjection = readTodoIfPresent(this.config.dataDir, candidate.id);
+        if (candidateProjection) {
+          ledgers.push({ sessionId: candidate.id, projection: candidateProjection, live });
+        }
+      } catch (error) {
+        // One damaged sibling ledger must not block the source.
+        if (!(error instanceof TodoLedgerCorruptError)) throw error;
+      }
+    }
+    const planned = planHandoffReconcile(projection, source.id, ledgers);
+    for (const successorId of new Set(planned.map((entry) => entry.successorId))) {
+      const closes = planned.filter((entry) => entry.successorId === successorId);
+      const closed = closeTodoItems(
+        this.config.dataDir,
+        source,
+        closes.map(({ itemId, handoffTo }) => ({ itemId, handoffTo })),
+        `handed off to ${successorId}`,
+      );
+      this.logEvent("session.handoff.todo_reconciled", {
+        level: "info",
+        sessionId: source.id,
+        projectId: source.project,
+        message: `Cancelled ${closed.length} ${source.id} ToDo item(s) already held by ${successorId}`,
+        details: { successorId, itemIds: closed },
+      });
+    }
+  }
+
+  // A successor still `spawning` without `agentLaunchId` never began its launch, so its inherited
+  // copies belong to no agent: cancel them as the failure rollback does, leaving the source items
+  // open for the next handoff.
+  private neutralizeUnlaunchedHandoffCopies(successor: SessionRecord): void {
+    const projection = readTodoIfPresent(this.config.dataDir, successor.id);
+    if (!projection) return;
+    const bySource = new Map<string, string[]>();
+    for (const item of projection.items) {
+      if (!item.handoffFrom || (item.status !== "open" && item.status !== "held")) continue;
+      const ids = bySource.get(item.handoffFrom.sessionId);
+      if (ids) ids.push(item.id);
+      else bySource.set(item.handoffFrom.sessionId, [item.id]);
+    }
+    for (const [sourceId, itemIds] of bySource) {
+      const closed = closeTodoItems(
+        this.config.dataDir,
+        successor,
+        itemIds.map((itemId) => ({ itemId })),
+        `handoff to ${successor.id} failed; item stays open in ${sourceId}`,
+      );
+      this.logEvent("session.handoff.todo_reconciled", {
+        level: "info",
+        sessionId: successor.id,
+        projectId: successor.project,
+        message: `Cancelled ${closed.length} unlaunched handoff ToDo copies in ${successor.id}; ${sourceId} keeps its items`,
+        details: { sourceId, itemIds: closed, rolledBack: true },
+      });
+    }
+  }
+
+  // Runs from applyConfig: at start and on every config reload. Synchronous on purpose: it must
+  // finish before boot reconciliation can flip an unlaunched successor to `stopped`, where it would
+  // pass for a launched owner. `spawnsInFlight` keeps it off spawns this process is running, and
+  // nothing else writes a spawning record's ledger, so no lifecycle lock is needed.
+  private rollbackUnlaunchedHandoffCopies(sessions: readonly SessionRecord[]): void {
+    for (const successor of sessions) {
+      // `agentLaunchId` is persisted before the launch prompt can be delivered: a record carrying
+      // it may own live work, so it keeps its copies (a restorable stopped session after boot).
+      if (
+        successor.status !== "spawning" ||
+        successor.agentLaunchId ||
+        this.spawnsInFlight.has(successor.id)
+      ) {
+        continue;
+      }
+      try {
+        this.neutralizeUnlaunchedHandoffCopies(successor);
+      } catch (error) {
+        this.logEvent("session.handoff.todo_reconcile_failed", {
+          level: "warn",
+          sessionId: successor.id,
+          projectId: successor.project,
+          message: `Could not neutralize handoff ToDo copies of ${successor.id}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+  }
+
+  // `all` is the session list applyConfig already read; records are re-read under the lock.
+  private async recoverHandoffTodo(
+    all: readonly SessionRecord[] = listSessions(this.config.dataDir),
+  ): Promise<void> {
+    const byWorkspace = new Map<string, SessionRecord[]>();
+    // Only a session that some ledger names in `handoffFrom` can be an interrupted handoff's
+    // source: one ledger read per session, no lock or record read for the rest.
+    const referenced = new Set<string>();
+    for (const candidate of all) {
+      const key = workspaceIdOf(candidate);
+      const members = byWorkspace.get(key);
+      if (members) members.push(candidate);
+      else byWorkspace.set(key, [candidate]);
+      try {
+        for (const item of readTodoIfPresent(this.config.dataDir, candidate.id)?.items ?? []) {
+          if (item.handoffFrom) referenced.add(item.handoffFrom.sessionId);
+        }
+      } catch (error) {
+        if (!(error instanceof TodoLedgerCorruptError)) throw error;
+      }
+    }
+    for (const source of all) {
+      if (isTerminalSessionStatus(source.status) || !referenced.has(source.id)) continue;
+      try {
+        await this.withWorkspaceLifecycleLocks(source.id, async () => {
+          const current = readSession(this.config.dataDir, source.id);
+          if (current && !isTerminalSessionStatus(current.status)) {
+            // The grouped list only names candidates; status and workspace are re-read under the
+            // lock, since a successor may have been killed while this waited.
+            const workspaceId = workspaceIdOf(current);
+            this.reconcileHandoffTodoLocked(current, () =>
+              (byWorkspace.get(workspaceId) ?? []).flatMap((candidate) => {
+                const fresh = readSession(this.config.dataDir, candidate.id);
+                return fresh && workspaceIdOf(fresh) === workspaceId ? [fresh] : [];
+              }),
+            );
+          }
+        });
+      } catch (error) {
+        this.logEvent("session.handoff.todo_reconcile_failed", {
+          level: "warn",
+          sessionId: source.id,
+          projectId: source.project,
+          message: `Could not reconcile handoff ToDo for ${source.id}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+  }
+
+  private rollbackInheritedTodoLocked(
+    successor: Pick<SessionRecord, "id" | "project">,
+    items: readonly HandoffTodoItem[],
+  ): void {
+    // Callers pass a non-empty plan from one source ledger.
+    const sourceId = items[0]?.from.sessionId;
+    try {
+      closeTodoItems(
+        this.config.dataDir,
+        successor,
+        items.map((item) => ({ itemId: item.itemId })),
+        `handoff to ${successor.id} failed; item stays open in ${sourceId}`,
+      );
+    } catch (error) {
+      this.logEvent("session.handoff.todo_rollback_failed", {
+        level: "warn",
+        sessionId: successor.id,
+        projectId: successor.project,
+        message: `Could not cancel inherited ToDo copies in ${successor.id} after a failed handoff from ${sourceId}`,
+        details: {
+          successorId: successor.id,
+          sourceId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
   }
 
   private async prepareHandoffLocked(
@@ -25239,7 +25931,7 @@ export class SessionService {
     options: { todoActor?: TodoActor } | undefined,
     waiting: HandoffAdmission,
   ): Promise<PreparedHandoff> {
-    const session = this.validateHandoffSource(sessionId, options);
+    const { session, projection, snapshotGate } = this.validateHandoffSource(sessionId, options);
     const admissionReservation = waiting.admissionReservation;
     if (
       this.handoffsInFlight.get(sessionId)?.token !== waiting.token ||
@@ -25280,8 +25972,35 @@ export class SessionService {
       }
       const model = resolveCarriedSpawnModel(session, agent, request.model);
 
+      const inheritedTodo = planHandoffTodo(projection, sessionId);
+      let snapshot: HandoffPromptSnapshot | undefined;
+      let snapshotUnreadable: string | undefined;
+      try {
+        const latest = readSnapshotVersion(this.config.dataDir, session, "latest", "live");
+        if (latest) {
+          const { freshness } = await this.withFreshness(session, "live", latest);
+          snapshot = {
+            version: latest.version,
+            at: latest.at,
+            ageMinutes: Math.floor(freshness.ageSeconds / 60),
+            commitsSince: freshness.commitsSince,
+            stale: freshness.stale,
+            content: latest.content,
+            headSha: latest.headSha,
+          };
+        }
+      } catch (error) {
+        if (!(error instanceof SnapshotCorruptError)) throw error;
+        snapshotUnreadable = error.message;
+      }
+
       let sourceForSpawn = session;
-      if (session.status === "running" || session.status === "spawning") {
+      if (
+        session.status === "running" ||
+        session.status === "spawning" ||
+        session.status === "errored"
+      ) {
+        const observedState = this.stateCache.get(sessionId)?.state;
         const stopped: SessionRecord = {
           ...this.sessionWithReleasedSidecarPorts(session),
           status: "stopped",
@@ -25292,6 +26011,12 @@ export class SessionService {
         writeSession(this.config.dataDir, stopped);
         this.stateCache.delete(sessionId);
         await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+        // The forced stop skips the transition capture: take the tail since the last one.
+        await this.captureStateTransitionArtifact(session, {
+          at: nowIso(),
+          fromState: observedState ?? (session.status === "errored" ? "error" : "working"),
+          toState: "stopped",
+        });
         await this.cleanupSessionServices(stopped);
         sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
       }
@@ -25309,8 +26034,19 @@ export class SessionService {
         ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
         ...(notes ? { notes } : {}),
         ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+        inheritedTodo,
+        ...(snapshot ? { snapshot } : {}),
+        ...(snapshotUnreadable ? { snapshotUnreadable } : {}),
       });
 
+      const todoActor = options?.todoActor;
+      const handoffDetails: HandoffEventDetails = {
+        actor: todoActor ?? null,
+        ...(todoActor?.kind === "agent" ? { callerSessionId: todoActor.sessionId } : {}),
+        movedItems: inheritedTodo.map((item) => ({ from: item.from.itemId, to: item.itemId })),
+        ...(snapshot ? { snapshotVersion: snapshot.version } : {}),
+        ...(snapshotGate ? { snapshotGate } : {}),
+      };
       this.logEvent("session.handoff.started", {
         level: "info",
         sessionId,
@@ -25320,6 +26056,7 @@ export class SessionService {
           sourceAgent: session.agent,
           targetAgent: agent,
           ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+          ...handoffDetails,
         },
       });
 
@@ -25341,6 +26078,8 @@ export class SessionService {
       const continuation = this.prAlertTransferFrom(sourceForSpawn, "handoff");
       const prAlertOwnerTransfer = continuation?.kind === "owner" ? continuation : undefined;
       return {
+        inheritedTodo,
+        handoffDetails,
         token,
         lifecycleIds,
         sourceStamp,
@@ -25369,6 +26108,7 @@ export class SessionService {
           ...(prAlertOwnerTransfer ? { prAlertOwnerTransfer } : {}),
           validatedLaunchSelection: launchSelection,
           receiptToken,
+          ...(inheritedTodo.length > 0 ? { inheritedTodo } : {}),
         },
       };
     } catch (error) {
@@ -28933,6 +29673,8 @@ export class SessionService {
       agentSessionId: _agentSessionId,
       agentLaunchId: _agentLaunchId,
       claudeStatusOwner: _claudeStatusOwner,
+      taskStatus: _taskStatus,
+      taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
       blockedTriggerNotices: _blockedTriggerNotices,
@@ -28949,14 +29691,20 @@ export class SessionService {
       rateLimitResetAt: _oldReset,
       ...dashboardSession
     } = session;
-    const state = this.stabilizeState(
-      session.id,
-      hasRetainedSessionError(session) ? "error" : classified.state,
+    const rawState = hasRetainedSessionError(session) ? "error" : classified.state;
+    const state = projectTaskStatus(
+      session,
+      rawState,
+      this.stabilizeState(session.id, rawState),
+      classified.runtime.runtimeAlive,
+      workspacePresent,
     );
     await this.updateStateHistory(
       session,
       state,
-      classified.source,
+      state !== rawState && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
@@ -29355,11 +30103,19 @@ export class SessionService {
     session = reported;
     classified.session = session;
     if (hasRetainedSessionError(session)) classified.state = "error";
-    const state = this.stabilizeState(session.id, classified.state);
+    const state = projectTaskStatus(
+      session,
+      classified.state,
+      this.stabilizeState(session.id, classified.state),
+      classified.runtime.runtimeAlive,
+      workspacePresent,
+    );
     await this.updateStateHistory(
       session,
       state,
-      classified.source,
+      state !== classified.state && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
@@ -29397,6 +30153,8 @@ export class SessionService {
       originalTaskPrompt: _originalTaskPrompt,
       agentLaunchId: _agentLaunchId,
       claudeStatusOwner: _claudeStatusOwner,
+      taskStatus: _taskStatus,
+      taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
       blockedTriggerNotices: _blockedTriggerNotices,
