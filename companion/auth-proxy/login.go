@@ -31,12 +31,14 @@ const (
 	stageSubmitted = "submitted"
 	stageVerifying = "verifying"
 
-	errInputRejected = "input_rejected"
-	errExpired       = "expired"
-	errKeyRejected   = "key_rejected"
-	errNotConfirmed  = "not_confirmed"
-	errIdentity      = "identity"
-	errFailed        = "failed"
+	errInputRejected   = "input_rejected"
+	errExpired         = "expired"
+	errKeyRejected     = "key_rejected"
+	errCodeRejected    = "code_rejected"
+	errProviderBlocked = "provider_blocked"
+	errNotConfirmed    = "not_confirmed"
+	errIdentity        = "identity"
+	errFailed          = "failed"
 
 	failedMessage = "Sign-in failed; retry authentication"
 )
@@ -492,6 +494,10 @@ func (l *loginManager) cancel(id string) (loginStatus, error) {
 	l.mu.Lock()
 	a := l.attempts[id]
 	if a == nil || l.active != id {
+		// A finished failed attempt is dismissed here so the account reads sign-in-required, not failed.
+		if a != nil && a.status.Status == "failed" {
+			delete(l.attempts, id)
+		}
 		l.mu.Unlock()
 		return loginStatus{AccountID: id, Status: "sign-in-required"}, nil
 	}

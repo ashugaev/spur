@@ -925,3 +925,76 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+type transportDown struct{}
+
+func (transportDown) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("tls: handshake failure")
+}
+
+// A failed exchange reports its class and status only; the response body never reaches the status.
+func TestPKCEExchangeFailureClasses(t *testing.T) {
+	cases := []struct {
+		name     string
+		rt       http.RoundTripper
+		wantCode string
+		wantMsg  string
+	}{
+		{"400 invalid_grant", &providerFake{status: http.StatusBadRequest}, errCodeRejected, "Provider rejected the sign-in code (HTTP 400)"},
+		{"401", &providerFake{status: http.StatusUnauthorized}, errCodeRejected, "Provider rejected the sign-in code (HTTP 401)"},
+		{"403 challenge", &providerFake{status: http.StatusForbidden}, errProviderBlocked, "Provider blocked the sign-in request (HTTP 403)"},
+		{"503", &providerFake{status: http.StatusServiceUnavailable}, errProviderBlocked, "Provider blocked the sign-in request (HTTP 503)"},
+		{"transport error", transportDown{}, errProviderBlocked, "Provider could not be reached"},
+		{"404", &providerFake{status: http.StatusNotFound}, errFailed, failedMessage},
+	}
+	for _, c := range cases {
+		for _, p := range []provider{claude, codex} {
+			l := claudeLoginFixture(t, c.rt)
+			status, err := l.start(context.Background(), "account-a", p, map[provider]string{claude: methodOAuth, codex: methodBrowser}[p])
+			if err != nil {
+				t.Fatal(err)
+			}
+			u, err := url.Parse(status.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := l.attempts["account-a"]
+			if _, err = l.input("account-a", "CODE#"+u.Query().Get("state")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-a.done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s %s: attempt did not end", p, c.name)
+			}
+			got := l.status("account-a")
+			if got.Status != "failed" || got.ErrorCode != c.wantCode || got.Error != c.wantMsg {
+				t.Fatalf("%s %s: %+v", p, c.name, got)
+			}
+		}
+	}
+}
+
+// Closing the dialog cancels a finished failed attempt; the account then reads sign-in-required.
+func TestCancelDismissesFinishedFailedAttempt(t *testing.T) {
+	l := claudeLoginFixture(t, &providerFake{status: http.StatusForbidden})
+	status, err := l.start(context.Background(), "account-a", claude, methodOAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(status.URL)
+	a := l.attempts["account-a"]
+	if _, err = l.input("account-a", "CODE#"+u.Query().Get("state")); err != nil {
+		t.Fatal(err)
+	}
+	<-a.done
+	if got := l.status("account-a"); got.Status != "failed" {
+		t.Fatalf("before cancel: %+v", got)
+	}
+	if got, err := l.cancel("account-a"); err != nil || got.Status != "sign-in-required" {
+		t.Fatalf("cancel: %+v %v", got, err)
+	}
+	if got := l.status("account-a"); got.Status != "sign-in-required" || got.Error != "" || got.ErrorCode != "" {
+		t.Fatalf("after cancel: %+v", got)
+	}
+}

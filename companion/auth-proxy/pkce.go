@@ -211,7 +211,7 @@ func (f *claudeFlow) exchange(ctx context.Context, client *http.Client, code, st
 	req.Close = true
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, errors.New("token exchange request failed")
+		return nil, exchangeTransportError(ctx)
 	}
 	defer resp.Body.Close()
 	raw, err := readOAuthBody(resp)
@@ -219,7 +219,7 @@ func (f *claudeFlow) exchange(ctx context.Context, client *http.Client, code, st
 		return nil, errors.New("token exchange response unreadable")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange failed with status %d", resp.StatusCode)
+		return nil, exchangeStatusError(resp.StatusCode)
 	}
 	var tokens claudeTokens
 	if err = json.Unmarshal(raw, &tokens); err != nil || tokens.AccessToken == "" {
@@ -391,7 +391,7 @@ func (f *codexFlow) exchange(ctx context.Context, client *http.Client, code stri
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, errors.New("token exchange request failed")
+		return nil, exchangeTransportError(ctx)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -399,7 +399,7 @@ func (f *codexFlow) exchange(ctx context.Context, client *http.Client, code stri
 		return nil, errors.New("token exchange response unreadable")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange failed with status %d", resp.StatusCode)
+		return nil, exchangeStatusError(resp.StatusCode)
 	}
 	var tokens codexTokens
 	if err = json.Unmarshal(raw, &tokens); err != nil || tokens.AccessToken == "" {
@@ -459,4 +459,23 @@ func jwtPayload(token string) []byte {
 		return nil
 	}
 	return payload
+}
+
+// exchangeStatusError classifies a non-200 token response by status class only; the body is never read into the message.
+func exchangeStatusError(status int) error {
+	switch {
+	case status == http.StatusBadRequest || status == http.StatusUnauthorized:
+		return failure(errCodeRejected, fmt.Sprintf("Provider rejected the sign-in code (HTTP %d)", status))
+	case status == http.StatusForbidden || status == http.StatusTooManyRequests || status >= 500:
+		return failure(errProviderBlocked, fmt.Sprintf("Provider blocked the sign-in request (HTTP %d)", status))
+	}
+	return failure(errFailed, failedMessage)
+}
+
+// exchangeTransportError classifies a failed token request: network and TLS errors read as a blocked provider.
+func exchangeTransportError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return failure(errProviderBlocked, "Provider could not be reached")
 }
