@@ -16927,7 +16927,9 @@ export class SessionService {
     }
   }
 
-  private protectDurableSpawns(sessions: readonly SessionRecord[]): void {
+  private protectDurableSpawns(
+    sessions: readonly SessionRecord[] = listSessions(this.config.dataDir),
+  ): void {
     for (const record of [...sessions].sort((a, b) =>
       (a.spawnReceipt?.acceptedAt ?? a.createdAt).localeCompare(
         b.spawnReceipt?.acceptedAt ?? b.createdAt,
