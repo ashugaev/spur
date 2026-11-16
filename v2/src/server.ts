@@ -1420,22 +1420,22 @@ export async function startServer(
           .optional()
           .safeParse(url.searchParams.get("agent") ?? undefined);
         if (!provider.success) throw new AuthorizationError("agent must be claude or codex", 400);
-        sendJson(response, 200, await service.listAuthorizationAccounts(provider.data));
+        sendJson(
+          response,
+          200,
+          await service.listAuthorizationAccounts(provider.data, { quota: true }),
+        );
         return;
       }
 
       if (method === "POST" && path === "/auth-accounts") {
         const body = z
-          .object({ provider: authProviderSchema, label: z.string().optional() })
+          .object({ provider: authProviderSchema })
           .strict()
           .safeParse(await readJsonBody(request));
-        if (!body.success)
-          throw new AuthorizationError(
-            "provider must be claude or codex; label must be a string",
-            400,
-          );
+        if (!body.success) throw new AuthorizationError("provider must be claude or codex", 400);
         sendJson(response, 201, {
-          account: await service.addAuthorizationAccount(body.data.provider, body.data.label),
+          account: await service.addAuthorizationAccount(body.data.provider),
         });
         return;
       }
@@ -1465,17 +1465,6 @@ export async function startServer(
       }
 
       const managedAccountId = path.match(/^\/auth-accounts\/([^/]+)$/)?.[1];
-      if (method === "PATCH" && managedAccountId) {
-        const body = z
-          .object({ label: z.string() })
-          .strict()
-          .safeParse(await readJsonBody(request));
-        if (!body.success) throw new AuthorizationError("label must be a string", 400);
-        sendJson(response, 200, {
-          account: service.renameAuthorizationAccount(managedAccountId, body.data.label),
-        });
-        return;
-      }
       if (method === "DELETE" && managedAccountId) {
         await service.removeAuthorizationAccount(managedAccountId);
         sendJson(response, 200, { removed: managedAccountId });
@@ -1501,14 +1490,14 @@ export async function startServer(
       const managedApiKeyId = path.match(/^\/auth-accounts\/([^/]+)\/api-key$/)?.[1];
       if (method === "POST" && managedApiKeyId) {
         const body = z
-          .object({ label: z.string().trim().min(1), apiKey: z.string() })
+          .object({ apiKey: z.string() })
           .strict()
           .safeParse(await readJsonBody(request));
-        if (!body.success) throw new AuthorizationError("Supply a label and an apiKey string", 400);
+        if (!body.success) throw new AuthorizationError("Supply an apiKey string", 400);
         sendJson(
           response,
           200,
-          await service.setAuthorizationApiKey(managedApiKeyId, body.data.label, body.data.apiKey),
+          await service.setAuthorizationApiKey(managedApiKeyId, body.data.apiKey),
         );
         return;
       }
@@ -1570,9 +1559,9 @@ export async function startServer(
       }
 
       if (method === "POST" && path === "/claude-accounts/add") {
-        const body = await readJsonBody<{ label?: unknown }>(request);
-        const label = typeof body.label === "string" ? body.label.trim() : "";
-        const account = await service.addClaudeAccount(label ? { label } : {});
+        // A label in the body is ignored: accounts are named from provider identity.
+        await readJsonBody(request);
+        const account = await service.addClaudeAccount();
         const { loginTmuxSession } = await service.startAccountLogin(account.id);
         // Return the summary shape (no absolute configDir) to match GET /claude-accounts.
         sendJson(response, 201, {

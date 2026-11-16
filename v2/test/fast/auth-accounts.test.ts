@@ -1,8 +1,96 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AuthAccounts } from "../../src/auth-accounts.js";
+import { AuthAccounts, authDisplayNames, type AuthIdentity } from "../../src/auth-accounts.js";
+
+function names(
+  accounts: { id: string; provider: "claude" | "codex"; identity?: AuthIdentity }[],
+): Record<string, string> {
+  return Object.fromEntries(authDisplayNames(accounts));
+}
+
+describe("authDisplayNames", () => {
+  it("names an account by its unique email", () => {
+    expect(
+      names([
+        { id: "a", provider: "claude", identity: { email: "alek@x.com", organizationName: "Org" } },
+        { id: "b", provider: "claude", identity: { email: "other@x.com" } },
+      ]),
+    ).toEqual({ a: "alek@x.com", b: "other@x.com" });
+  });
+
+  it("adds the organization when a Claude email repeats", () => {
+    expect(
+      names([
+        {
+          id: "a",
+          provider: "claude",
+          identity: { email: "alek@x.com", organizationName: "Intelas" },
+        },
+        {
+          id: "b",
+          provider: "claude",
+          identity: { email: "alek@x.com", organizationName: "Personal" },
+        },
+      ]),
+    ).toEqual({ a: "alek@x.com · Intelas", b: "alek@x.com · Personal" });
+  });
+
+  it("falls back to the last 4 of the organization id when the secondary repeats or is missing", () => {
+    expect(
+      names([
+        {
+          id: "a",
+          provider: "claude",
+          identity: {
+            email: "alek@x.com",
+            organizationName: "Org",
+            organizationId: "org-aaaa1111",
+          },
+        },
+        {
+          id: "b",
+          provider: "claude",
+          identity: {
+            email: "alek@x.com",
+            organizationName: "Org",
+            organizationId: "org-bbbb2222",
+          },
+        },
+        {
+          id: "c",
+          provider: "claude",
+          identity: { email: "alek@x.com", organizationId: "org-cccc3333" },
+        },
+      ]),
+    ).toEqual({
+      a: "alek@x.com · ····1111",
+      b: "alek@x.com · ····2222",
+      c: "alek@x.com · ····3333",
+    });
+  });
+
+  it("uses the Codex plan as the secondary and keeps pools apart", () => {
+    expect(
+      names([
+        { id: "a", provider: "codex", identity: { email: "alek@x.com", plan: "Pro" } },
+        { id: "b", provider: "codex", identity: { email: "alek@x.com", plan: "Plus" } },
+        { id: "c", provider: "claude", identity: { email: "alek@x.com" } },
+      ]),
+    ).toEqual({ a: "alek@x.com · Pro", b: "alek@x.com · Plus", c: "alek@x.com" });
+  });
+
+  it("names API keys by hint and unidentified accounts by provider", () => {
+    expect(
+      names([
+        { id: "k", provider: "claude", identity: { keyHint: "7Q2c" } },
+        { id: "n", provider: "codex" },
+        { id: "m", provider: "claude" },
+      ]),
+    ).toEqual({ k: "API key ····7Q2c", n: "New Codex account", m: "New Claude account" });
+  });
+});
 
 describe("managed authorization accounts", () => {
   let dataDir: string;
@@ -17,8 +105,8 @@ describe("managed authorization accounts", () => {
 
   it("keeps independent provider pools and retains managed existence after last removal", () => {
     expect(accounts.read().pools).toEqual({});
-    const claude = accounts.add("claude", "Primary");
-    const codex = accounts.add("codex", "Work");
+    const claude = accounts.add("claude");
+    const codex = accounts.add("codex");
     accounts.updatePool("claude", { autoRotate: true });
     accounts.remove(claude.id, () => true);
     expect(accounts.read().pools).toEqual({
@@ -62,7 +150,7 @@ describe("managed authorization accounts", () => {
     expect(() => accounts.updatePool("codex", { defaultAccountId: other.id })).toThrow();
   });
 
-  it("migrates labels and IDs once without importing credential paths", () => {
+  it("migrates IDs once, dropping labels and credential paths", () => {
     writeFileSync(
       join(dataDir, "claude-accounts.json"),
       JSON.stringify([
@@ -70,10 +158,44 @@ describe("managed authorization accounts", () => {
       ]),
     );
     expect(accounts.read().accounts).toEqual([
-      { id: "legacy", provider: "claude", label: "Saved", createdAt: "2026-01-01" },
+      { id: "legacy", provider: "claude", createdAt: "2026-01-01" },
     ]);
-    expect(readFileSync(join(dataDir, "auth-accounts.json"), "utf8")).not.toContain("secret");
+    const stored = readFileSync(join(dataDir, "auth-accounts.json"), "utf8");
+    expect(stored).not.toContain("secret");
+    expect(stored).not.toContain("Saved");
     expect(statSync(join(dataDir, "auth-accounts.json")).mode & 0o777).toBe(0o600);
+  });
+
+  it("strips a stored label on read and omits it after the next write", () => {
+    writeFileSync(
+      join(dataDir, "auth-accounts.json"),
+      JSON.stringify({
+        schema: 1,
+        accounts: [{ id: "a", provider: "claude", label: "Typed", createdAt: "2026-01-01" }],
+        pools: {},
+      }),
+    );
+    expect(accounts.read().accounts).toEqual([
+      { id: "a", provider: "claude", createdAt: "2026-01-01" },
+    ]);
+    accounts.add("codex");
+    expect(readFileSync(join(dataDir, "auth-accounts.json"), "utf8")).not.toContain("Typed");
+  });
+
+  it("records identity once and writes only on change", () => {
+    const account = accounts.add("codex");
+    const file = join(dataDir, "auth-accounts.json");
+    accounts.recordIdentities([
+      { id: account.id, identity: { email: "a@x.com", plan: "pro" } },
+      { id: "unknown", identity: { email: "ignored@x.com" } },
+      { id: account.id },
+    ]);
+    expect(accounts.read().accounts[0]?.identity).toEqual({ email: "a@x.com", plan: "Pro" });
+    utimesSync(file, new Date(1_000), new Date(1_000));
+    accounts.recordIdentities([{ id: account.id, identity: { email: "a@x.com", plan: "pro" } }]);
+    expect(statSync(file).mtimeMs).toBe(1_000);
+    accounts.recordIdentities([{ id: account.id, identity: { email: "b@x.com", plan: "pro" } }]);
+    expect(statSync(file).mtimeMs).not.toBe(1_000);
   });
 
   it("rejects a corrupt managed store instead of losing the managed boundary", () => {

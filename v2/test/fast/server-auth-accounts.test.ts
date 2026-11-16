@@ -37,7 +37,7 @@ describe("managed authorization HTTP boundary", () => {
       .mockResolvedValue({ accounts: [], pools: {} });
     const base = await fixture();
     expect((await fetch(`${base}/auth-accounts?agent=codex`)).status).toBe(200);
-    expect(list).toHaveBeenCalledWith("codex");
+    expect(list).toHaveBeenCalledWith("codex", { quota: true });
     list.mockClear();
     expect((await fetch(`${base}/auth-accounts?agent=cursor`)).status).toBe(400);
     expect(list).not.toHaveBeenCalled();
@@ -111,50 +111,107 @@ describe("managed authorization HTTP boundary", () => {
     expect(login).toHaveBeenCalledExactlyOnceWith("work", "claude", "oauth");
   });
 
-  it("api-key requires label and apiKey, renames, never echoes key", async () => {
+  it("api-key takes only apiKey and never echoes it", async () => {
     vi.spyOn(AuthAccounts.prototype, "read").mockReturnValue(account("claude"));
-    const rename = vi
-      .spyOn(AuthAccounts.prototype, "rename")
-      .mockReturnValue({ id: "work", provider: "claude", createdAt: "x" });
     const setKey = vi
       .spyOn(AuthProxy.prototype, "setApiKey")
       .mockResolvedValue({ accountId: "work", status: "pending", method: "api_key" });
     const base = await fixture();
     const secret = "sk-test-secret-value";
-    for (const bad of [{}, { label: "A" }, { apiKey: secret }, { label: " ", apiKey: secret }]) {
+    for (const bad of [
+      {},
+      { label: "A" },
+      { label: "A", apiKey: secret },
+      { apiKey: secret, x: 1 },
+    ]) {
       const response = await post(base, "/auth-accounts/work/api-key", bad);
       expect(response.status).toBe(400);
       expect(JSON.stringify(await response.json())).not.toContain(secret);
     }
-    expect(
-      (await post(base, "/auth-accounts/work/api-key", { label: "A", apiKey: secret, x: 1 }))
-        .status,
-    ).toBe(400);
     expect(setKey).not.toHaveBeenCalled();
-    const response = await post(base, "/auth-accounts/work/api-key", {
-      label: " Work key ",
-      apiKey: secret,
-    });
+    const response = await post(base, "/auth-accounts/work/api-key", { apiKey: secret });
     expect(response.status).toBe(200);
     expect(JSON.stringify(await response.json())).not.toContain(secret);
-    expect(rename).toHaveBeenCalledWith("work", "Work key");
     expect(setKey).toHaveBeenCalledWith("work", "claude", secret);
+  });
+
+  it("add takes only a provider; renaming an account is gone", async () => {
+    const add = vi
+      .spyOn(SessionService.prototype, "addAuthorizationAccount")
+      .mockResolvedValue({ id: "new", provider: "codex", createdAt: "x" });
+    const base = await fixture();
+    expect((await post(base, "/auth-accounts", { provider: "codex", label: "Work" })).status).toBe(
+      400,
+    );
+    expect(add).not.toHaveBeenCalled();
+    expect((await post(base, "/auth-accounts", { provider: "codex" })).status).toBe(201);
+    expect(add).toHaveBeenCalledExactlyOnceWith("codex");
+    const renamed = await fetch(`${base}/auth-accounts/new`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label: "Work" }),
+    });
+    expect(renamed.status).toBe(404);
+  });
+
+  it("legacy /claude-accounts ignores a label and exposes only the legacy projection", async () => {
+    const stored = { id: "work", provider: "claude" as const, createdAt: "x" };
+    const added = vi.spyOn(AuthAccounts.prototype, "add").mockReturnValue(stored);
+    vi.spyOn(AuthAccounts.prototype, "read").mockReturnValue({
+      schema: 1,
+      accounts: [{ ...stored, identity: { email: "alek@x.com", organizationId: "org-1" } }],
+      pools: {},
+    });
+    vi.spyOn(AuthProxy.prototype, "configure").mockResolvedValue();
+    vi.spyOn(AuthProxy.prototype, "getState").mockResolvedValue({
+      accounts: [
+        {
+          id: "work",
+          provider: "claude",
+          status: "ready",
+          credential: "oauth",
+          identity: { email: "alek@x.com", organizationId: "org-1" },
+        },
+      ],
+      sessions: [],
+    });
+    vi.spyOn(SessionService.prototype, "startAccountLogin").mockResolvedValue({
+      loginTmuxSession: "claude-login-work",
+    });
+    const base = await fixture();
+    const created = await post(base, "/claude-accounts/add", { label: "Typed" });
+    expect(created.status).toBe(201);
+    expect(added).toHaveBeenCalledExactlyOnceWith("claude");
+    expect(await created.json()).toEqual({
+      account: { id: "work", label: "New Claude account", authenticated: false },
+      loginTmuxSession: "claude-login-work",
+    });
+    const listed = (await (await fetch(`${base}/claude-accounts`)).json()) as {
+      accounts: Record<string, unknown>[];
+    };
+    expect(Object.keys(listed.accounts[0] ?? {}).sort()).toEqual([
+      "authenticated",
+      "createdAt",
+      "credential",
+      "id",
+      "label",
+      "limited",
+      "provider",
+      "status",
+    ]);
+    expect(listed.accounts[0]).toMatchObject({ label: "alek@x.com" });
+    expect(JSON.stringify(listed)).not.toContain("org-1");
   });
 
   it("user-action record for api-key has no params", async () => {
     vi.spyOn(AuthAccounts.prototype, "read").mockReturnValue(account("claude"));
-    vi.spyOn(AuthAccounts.prototype, "rename").mockReturnValue({
-      id: "work",
-      provider: "claude",
-      createdAt: "x",
-    });
     vi.spyOn(AuthProxy.prototype, "setApiKey").mockResolvedValue({
       accountId: "work",
       status: "pending",
     });
     const base = await fixture();
     const secret = "sk-test-secret-value";
-    await post(base, "/auth-accounts/work/api-key", { label: "A", apiKey: secret });
+    await post(base, "/auth-accounts/work/api-key", { apiKey: secret });
     const log = await readFile(join(directory!, "data", "user-actions.jsonl"), "utf8");
     expect(log).toContain("/auth-accounts/work/api-key");
     expect(log).not.toContain(secret);

@@ -3423,7 +3423,7 @@ export function createProgram(cliEntrypoint: string): Command {
       else
         for (const account of result.accounts) {
           writeStdout(
-            `${account.id}\t${account.provider}\t${account.label ?? account.id}\t${account.status}`,
+            `${account.id}\t${account.provider}\t${account.displayName}\t${account.status}`,
           );
         }
     });

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import type { AuthQuotaSummary } from "./auth-quota.js";
 import { listAccounts } from "./claude-accounts.js";
 
 export const authProviderSchema = z.enum(["claude", "codex"]);
@@ -16,10 +17,20 @@ export class AuthorizationError extends Error {
   }
 }
 
+const identitySchema = z.object({
+  email: z.string().optional(),
+  organizationName: z.string().optional(),
+  organizationId: z.string().optional(),
+  plan: z.string().optional(),
+  keyHint: z.string().optional(),
+});
+/** Provider identity of a signed-in account; never a secret. */
+export type AuthIdentity = z.infer<typeof identitySchema>;
+
 const accountSchema = z.object({
   id: z.string().min(1),
   provider: authProviderSchema,
-  label: z.string().optional(),
+  identity: identitySchema.optional(),
   createdAt: z.string(),
 });
 export type AuthAccount = z.infer<typeof accountSchema>;
@@ -39,6 +50,10 @@ const storeSchema = z.object({
 export type AuthAccountsState = z.infer<typeof storeSchema>;
 
 export interface AuthAccountSummary extends AuthAccount {
+  /** The one name every surface shows; see authDisplayNames. */
+  displayName: string;
+  /** Cached quota; present only on GET /auth-accounts for ready OAuth accounts. */
+  quota?: AuthQuotaSummary;
   authenticated: boolean;
   status: "ready" | "sign_in_required" | "pending" | "error";
   /** True while a shared quota cooldown is active; cooldownUntil is its ISO end. */
@@ -48,7 +63,81 @@ export interface AuthAccountSummary extends AuthAccount {
   credential?: "oauth" | "api_key";
 }
 
-/** Runtime labels and pool preferences. Provider credentials belong to the companion. */
+const PROVIDER_NAME: Record<AuthProvider, string> = { claude: "Claude", codex: "Codex" };
+
+function upperFirst(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+/** Schema key order with the plan first-letter-uppercased, so stored and live identities compare equal. */
+function normalizeIdentity(identity: AuthIdentity): AuthIdentity {
+  return identitySchema.parse({
+    ...identity,
+    ...(identity.plan ? { plan: upperFirst(identity.plan) } : {}),
+  });
+}
+
+function lastFour(value: string): string {
+  return `····${value.slice(-4)}`;
+}
+
+/**
+ * Display name per account id, from provider identity only. Per provider: API key "API key ····1234";
+ * no identity "New Claude account"; unique email as is; a repeated email adds the organization (Claude)
+ * or plan (Codex), then the last 4 of the organization id when that is still ambiguous.
+ */
+export function authDisplayNames(
+  accounts: { id: string; provider: AuthProvider; identity?: AuthIdentity | undefined }[],
+): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const provider of authProviderSchema.options) {
+    const pool = accounts.filter((account) => account.provider === provider);
+    const emailOf = (account: (typeof pool)[number]): string =>
+      account.identity?.email?.trim().toLowerCase() ?? "";
+    const secondaryOf = (account: (typeof pool)[number]): string =>
+      (provider === "claude"
+        ? account.identity?.organizationName
+        : account.identity?.plan
+      )?.trim() ?? "";
+    const sameEmail = (account: (typeof pool)[number]) =>
+      pool.filter((other) => emailOf(other) === emailOf(account));
+    for (const account of pool) {
+      const identity = account.identity;
+      const email = identity?.email?.trim();
+      if (identity?.keyHint) {
+        names.set(account.id, `API key ${lastFour(identity.keyHint)}`);
+      } else if (!email) {
+        names.set(account.id, `New ${PROVIDER_NAME[provider]} account`);
+      } else if (sameEmail(account).length === 1) {
+        names.set(account.id, email);
+      } else {
+        const secondary = secondaryOf(account);
+        const shared = sameEmail(account).filter((other) => secondaryOf(other) === secondary);
+        if (secondary && shared.length === 1) {
+          names.set(account.id, `${email} · ${secondary}`);
+        } else if (identity?.organizationId) {
+          names.set(account.id, `${email} · ${lastFour(identity.organizationId)}`);
+        } else {
+          names.set(account.id, email);
+        }
+      }
+    }
+  }
+  return names;
+}
+
+/** Accounts carrying the identity the companion reports now; the stored one lags a write behind a first sign-in. */
+export function withCompanionIdentity<T extends { id: string }>(
+  accounts: T[],
+  entries: { id: string; identity?: AuthIdentity | undefined }[],
+): T[] {
+  return accounts.map((account) => {
+    const identity = entries.find((entry) => entry.id === account.id)?.identity;
+    return identity ? { ...account, identity: normalizeIdentity(identity) } : account;
+  });
+}
+
+/** Pool preferences and provider identity. Provider credentials belong to the companion. */
 export class AuthAccounts {
   constructor(
     private readonly dataDir: string,
@@ -68,12 +157,7 @@ export class AuthAccounts {
       const legacy = listAccounts(this.dataDir);
       const state: AuthAccountsState = {
         schema: 1,
-        accounts: legacy.map(({ id, label, createdAt }) => ({
-          id,
-          provider: "claude",
-          ...(label ? { label } : {}),
-          createdAt,
-        })),
+        accounts: legacy.map(({ id, createdAt }) => ({ id, provider: "claude", createdAt })),
         pools:
           legacy.length > 0 || existsSync(join(this.dataDir, "claude-accounts.json"))
             ? {
@@ -107,12 +191,11 @@ export class AuthAccounts {
     chmodSync(this.path, 0o600);
   }
 
-  add(provider: AuthProvider, label?: string): AuthAccount {
+  add(provider: AuthProvider): AuthAccount {
     const state = this.read();
     const account: AuthAccount = {
       id: randomUUID(),
       provider,
-      ...(label?.trim() ? { label: label.trim() } : {}),
       createdAt: new Date().toISOString(),
     };
     state.accounts.push(account);
@@ -130,13 +213,19 @@ export class AuthAccounts {
     return account;
   }
 
-  rename(id: string, label: string): AuthAccount {
+  /** Stores the identity the companion reports per account; writes only when something changed. */
+  recordIdentities(entries: { id: string; identity?: AuthIdentity | undefined }[]): void {
     const state = this.read();
-    const account = state.accounts.find((entry) => entry.id === id);
-    if (!account) throw new AuthorizationError(`Unknown authorization account: ${id}`, 404);
-    account.label = label.trim();
-    this.write(state);
-    return account;
+    let changed = false;
+    for (const { id, identity } of entries) {
+      const account = state.accounts.find((candidate) => candidate.id === id);
+      if (!account || !identity) continue;
+      const next = normalizeIdentity(identity);
+      if (JSON.stringify(account.identity) === JSON.stringify(next)) continue;
+      account.identity = next;
+      changed = true;
+    }
+    if (changed) this.write(state);
   }
 
   /** Removes an account; a removed default moves to the first ready account of the provider. */

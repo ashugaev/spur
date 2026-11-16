@@ -30,9 +30,12 @@ import { fileURLToPath } from "node:url";
 import {
   AuthorizationError,
   AuthAccounts,
+  authDisplayNames,
+  withCompanionIdentity,
   type AuthProvider,
   type AuthAccountSummary,
 } from "./auth-accounts.js";
+import { AuthQuota } from "./auth-quota.js";
 import {
   AuthProxy,
   authProxyBinaryPath,
@@ -3891,6 +3894,7 @@ export class SessionService {
   private readonly preflightUsageStore: PreflightUsageStore;
   private readonly authAccounts: AuthAccounts;
   private readonly authProxy: AuthProxy;
+  private readonly authQuota: AuthQuota;
   private readonly authAlerts: AuthAlerts;
   private readonly authTerminals: AuthTerminalLogins;
   private authSnapshot: { at: number; run: Promise<AuthProxyState> } | undefined;
@@ -4416,6 +4420,11 @@ export class SessionService {
       authProxyBinaryPath,
       (rotation) => void this.recordAuthRotation(rotation),
     );
+    this.authQuota = new AuthQuota({
+      dataDir: this.config.dataDir,
+      fetchUsage: (accountIds) => this.authProxy.getUsage(accountIds),
+      now: () => Date.now(),
+    });
     this.authAlerts = new AuthAlerts({
       dataDir: this.config.dataDir,
       onOpened: (entry) => logAuthFailed(this.config.dataDir, entry),
@@ -7517,9 +7526,19 @@ export class SessionService {
     if (!this.authSnapshot || Date.now() - this.authSnapshot.at >= 500) {
       const snapshot = { at: Date.now(), run: this.authProxy.getState() };
       this.authSnapshot = snapshot;
-      void snapshot.run.catch(() => {
-        if (this.authSnapshot === snapshot) this.authSnapshot = undefined;
-      });
+      void snapshot.run.then(
+        (state) => {
+          // Best effort: a failed identity write must not fail the state read.
+          try {
+            this.authAccounts.recordIdentities(state.accounts);
+          } catch {
+            // The next snapshot retries.
+          }
+        },
+        () => {
+          if (this.authSnapshot === snapshot) this.authSnapshot = undefined;
+        },
+      );
     }
     return this.authSnapshot.run;
   }
@@ -25017,46 +25036,67 @@ export class SessionService {
     return this.enrich(updated);
   }
 
-  async listAuthorizationAccounts(provider?: AuthProvider): Promise<{
+  /**
+   * Managed accounts with status, identity and display name. Quota rides only on opts.quota: it is
+   * read from the cache and never waits on a provider, and session list paths must not start usage reads.
+   */
+  async listAuthorizationAccounts(
+    provider?: AuthProvider,
+    opts?: { quota?: boolean },
+  ): Promise<{
     accounts: AuthAccountSummary[];
     pools: ReturnType<AuthAccounts["read"]>["pools"];
   }> {
     const state = this.authAccounts.read();
     const statuses =
       state.accounts.length > 0 ? (await this.readAuthorizationState()).accounts : [];
+    const identified = withCompanionIdentity(state.accounts, statuses);
+    const names = authDisplayNames(identified);
+    const all = identified.map((account): AuthAccountSummary => {
+      const entry = statuses.find((candidate) => candidate.id === account.id);
+      const status = entry?.status ?? "sign-in-required";
+      return {
+        ...account,
+        displayName: names.get(account.id) ?? account.id,
+        limited: entry?.cooldownUntil !== undefined,
+        ...(entry?.cooldownUntil ? { cooldownUntil: entry.cooldownUntil } : {}),
+        ...(entry?.credential ? { credential: entry.credential } : {}),
+        authenticated: status === "ready",
+        status:
+          status === "sign-in-required"
+            ? "sign_in_required"
+            : status === "failed"
+              ? "error"
+              : status,
+      };
+    });
+    // The cache sees every store account: pruning against a provider subset would drop the others.
+    const quotas = opts?.quota
+      ? this.authQuota.read(
+          all.map((account) => ({
+            id: account.id,
+            provider: account.provider,
+            status: account.status,
+            ...(account.credential ? { credential: account.credential } : {}),
+          })),
+        )
+      : undefined;
     return {
-      accounts: state.accounts
+      accounts: all
         .filter((account) => !provider || account.provider === provider)
-        .map((account): AuthAccountSummary => {
-          const entry = statuses.find((candidate) => candidate.id === account.id);
-          const status = entry?.status ?? "sign-in-required";
-          return {
-            ...account,
-            limited: entry?.cooldownUntil !== undefined,
-            ...(entry?.cooldownUntil ? { cooldownUntil: entry.cooldownUntil } : {}),
-            ...(entry?.credential ? { credential: entry.credential } : {}),
-            authenticated: status === "ready",
-            status:
-              status === "sign-in-required"
-                ? "sign_in_required"
-                : status === "failed"
-                  ? "error"
-                  : status,
-          };
+        .map((account) => {
+          const quota = quotas?.get(account.id);
+          return quota ? { ...account, quota } : account;
         }),
       pools: state.pools,
     };
   }
 
-  async addAuthorizationAccount(provider: AuthProvider, label?: string) {
-    const account = this.authAccounts.add(provider, label);
+  async addAuthorizationAccount(provider: AuthProvider) {
+    const account = this.authAccounts.add(provider);
     await this.authProxy.configure();
     this.authSnapshot = undefined;
     return account;
-  }
-
-  renameAuthorizationAccount(accountId: string, label: string) {
-    return this.authAccounts.rename(accountId, label);
   }
 
   async updateAuthorizationPool(
@@ -25170,14 +25210,9 @@ export class SessionService {
     return this.authProxy.login(accountId, account.provider, chosen);
   }
 
-  async setAuthorizationApiKey(
-    accountId: string,
-    label: string,
-    apiKey: string,
-  ): Promise<AuthLogin> {
+  async setAuthorizationApiKey(accountId: string, apiKey: string): Promise<AuthLogin> {
     this.authSnapshot = undefined;
     const account = this.requireAuthorizationAccount(accountId);
-    this.authAccounts.rename(accountId, label);
     return this.authProxy.setApiKey(accountId, account.provider, apiKey);
   }
 
@@ -25208,14 +25243,16 @@ export class SessionService {
     let managed: ManagedBreakage[] | null = [];
     if (state.accounts.length > 0) {
       try {
-        managed = (await this.readAuthorizationState()).accounts.flatMap((entry) => {
+        const statuses = (await this.readAuthorizationState()).accounts;
+        const names = authDisplayNames(withCompanionIdentity(state.accounts, statuses));
+        managed = statuses.flatMap((entry) => {
           const account = state.accounts.find((candidate) => candidate.id === entry.id);
           return entry.brokenAt && account
             ? [
                 {
                   accountId: account.id,
                   provider: account.provider,
-                  label: account.label?.trim() || account.id,
+                  label: names.get(account.id) ?? account.id,
                   brokenAt: entry.brokenAt,
                 },
               ]
@@ -25248,12 +25285,20 @@ export class SessionService {
     await this.authTerminals.stop(id);
   }
 
+  /** Legacy Claude shape: the display name rides as label; identity and quota stay out. */
   async listClaudeAccounts() {
-    return (await this.listAuthorizationAccounts("claude")).accounts;
+    return (await this.listAuthorizationAccounts("claude")).accounts.map(
+      ({ displayName, identity: _identity, quota: _quota, ...account }) => ({
+        ...account,
+        label: displayName,
+      }),
+    );
   }
 
-  addClaudeAccount(opts: { label?: string }) {
-    return this.addAuthorizationAccount("claude", opts.label);
+  /** A new account has no identity yet, so its label is the placeholder display name. */
+  async addClaudeAccount() {
+    const account = await this.addAuthorizationAccount("claude");
+    return { id: account.id, label: authDisplayNames([account]).get(account.id) ?? account.id };
   }
 
   removeClaudeAccount(accountId: string): Promise<void> {
@@ -30103,25 +30148,23 @@ export class SessionService {
     { id: string; label?: string; authenticated: boolean }[]
   > {
     if (!this.config.authRotation.switchAuth) return [];
-    let accounts: AuthAccountSummary[];
+    let accounts: Pick<AuthAccountSummary, "id" | "displayName" | "authenticated">[];
     try {
       accounts = (await this.listAuthorizationAccounts("claude")).accounts;
     } catch {
-      accounts = this.authAccounts
-        .read()
-        .accounts.filter((account) => account.provider === "claude")
-        .map(
-          (account): AuthAccountSummary => ({
-            ...account,
-            authenticated: false,
-            limited: false,
-            status: "error",
-          }),
-        );
+      const stored = this.authAccounts.read().accounts;
+      const names = authDisplayNames(stored);
+      accounts = stored
+        .filter((account) => account.provider === "claude")
+        .map((account) => ({
+          id: account.id,
+          displayName: names.get(account.id) ?? account.id,
+          authenticated: false,
+        }));
     }
     return accounts.map((account) => ({
       id: account.id,
-      ...(account.label ? { label: account.label } : {}),
+      label: account.displayName,
       authenticated: account.authenticated,
     }));
   }

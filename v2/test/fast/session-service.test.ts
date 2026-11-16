@@ -164,7 +164,10 @@ import {
   swapSessionCredentialsMock,
   authAccountsReadMock,
   authAccountsRemoveMock,
+  authAccountsRecordIdentitiesMock,
   authProxyGetStateMock,
+  authProxyGetUsageMock,
+  authProxySetApiKeyMock,
   authProxyRegisterSessionMock,
   authProxySwitchSessionMock,
   authProxyRevokeSessionMock,
@@ -23562,6 +23565,137 @@ describe("SessionService", () => {
       ]);
       service.dispose();
     });
+
+    describe("account identity and quota", () => {
+      const stored = (provider: "claude" | "codex", ids: string[]) =>
+        authAccountsReadMock.mockReturnValue({
+          schema: 1,
+          accounts: ids.map((id) => ({
+            id,
+            provider,
+            createdAt: "2026-03-18T09:00:00.000Z",
+          })),
+          pools: {
+            [provider]: { defaultAccountId: ids[0], defaultGeneration: 0, autoRotate: true },
+          },
+        });
+
+      it("returns the companion identity on the first read, before the store has it", async () => {
+        stored("claude", ["a", "b"]);
+        authProxyGetStateMock.mockResolvedValue({
+          accounts: [
+            {
+              id: "a",
+              provider: "claude",
+              status: "ready",
+              credential: "oauth",
+              identity: { email: "alek@x.com", organizationName: "Intelas" },
+            },
+            {
+              id: "b",
+              provider: "claude",
+              status: "ready",
+              credential: "api_key",
+              identity: { keyHint: "7Q2c" },
+            },
+          ],
+          sessions: [],
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const { accounts } = await service.listAuthorizationAccounts("claude");
+        expect(
+          accounts.map(({ id, displayName, identity }) => ({ id, displayName, identity })),
+        ).toEqual([
+          {
+            id: "a",
+            displayName: "alek@x.com",
+            identity: { email: "alek@x.com", organizationName: "Intelas" },
+          },
+          { id: "b", displayName: "API key ····7Q2c", identity: { keyHint: "7Q2c" } },
+        ]);
+        await vi.waitFor(() =>
+          expect(authAccountsRecordIdentitiesMock).toHaveBeenCalledWith(
+            expect.arrayContaining([expect.objectContaining({ id: "a" })]),
+          ),
+        );
+        service.dispose();
+      });
+
+      it("never reads usage without the quota option", async () => {
+        stored("claude", ["a"]);
+        authProxyGetStateMock.mockResolvedValue({
+          accounts: [{ id: "a", provider: "claude", status: "ready", credential: "oauth" }],
+          sessions: [],
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.listAuthorizationAccounts("claude");
+        await service.listClaudeAccounts();
+        expect(authProxyGetUsageMock).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("reads usage in the background for every store account, whatever the provider filter", async () => {
+        authAccountsReadMock.mockReturnValue({
+          schema: 1,
+          accounts: [
+            { id: "a", provider: "claude", createdAt: "2026-03-18T09:00:00.000Z" },
+            { id: "c", provider: "codex", createdAt: "2026-03-18T09:00:00.000Z" },
+          ],
+          pools: {},
+        });
+        authProxyGetStateMock.mockResolvedValue({
+          accounts: [
+            { id: "a", provider: "claude", status: "ready", credential: "oauth" },
+            { id: "c", provider: "codex", status: "ready", credential: "oauth" },
+          ],
+          sessions: [],
+        });
+        authProxyGetUsageMock.mockReturnValue(new Promise(() => undefined));
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const { accounts } = await service.listAuthorizationAccounts("claude", { quota: true });
+        expect(accounts.map((account) => account.id)).toEqual(["a"]);
+        expect(accounts[0]).not.toHaveProperty("quota");
+        expect(authProxyGetUsageMock).toHaveBeenCalledExactlyOnceWith(["a", "c"]);
+        service.dispose();
+      });
+
+      it("labels a sign-in alert with the display name", async () => {
+        stored("claude", ["a"]);
+        authProxyGetStateMock.mockResolvedValue({
+          accounts: [
+            {
+              id: "a",
+              provider: "claude",
+              status: "sign-in-required",
+              brokenAt: "2026-03-18T09:30:00.000Z",
+              identity: { email: "alek@x.com", organizationId: "org-1" },
+            },
+          ],
+          sessions: [],
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const { alerts } = await service.listAuthAlerts();
+        expect(alerts.find((alert) => alert.accountId === "a")?.label).toBe("alek@x.com");
+        service.dispose();
+      });
+
+      it("leaves the store alone when the companion rejects an API key", async () => {
+        stored("claude", ["a"]);
+        authProxySetApiKeyMock.mockRejectedValue(new Error("key rejected"));
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await expect(service.setAuthorizationApiKey("a", "sk-fixture")).rejects.toThrow(
+          "key rejected",
+        );
+        expect(authProxySetApiKeyMock).toHaveBeenCalledWith("a", "claude", "sk-fixture");
+        expect(authAccountsRecordIdentitiesMock).not.toHaveBeenCalled();
+        service.dispose();
+      });
+    });
   });
 
   describe("claude accounts enrichment", () => {
@@ -23615,8 +23749,8 @@ describe("SessionService", () => {
       const [batched] = (await service.list()) as SessionView[];
 
       expect(single.claudeAccounts).toEqual([
-        { id: "acc-1", label: "primary", authenticated: true },
-        { id: "acc-2", authenticated: false },
+        { id: "acc-1", label: "New Claude account", authenticated: true },
+        { id: "acc-2", label: "New Claude account", authenticated: false },
       ]);
       expect(batched?.claudeAccounts).toEqual(single.claudeAccounts);
       service.dispose();

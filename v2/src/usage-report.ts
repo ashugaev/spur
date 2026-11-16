@@ -58,8 +58,8 @@ export interface UsageReportDeps {
 
 const CLAUDE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_URL = "https://chatgpt.com/backend-api/wham/usage";
-const CACHE_TTL_MS = 180_000;
-const MAX_RETRY_AFTER_S = 3600;
+export const CACHE_TTL_MS = 180_000;
+export const MAX_RETRY_AFTER_S = 3600;
 const FETCH_TIMEOUT_MS = 5_000;
 
 const ERROR_MESSAGES: Record<QuotaErrorKind, string> = {

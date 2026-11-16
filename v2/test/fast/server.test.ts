@@ -4260,9 +4260,13 @@ describe("startServer", () => {
         loginTmuxSession: string;
       };
       expect(payload.loginTmuxSession).toBe("claude-login-test");
-      expect(payload.account).toMatchObject({ label: "work", authenticated: false });
+      expect(payload.account).toMatchObject({
+        label: "New Claude account",
+        authenticated: false,
+      });
       expect(payload.account.id).toEqual(expect.any(String));
       expect(payload.account).not.toHaveProperty("configDir");
+      expect(payload.account).not.toHaveProperty("identity");
     } finally {
       configure.mockRestore();
       startLoginSpy.mockRestore();

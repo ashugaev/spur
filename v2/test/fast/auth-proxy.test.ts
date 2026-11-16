@@ -109,6 +109,63 @@ describe("authorization proxy private control", () => {
     });
   });
 
+  it("parses account identity and strips secret keys inside it", async () => {
+    childWithControl((request, output, done) => {
+      const result =
+        request.method === "configure"
+          ? {}
+          : {
+              accounts: [
+                {
+                  id: "a",
+                  provider: "claude",
+                  status: "ready",
+                  identity: {
+                    email: "a@x.com",
+                    organizationName: "Org",
+                    organizationId: "org-1",
+                    plan: "pro",
+                    keyHint: "7Q2c",
+                    api_key: "secret",
+                    access_token: "secret",
+                  },
+                },
+              ],
+              sessions: [],
+            };
+      output.write(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
+      done();
+    });
+    const state = await proxy!.getState();
+    expect(state.accounts[0]?.identity).toEqual({
+      email: "a@x.com",
+      organizationName: "Org",
+      organizationId: "org-1",
+      plan: "pro",
+      keyHint: "7Q2c",
+    });
+  });
+
+  it("sends getUsage as a typed request and rejects a body over 64 KiB", async () => {
+    const sent: unknown[] = [];
+    let body = '{"five_hour":{}}';
+    childWithControl((request, output, done) => {
+      if (request.method !== "configure") sent.push(request);
+      reply(output, request, {
+        usage: [{ accountId: "a", status: "ok", httpStatus: 200, body, token: "secret" }],
+      });
+      done();
+    });
+    await expect(proxy!.getUsage(["a"])).resolves.toEqual([
+      { accountId: "a", status: "ok", httpStatus: 200, body: '{"five_hour":{}}' },
+    ]);
+    expect(sent).toEqual([
+      { id: expect.any(Number), method: "getUsage", params: { accountIds: ["a"] } },
+    ]);
+    body = "x".repeat(65537);
+    await expect(proxy!.getUsage(["a"])).rejects.toThrow();
+  });
+
   it("rejects malformed provider output instead of treating files as ready", async () => {
     childWithControl((request, output, done) => {
       output.write(

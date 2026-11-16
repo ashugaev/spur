@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { AuthorizationError, authProviderSchema, type AuthAccountsState } from "./auth-accounts.js";
+import type { UsageEntry } from "./auth-quota.js";
 
 const statusSchema = z.enum(["ready", "sign-in-required", "pending", "failed"]);
 const loginStatusSchema = z.enum(["ready", "sign-in-required", "pending", "failed", "busy"]);
@@ -74,9 +75,29 @@ const stateSchema = z.object({
       cooldownUntil: z.string().datetime().optional(),
       credential: z.enum(["oauth", "api_key"]).optional(),
       brokenAt: z.string().datetime().optional(),
+      identity: z
+        .object({
+          email: z.string().optional(),
+          organizationName: z.string().optional(),
+          organizationId: z.string().optional(),
+          plan: z.string().optional(),
+          keyHint: z.string().optional(),
+        })
+        .optional(),
     }),
   ),
   sessions: z.array(authSessionSchema),
+});
+const usageSchema = z.object({
+  usage: z.array(
+    z.object({
+      accountId: z.string(),
+      status: z.enum(["ok", "error"]),
+      httpStatus: z.number().int().optional(),
+      retryAfterSeconds: z.number().int().optional(),
+      body: z.string().max(65536).optional(),
+    }),
+  ),
 });
 const rotationSchema = z.object({
   event: z.literal("rotated"),
@@ -118,6 +139,7 @@ type AuthControlRequest =
       };
     }
   | { method: "getState"; params: object }
+  | { method: "getUsage"; params: { accountIds: string[] } }
   | {
       method: "registerSession";
       params: { sessionId: string; provider: "claude" | "codex"; accountId: string | null };
@@ -332,6 +354,15 @@ export class AuthProxy {
 
   getState(): Promise<AuthProxyState> {
     return this.execute({ method: "getState", params: {} }, stateSchema);
+  }
+
+  /** Reads provider usage for 1 to 4 OAuth accounts; the companion allows one read at a time. */
+  async getUsage(accountIds: string[]): Promise<UsageEntry[]> {
+    const { usage } = await this.execute(
+      { method: "getUsage", params: { accountIds } },
+      usageSchema,
+    );
+    return usage;
   }
 
   registerSession(

@@ -35,7 +35,7 @@ describe("native companion control lifecycle", () => {
   it("hydrates the saved endpoint, routing key and episode across control-parent replacement", async () => {
     directory = await realpath(await mkdtemp(join(tmpdir(), "spur-auth-process-")));
     const accounts = new AuthAccounts(directory, () => true);
-    const account = accounts.add("codex", "Fixture");
+    const account = accounts.add("codex");
     endpoint = `http://127.0.0.1:${await findFreePort()}`;
     const token = "ab".repeat(32);
     const session = {

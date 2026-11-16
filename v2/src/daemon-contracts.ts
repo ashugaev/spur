@@ -524,7 +524,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "list_auth_accounts",
     "GET",
     "/auth-accounts",
-    "Saved provider authorization accounts and pools.",
+    "Saved provider authorization accounts and pools; each account carries identity, displayName and cached quota.",
     {
       query: [field("agent", '"claude"|"codex"', "Optional provider filter.")],
     },
@@ -537,19 +537,8 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     {
       body: body("AddAuthAccountRequest", [
         field("provider", '"claude"|"codex"', "Provider.", true),
-        field("label", "string", "Display label."),
       ]),
-      examples: [{ body: { provider: "codex", label: "Work" } }],
-    },
-  ),
-  operation(
-    "rename_auth_account",
-    "PATCH",
-    "/auth-accounts/{accountId}",
-    "Rename an authorization account.",
-    {
-      body: body("RenameAuthAccountRequest", [field("label", "string", "Display label.", true)]),
-      examples: [{ body: { label: "Work" } }],
+      examples: [{ body: { provider: "codex" } }],
     },
   ),
   operation(
@@ -578,13 +567,12 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "set_auth_account_api_key",
     "POST",
     "/auth-accounts/{accountId}/api-key",
-    "Rename the account and sign in with a provider API key; saved only after a test request succeeds.",
+    "Sign in with a provider API key; saved only after a test request succeeds.",
     {
       body: body("SetAuthAccountApiKeyRequest", [
-        field("label", "string", "Non-blank display label.", true),
         field("apiKey", "string", "Provider API key; never returned or logged.", true),
       ]),
-      examples: [{ body: { label: "Work key", apiKey: "<api-key>" } }],
+      examples: [{ body: { apiKey: "<api-key>" } }],
     },
   ),
   operation(

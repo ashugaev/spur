@@ -390,8 +390,11 @@ const seedSessionHomeMock: Mock = vi.fn();
 const swapSessionCredentialsMock: Mock = vi.fn();
 const authAccountsReadMock: Mock = vi.fn();
 const authAccountsRemoveMock: Mock = vi.fn();
+const authAccountsRecordIdentitiesMock: Mock = vi.fn();
 const authProxyConfigureMock: Mock = vi.fn();
 const authProxyGetStateMock: Mock = vi.fn();
+const authProxyGetUsageMock: Mock = vi.fn();
+const authProxySetApiKeyMock: Mock = vi.fn();
 const authProxyRegisterSessionMock: Mock = vi.fn();
 const authProxySwitchSessionMock: Mock = vi.fn();
 const authProxyRevokeSessionMock: Mock = vi.fn();
@@ -436,12 +439,7 @@ function resetAccountStoreMocks(accounts: () => TestAccount[]): void {
   authAccountsReadMock.mockReset().mockImplementation(
     (): AuthAccountsState => ({
       schema: 1,
-      accounts: accounts().map(({ id, label, createdAt }) => ({
-        id,
-        provider: "claude",
-        ...(label ? { label } : {}),
-        createdAt,
-      })),
+      accounts: accounts().map(({ id, createdAt }) => ({ id, provider: "claude", createdAt })),
       pools: accounts().length
         ? {
             claude: {
@@ -454,7 +452,10 @@ function resetAccountStoreMocks(accounts: () => TestAccount[]): void {
     }),
   );
   authAccountsRemoveMock.mockReset();
+  authAccountsRecordIdentitiesMock.mockReset();
   authProxyConfigureMock.mockReset().mockResolvedValue(undefined);
+  authProxyGetUsageMock.mockReset().mockResolvedValue([]);
+  authProxySetApiKeyMock.mockReset();
   authProxyGetStateMock.mockReset().mockImplementation(async () => ({
     accounts: accounts().map(({ id, authenticated }) => ({
       id,
@@ -620,7 +621,7 @@ vi.mock("../../src/auth-accounts.js", async (importOriginal) => ({
     read = authAccountsReadMock;
     remove = authAccountsRemoveMock;
     add = vi.fn();
-    rename = vi.fn();
+    recordIdentities = authAccountsRecordIdentitiesMock;
     updatePool = vi.fn();
   },
 }));
@@ -638,6 +639,8 @@ vi.mock("../../src/auth-proxy.js", () => ({
     }
     configure = authProxyConfigureMock;
     getState = authProxyGetStateMock;
+    getUsage = authProxyGetUsageMock;
+    setApiKey = authProxySetApiKeyMock;
     registerSession = authProxyRegisterSessionMock;
     switchSession = authProxySwitchSessionMock;
     revokeSession = authProxyRevokeSessionMock;
@@ -2342,7 +2345,10 @@ export {
   authAccountsReadMock,
   authAccountsRemoveMock,
   authProxyConfigureMock,
+  authAccountsRecordIdentitiesMock,
   authProxyGetStateMock,
+  authProxyGetUsageMock,
+  authProxySetApiKeyMock,
   authProxyRegisterSessionMock,
   authProxySwitchSessionMock,
   authProxyRevokeSessionMock,
