@@ -36,7 +36,9 @@
 
 **DECISIONS**
 
-- <Material choice, rejected alternative and brief reason; or none with reason>
+| Decision | Alternative | Why |
+|---|---|---|
+| <Material choice> | <Rejected alternative> | <Brief reason> |
 
 **RISKS**
 

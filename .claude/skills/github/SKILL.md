@@ -77,7 +77,7 @@ PR BODY: fill assets/pr-body.md; template owns block order and presentation.
   FLOW: application interaction, not implementation chronology.
   PROMPTS: context plus literal source diff against PR base; new blocks have additions only. No change -> explicit no-change bullet, omit diff.
   Visible packages/web change -> collapsed evidence table, one row per changed state; capture/upload per references/pr-evidence.md. No visible change -> no-change bullet.
-  DECISIONS: 1-4 material tradeoffs from final spec/diff; include scope cuts, never invent alternatives. None -> reason bullet.
+  DECISIONS: 1-4 material tradeoff rows in template's columns, one concise sentence/cell; include scope cuts, never invent alternatives. None -> reason bullet instead of table.
   Verification reports proved results/revision, never test checklists or unrun checks.
   Real issue number exists -> last bullet `- Closes #<n>`.
   Module identifiers only in CORE; exact prompt code only in PROMPTS. Elsewhere ban code/symbols; everywhere ban file paths, diff stats, operator detail and secrets.
