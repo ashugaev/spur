@@ -76,7 +76,7 @@ func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Re
 	store := tokenStore(r.dir)
 	manager := coreauth.NewManager(store, r, r)
 	logins := &loginManager{dir: r.dir, manager: manager, store: store, attempts: map[string]*loginAttempt{}, client: oauthHTTPClient(transport), transport: transport, router: r}
-	r.manager = manager
+	r.manager, r.ctx = manager, ctx
 	// Ready needs a usable registered credential and no pending attempt (logins) plus a persisted
 	// verified mark and no breakage mark (router). Callers hold r.mu.
 	r.readyAccount = func(id string, p provider) bool { return logins.ready(id, p) && r.marksAllowLocked(id) }

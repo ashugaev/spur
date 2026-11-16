@@ -743,15 +743,8 @@ func TestLoginOptionsPerMethod(t *testing.T) {
 			}
 		}
 	}
+	// The control boundary rejects disallowed methods (TestControlRejectsMethodForWrongProvider).
 	l := claudeLoginFixture(t, &providerFake{})
-	for _, bad := range []struct {
-		p      provider
-		method string
-	}{{claude, methodDevice}, {claude, methodBrowser}, {codex, methodOAuth}, {codex, ""}} {
-		if _, err := l.start(context.Background(), "account-a", bad.p, bad.method); err == nil || l.active != "" {
-			t.Fatalf("%s/%q started", bad.p, bad.method)
-		}
-	}
 	status, err := l.start(context.Background(), "account-x", codex, methodBrowser)
 	if err != nil {
 		t.Fatal(err)

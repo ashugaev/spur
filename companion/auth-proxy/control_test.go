@@ -355,7 +355,7 @@ func TestGetStateConcurrentWithVerify(t *testing.T) {
 	}()
 	select {
 	case <-finished:
-	case <-time.After(60 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("sign-in attempts and getState deadlocked")
 	}
 	close(stop)

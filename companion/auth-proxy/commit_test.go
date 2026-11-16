@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
 )
 
 func saveFixtureCredential(t *testing.T, f *loginFixture, id, access, refresh string) {
@@ -263,5 +265,41 @@ func TestDeviceStagingNeverInAuthDir(t *testing.T) {
 		if got := entries(staging); len(got) != 0 {
 			t.Fatalf("%s: staging not emptied: %v", outcome, got)
 		}
+	}
+}
+
+// A sign-in cancelled after the credential registered never gets its verified mark.
+func TestCancelBeforeVerifiedMarkNeverBecomesReady(t *testing.T) {
+	f := newLoginFixture(t)
+	if _, err := f.l.setAPIKey(context.Background(), "account-a", claude, strings.Repeat("key", 8)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "credential saved", func() bool {
+		stored, err := f.l.store.List(context.Background())
+		return err == nil && len(stored) == 1
+	})
+	// Hold the router lock so the attempt, once registered, waits to write its mark; cancel meanwhile.
+	f.r.mu.Lock()
+	waitFor(t, "credential registered", func() bool {
+		auth, ok := f.l.manager.GetByID("account-a.json")
+		return ok && usableAuth(auth) && len(cliproxy.GlobalModelRegistry().GetModelsForClient(auth.ID)) > 0
+	})
+	time.Sleep(300 * time.Millisecond)
+	f.l.mu.Lock()
+	f.l.attempts["account-a"].cancel()
+	f.l.mu.Unlock()
+	f.r.mu.Unlock()
+	final := f.await(t, "account-a")
+	if final.Status == "ready" {
+		t.Fatalf("cancelled sign-in finished ready: %+v", final)
+	}
+	if verified, _ := f.marks("account-a"); verified {
+		t.Fatal("cancelled sign-in was marked verified")
+	}
+	f.r.mu.Lock()
+	eligible := f.r.eligibleLocked("account-a", claude)
+	f.r.mu.Unlock()
+	if eligible {
+		t.Fatal("cancelled sign-in is eligible for routing")
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -113,8 +114,9 @@ type router struct {
 	rotations    chan rotation
 	readyAccount func(string, provider) bool
 	manager      *coreauth.Manager // set by run; re-registers API-key records with executor attributes
+	ctx          context.Context   // run context; stops background projection on shutdown
 	projectMu    sync.Mutex
-	projecting   map[string]bool // API-key ids with a pending projection
+	projecting   map[string]bool // API-key ids with a projection running; true when a hook arrived meanwhile
 	fatal        error
 }
 
@@ -138,7 +140,7 @@ func openRouter(dir string) (*router, error) {
 		_ = lock.Close()
 		return nil, errors.New("another auth proxy owns this data directory")
 	}
-	r := &router{dir: dir, lock: lock, accounts: map[string]accountInput{}, pools: map[provider]poolInput{}, requests: map[string]*admission{}, removing: map[string]bool{}, projecting: map[string]bool{}, rotations: make(chan rotation, 64)}
+	r := &router{ctx: context.Background(), dir: dir, lock: lock, accounts: map[string]accountInput{}, pools: map[provider]poolInput{}, requests: map[string]*admission{}, removing: map[string]bool{}, projecting: map[string]bool{}, rotations: make(chan rotation, 64)}
 	r.state = runtimeState{Schema: stateSchema, DataDir: dir, Sessions: map[string]binding{}, Cooldowns: map[string]time.Time{}, Verified: map[string]time.Time{}, Broken: map[string]time.Time{}}
 	path := filepath.Join(dir, "auth-proxy-state.json")
 	raw, err := os.ReadFile(path)
@@ -316,8 +318,17 @@ func (r *router) marksAllowLocked(id string) bool {
 
 // setVerified records a verified sign-in and clears any breakage mark.
 func (r *router) setVerified(id string) error {
+	return r.setVerifiedUnlessDone(context.Background(), id)
+}
+
+// setVerifiedUnlessDone refuses to mark an attempt that was cancelled: the check runs under the
+// router lock, right before the mark is written.
+func (r *router) setVerifiedUnlessDone(ctx context.Context, id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.state.Verified[id] = time.Now().UTC()
 	delete(r.state.Broken, id)
 	return r.persistLocked()

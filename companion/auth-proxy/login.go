@@ -156,9 +156,6 @@ func (l *loginManager) start(parent context.Context, id string, p provider, meth
 	if l.active != "" {
 		return loginStatus{}, errors.New("another account sign-in is pending")
 	}
-	if !loginMethodAllowed(p, method) {
-		return loginStatus{}, errors.New("sign-in method is not available for this provider")
-	}
 	if method == methodDevice {
 		return l.startDevice(parent, id)
 	}
@@ -336,7 +333,7 @@ func (l *loginManager) commit(ctx context.Context, id string, p provider, a *log
 		return failure(errNotConfirmed, "Sign-in could not be confirmed with the provider")
 	}
 	if l.router != nil {
-		return l.router.setVerified(id)
+		return l.router.setVerifiedUnlessDone(ctx, id)
 	}
 	return nil
 }

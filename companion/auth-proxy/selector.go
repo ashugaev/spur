@@ -199,22 +199,48 @@ func (r *router) observeAuth(_ context.Context, auth *coreauth.Auth) {
 // fence and can leave the account without models, so the update waits for the publication.
 func (r *router) projectLater(id string) {
 	r.projectMu.Lock()
-	if r.projecting[id] {
+	if _, running := r.projecting[id]; running {
+		r.projecting[id] = true // the running pass projects again before it ends
 		r.projectMu.Unlock()
 		return
 	}
-	r.projecting[id] = true
+	r.projecting[id] = false
 	r.projectMu.Unlock()
 	go func() {
-		defer func() { r.projectMu.Lock(); delete(r.projecting, id); r.projectMu.Unlock() }()
-		for deadline := time.Now().Add(15 * time.Second); len(cliproxy.GlobalModelRegistry().GetModelsForClient(id)) == 0 && time.Now().Before(deadline); {
-			time.Sleep(20 * time.Millisecond)
-		}
-		// A credential removed meanwhile stays removed: only a registered auth is updated.
-		if current, ok := r.manager.GetByID(id); ok && projectAPIKey(current) {
-			_, _ = r.manager.Update(coreauth.WithSkipPersist(context.Background()), current)
+		for {
+			timer := time.NewTimer(15 * time.Second)
+			for len(cliproxy.GlobalModelRegistry().GetModelsForClient(id)) == 0 {
+				select {
+				case <-r.ctx.Done():
+				case <-timer.C:
+				case <-time.After(20 * time.Millisecond):
+					continue
+				}
+				break
+			}
+			timer.Stop()
+			// A credential removed meanwhile stays removed: only a registered auth is updated.
+			if current, ok := r.manager.GetByID(id); ok && projectAPIKey(current) && r.ctx.Err() == nil {
+				_, _ = r.manager.Update(coreauth.WithSkipPersist(r.ctx), current)
+			}
+			if !r.projectionDone(id) {
+				return
+			}
 		}
 	}()
+}
+
+// projectionDone ends a projection pass. It reports true, and keeps the entry, when a hook arrived
+// during the pass and the run is still live, so that hook is projected too.
+func (r *router) projectionDone(id string) bool {
+	r.projectMu.Lock()
+	defer r.projectMu.Unlock()
+	if r.projecting[id] && r.ctx.Err() == nil {
+		r.projecting[id] = false
+		return true
+	}
+	delete(r.projecting, id)
+	return false
 }
 
 func (r *router) OnResult(_ context.Context, result coreauth.Result) {
