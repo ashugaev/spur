@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -357,6 +358,7 @@ func (r *router) middleware(probeKey string) gin.HandlerFunc {
 		c.Request.Header.Del("Authorization")
 		c.Request.Header.Del("X-Api-Key")
 		c.Request.Header.Set(requestHeader, requestID)
+		c.Writer = &strippingWriter{ResponseWriter: c.Writer}
 		c.Next()
 	}
 }
@@ -368,4 +370,37 @@ func allowedPath(path string) bool {
 	default:
 		return false
 	}
+}
+
+// strippingWriter drops the headers the SDK strips from upstream responses, on every status. The SDK
+// copies upstream headers into error responses without that filter.
+type strippingWriter struct{ gin.ResponseWriter }
+
+func (w *strippingWriter) strip() {
+	if w.Written() {
+		return
+	}
+	header := w.Header()
+	kept := handlers.FilterUpstreamHeaders(header)
+	for key := range header {
+		// The SDK and server own these; the filter would drop them with the upstream headers.
+		switch http.CanonicalHeaderKey(key) {
+		case "Content-Length", "Content-Encoding":
+			continue
+		}
+		if _, ok := kept[key]; !ok && !handlers.IsCPAReservedResponseHeader(key) {
+			delete(header, key)
+		}
+	}
+}
+
+func (w *strippingWriter) WriteHeader(code int) { w.strip(); w.ResponseWriter.WriteHeader(code) }
+func (w *strippingWriter) WriteHeaderNow()      { w.strip(); w.ResponseWriter.WriteHeaderNow() }
+func (w *strippingWriter) Write(b []byte) (int, error) {
+	w.strip()
+	return w.ResponseWriter.Write(b)
+}
+func (w *strippingWriter) WriteString(s string) (int, error) {
+	w.strip()
+	return w.ResponseWriter.WriteString(s)
 }

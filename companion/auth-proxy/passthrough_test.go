@@ -1,10 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +15,7 @@ import (
 // headers the SDK must strip.
 type headerUpstream struct {
 	*providerFake
+	body string // SSE body; empty makes the proxy answer an empty-stream error
 	mu   sync.Mutex
 	seen []string
 }
@@ -27,7 +28,6 @@ func (h *headerUpstream) RoundTrip(r *http.Request) (*http.Response, error) {
 	h.seen = append(h.seen, r.URL.String())
 	h.mu.Unlock()
 	_, _ = io.Copy(io.Discard, r.Body)
-	sse := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n"
 	header := http.Header{
 		"Content-Type":                   {"text/event-stream"},
 		"X-Codex-Primary-Used-Percent":   {"42"},
@@ -38,13 +38,14 @@ func (h *headerUpstream) RoundTrip(r *http.Request) (*http.Response, error) {
 		"Proxy-Authenticate":             {"Basic"},
 		"X-Litellm-Version":              {"gateway"},
 	}
-	return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(bytes.NewReader([]byte(sse))), Request: r}, nil
+	return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(h.body)), Request: r}, nil
 }
 
-// The account proxy forwards upstream rate-limit headers to the requesting session and still drops
-// cookies, hop-by-hop headers and gateway-prefixed headers.
-func TestUpstreamRateLimitHeadersPassThrough(t *testing.T) {
-	up := &headerUpstream{providerFake: &providerFake{}}
+const completedSSE = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n"
+
+// postResponses sends one /v1/responses request through the companion to a ready Codex account.
+func postResponses(t *testing.T, up *headerUpstream, stream bool) (*http.Response, []byte) {
+	t.Helper()
 	dir := t.TempDir()
 	f := startCompanionFixtureWith(t, dir, up)
 	if result := f.request(t, `{"id":1,"method":"configure","params":{"accounts":[{"id":"acct-import","provider":"codex","createdAt":"2026-01-01T00:00:00Z"}],"pools":[{"provider":"codex","defaultAccountId":"acct-import","autoRotate":false,"defaultGeneration":1}],"policy":{"cooldownMinutes":60,"maxRotationsPerEpisode":1}}}`); !result.OK {
@@ -65,7 +66,8 @@ func TestUpstreamRateLimitHeadersPassThrough(t *testing.T) {
 	if err := json.Unmarshal(reg.Result, &registered); err != nil {
 		t.Fatal(err)
 	}
-	req, _ := http.NewRequest(http.MethodPost, registered.Endpoint+"/v1/responses", strings.NewReader(`{"model":"gpt-5.6-luna","input":"hi","stream":false}`))
+	payload := `{"model":"gpt-5.6-luna","input":"hi","stream":` + strconv.FormatBool(stream) + `}`
+	req, _ := http.NewRequest(http.MethodPost, registered.Endpoint+"/v1/responses", strings.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer "+registered.Token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
@@ -74,9 +76,12 @@ func TestUpstreamRateLimitHeadersPassThrough(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d: %s (upstream saw %v)", resp.StatusCode, body, up.seen)
-	}
+	return resp, body
+}
+
+// assertHeaders checks the rate-limit headers pass and the stripped set does not.
+func assertHeaders(t *testing.T, resp *http.Response) {
+	t.Helper()
 	for name, want := range map[string]string{"X-Codex-Primary-Used-Percent": "42", "X-Codex-Secondary-Used-Percent": "7", "X-Codex-Primary-Reset-At": "1893456000"} {
 		if got := resp.Header.Get(name); got != want {
 			t.Errorf("%s = %q, want %q", name, got, want)
@@ -87,4 +92,26 @@ func TestUpstreamRateLimitHeadersPassThrough(t *testing.T) {
 			t.Errorf("%s leaked downstream: %v", name, got)
 		}
 	}
+}
+
+// The account proxy forwards upstream rate-limit headers to the requesting session and still drops
+// cookies, hop-by-hop headers and gateway-prefixed headers.
+func TestUpstreamRateLimitHeadersPassThrough(t *testing.T) {
+	up := &headerUpstream{providerFake: &providerFake{}, body: completedSSE}
+	resp, body := postResponses(t, up, false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s (upstream saw %v)", resp.StatusCode, body, up.seen)
+	}
+	assertHeaders(t, resp)
+}
+
+// An empty upstream stream becomes an SDK error response; the SDK copies upstream headers into it
+// unfiltered, so the proxy must strip them there too.
+func TestErrorResponseStripsUpstreamHeaders(t *testing.T) {
+	up := &headerUpstream{providerFake: &providerFake{}}
+	resp, body := postResponses(t, up, true)
+	if resp.StatusCode < 400 {
+		t.Fatalf("status %d, want an error: %s", resp.StatusCode, body)
+	}
+	assertHeaders(t, resp)
 }

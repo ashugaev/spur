@@ -62,7 +62,7 @@ func main() {
 	}
 }
 
-// transport carries OAuth token exchange traffic; nil means the default network transport.
+// transport carries all provider traffic (token exchange, probes, refresh, inference); nil means the default network transport.
 func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Reader, output io.Writer, transport http.RoundTripper) error {
 	r, err := openRouter(dir)
 	if err != nil {
@@ -109,16 +109,14 @@ func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Re
 	if err != nil {
 		return errors.New("could not initialize auth transport")
 	}
-	if transport != nil {
-		// Build installs the default provider; a test transport also carries inference traffic.
-		manager.SetRoundTripperProvider(fixedTransport{transport})
-	}
 	serverDone := make(chan error, 1)
 	go func() {
 		defer close(serverDone)
-		// A test transport also carries the SDK's background refresh traffic, so no fixture credential reaches a real provider.
+		// A test transport carries every provider request, refresh and inference included, so no fixture
+		// credential reaches a real provider. Build installs the default provider, so replace it here.
 		runCtx := ctx
 		if transport != nil {
+			manager.SetRoundTripperProvider(fixedTransport{transport})
 			runCtx = context.WithValue(ctx, roundTripperKey, transport)
 		}
 		serverDone <- service.Run(runCtx)
