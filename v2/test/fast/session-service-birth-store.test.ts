@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../src/event-bus.js";
+import * as hostMemory from "../../src/host-memory.js";
 import {
   listSessions,
   readPendingSpawnWork,
@@ -29,6 +30,15 @@ afterEach(() => {
 });
 
 function fixture() {
+  // Pin the host sensors; admission must not depend on runner memory pressure.
+  vi.spyOn(hostMemory, "readHostMemory").mockReturnValue({
+    totalBytes: 64_000_000_000,
+    availableBytes: 32_000_000_000,
+    swapTotalBytes: 8_000_000_000,
+    swapFreeBytes: 8_000_000_000,
+  });
+  vi.spyOn(hostMemory, "readCgroupMemorySnapshot").mockReturnValue(null);
+  vi.spyOn(hostMemory, "readCgroupPressure").mockReturnValue(null);
   const dir = mkdtempSync(join(tmpdir(), "spur-birth-store-"));
   directories.push(dir);
   const dataDir = join(dir, "data");
