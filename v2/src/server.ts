@@ -109,6 +109,8 @@ import {
   SessionNotReopenableError,
   SessionNotRestorableError,
   HandoffTargetNotStalledError,
+  IdempotencyKeyConflictError,
+  InvalidIdempotencyKeyError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
   SessionService,
@@ -2448,7 +2450,7 @@ export async function startServer(
         sendJson(
           response,
           201,
-          await service.spawn(mergeSpawnStateSubscriptions(body), { acceptQueued: true }),
+          await service.spawnFromRequest(mergeSpawnStateSubscriptions(body), "foreground"),
         );
         return;
       }
@@ -2458,7 +2460,7 @@ export async function startServer(
         sendJson(
           response,
           201,
-          await service.spawnInBackground(mergeSpawnStateSubscriptions(body)),
+          await service.spawnFromRequest(mergeSpawnStateSubscriptions(body), "background"),
         );
         return;
       }
@@ -3365,6 +3367,7 @@ export async function startServer(
         error instanceof InvalidSessionSubscriptionInputError ||
         error instanceof InvalidWakeRequestError ||
         error instanceof InvalidJsonBodyError ||
+        error instanceof InvalidIdempotencyKeyError ||
         error instanceof WakeTargetMissingError ||
         error instanceof WakeDispatchConflictError ||
         error instanceof SessionAdmissionDeniedError ||
@@ -3389,6 +3392,7 @@ export async function startServer(
         error instanceof SessionNotRestorableError ||
         error instanceof HandoffTargetNotStalledError ||
         error instanceof SpawnBatchConflictError ||
+        error instanceof IdempotencyKeyConflictError ||
         error instanceof PrAlertOwnerRequestError
       ) {
         failRequest(response, error.statusCode, message, {

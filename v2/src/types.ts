@@ -1326,6 +1326,8 @@ export interface SessionRecord {
   /** Internal durable trigger birth identity and original request. */
   triggerBirthKey?: string;
   triggerBirthRequest?: SpawnSessionRequest;
+  /** Internal: last keyed handoff of this source. */
+  handoffIdempotency?: HandoffIdempotencyReceipt;
   // The id of the workspace (shared git worktree) this session lives in.
   // Equals the session's own id for a session that does not share a
   // workspace; otherwise the id of the session whose workspace it joined
@@ -1583,6 +1585,7 @@ export interface SessionView extends Omit<
   | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "handoffIdempotency"
   | "blockedTriggerNotices"
   | "spawnIntent"
   | "sidecarLaunches"
@@ -1654,6 +1657,7 @@ export type DashboardOmittedField =
   | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "handoffIdempotency"
   | "blockedTriggerNotices"
   | "spawnIntent"
   | "sidecarLaunches"
@@ -1773,6 +1777,11 @@ export interface SpawnSessionRequest {
   /** Compatibility alias for a Claude profile. */
   claudeAccountId?: string;
   subscriptions?: SubscribeSessionStatesRequest[];
+  idempotencyKey?: string;
+}
+
+export interface SpawnSessionResponse extends SessionView {
+  replayed?: true;
 }
 
 export interface DurableSpawnReceipt {
@@ -2136,6 +2145,12 @@ export interface SpawnBatchConflictPayload {
   error: string;
 }
 
+export interface IdempotencyKeyConflictPayload {
+  code: "idempotency_key_conflict";
+  sessionId: string;
+  error: string;
+}
+
 export interface RespawnSessionRequest {
   prompt?: string;
   attachments?: SendMessageAttachment[];
@@ -2152,10 +2167,19 @@ export interface HandoffSessionRequest {
   model?: string;
   reasoningEffort?: ProviderReasoningEffort | null;
   notes?: string;
+  idempotencyKey?: string;
+}
+
+export interface HandoffIdempotencyReceipt {
+  key: string;
+  request: Omit<HandoffSessionRequest, "idempotencyKey">;
+  successorId: string;
+  movedTodoItems: number;
 }
 
 export interface HandoffSessionResponse extends SessionView {
   movedTodoItems: number;
+  replayed?: true;
 }
 
 export interface UpdateSessionSlotsRequest {

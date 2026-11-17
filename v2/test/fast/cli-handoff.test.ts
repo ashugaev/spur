@@ -120,6 +120,15 @@ describe("handoff", () => {
     expect(output).not.toContain("ToDo items");
   });
 
+  it("sends --idempotency-key and prints the replay line", async () => {
+    postJsonMock.mockResolvedValue({ ...handedOff, movedTodoItems: 2, replayed: true });
+    await parseCli(["handoff", "api-1", "--agent", "codex", "--idempotency-key", "h1"]);
+    expect(postJsonMock.mock.calls[0]?.[2]).toEqual({ agent: "codex", idempotencyKey: "h1" });
+    const output = writeStdoutMock.mock.calls.map(([text]) => String(text)).join("");
+    expect(output).toContain("existing session api-2 (same idempotency key)");
+    expect(output).not.toContain("Handed off");
+  });
+
   it("posts respawn effort while preserving force", async () => {
     await parseCli(["respawn", "api-1", "--reasoning-effort", "max", "--force", "--json"]);
     expect(postJsonMock).toHaveBeenCalledWith(

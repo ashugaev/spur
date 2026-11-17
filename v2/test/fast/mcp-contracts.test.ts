@@ -25,10 +25,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "43959230d0db53fdc5a80590c1f679d94bd1c5e365df9f38ee6cbed4b04e6309",
-  "types.ts": "84f33e303836dcf3dd93b56f492be94920987f9dd0e78e3c2d64d303c659d7b4",
+  "server.ts": "1eac717ed3fe728c5e52e170bbd99ec5cf15d4f48398c14c326570d6df89d7fa",
+  "types.ts": "82866d077db1bc37facf475ef22a971c0cd49ca5057ed6d1eec172b1c57e37d1",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "9475d0e5d51b97ee6b4a755b6dff98441f235c10fd06e7845d3c3a6def630933",
+  "session-service.ts": "89dfca9595dc44db6e0f58f21562d934ac6545ed5118bb379e26a397c5cf213d",
   "session-transitions.ts": "832771b8d95a6722cf67fc05685f2fd5f03e7a60a923c7a438e1b5b3bc0dcbb0",
   "session-slots.ts": "cb766d6b58c70f34775a18edf6afa77312acdc766a017770b30102462535ed73",
   "task-status.ts": "98700844f71e5d5edfd628c92653ed3cfcde4ff6c213acd24b9751935034bea1",
@@ -351,6 +351,16 @@ describe("daemon MCP operation contracts", () => {
     );
     for (const field of ["sendOutcome", "interrupted", "interrupt_guard", "no_interrupt"])
       expect(response?.description).toContain(field);
+  });
+
+  it("states idempotencyKey replay and conflict semantics on spawn and handoff contracts", () => {
+    for (const id of ["spawn_session", "spawn_background_session", "handoff_session"]) {
+      const description = getDaemonOperation(id)?.body?.fields.find(
+        (entry) => entry.name === "idempotencyKey",
+      )?.description;
+      expect(description, id).toContain("replayed");
+      expect(description, id).toContain("idempotency_key_conflict");
+    }
   });
 
   it("states reuseWorkspaceSessionId closeout take in the spawn contracts", () => {

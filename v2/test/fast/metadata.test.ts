@@ -1887,6 +1887,44 @@ describe("task-status persistence", () => {
   });
 });
 
+describe("handoff idempotency receipt", () => {
+  const base: SessionRecord = {
+    id: "api-1",
+    project: "api",
+    agent: "claude",
+    prompt: "ship it",
+    branch: "feature/handoff",
+    worktree: true,
+    worktreePath: "/tmp/worktree",
+    tmuxSession: "api-1",
+    launchCommand: "claude",
+    status: "completed",
+    createdAt: "2026-11-15T00:00:00Z",
+    updatedAt: "2026-11-15T00:00:00Z",
+  };
+  it("keeps a valid receipt and drops a malformed one", async () => {
+    const dataDir = await newDataDir();
+    const handoffIdempotency = {
+      key: "h1",
+      request: { agent: "cursor" as const },
+      successorId: "api-2",
+      movedTodoItems: 3,
+    };
+    writeSession(dataDir, { ...base, handoffIdempotency });
+    expect(readSession(dataDir, base.id)?.handoffIdempotency).toEqual(handoffIdempotency);
+    for (const broken of [
+      { ...handoffIdempotency, key: "" },
+      { ...handoffIdempotency, successorId: "" },
+      { ...handoffIdempotency, movedTodoItems: -1 },
+      { ...handoffIdempotency, movedTodoItems: 1.5 },
+      { ...handoffIdempotency, request: "cursor" },
+    ]) {
+      writeSession(dataDir, { ...base, handoffIdempotency: broken } as unknown as SessionRecord);
+      expect(readSession(dataDir, base.id)).not.toHaveProperty("handoffIdempotency");
+    }
+  });
+});
+
 describe("staleSidecars", () => {
   const base = {
     project: "api",

@@ -775,6 +775,21 @@ describe("SessionRow", () => {
     expect(screen.queryByText(/500K/)).not.toBeInTheDocument();
   });
 
+  it("renders no token slot when token data is absent", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "unknown" });
+    const { container } = render(
+      <SessionRow
+        session={makeSession()}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
+      />,
+    );
+
+    expect(screen.queryByLabelText(/^Tokens:/)).not.toBeInTheDocument();
+    expect(container.querySelector(".data-row > :empty")).toBeNull();
+  });
+
   it("allows restore when pre-flight usage is unknown under a budget", () => {
     useSessionLinkPrInfoMock.mockReturnValue({ state: "unknown" });
     render(

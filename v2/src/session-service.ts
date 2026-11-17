@@ -563,8 +563,11 @@ import {
   type PreflightTokenUsageView,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
+  type HandoffIdempotencyReceipt,
   type HandoffSessionRequest,
   type HandoffSessionResponse,
+  type IdempotencyKeyConflictPayload,
+  type SpawnSessionResponse,
   type RespawnSessionRequest,
   type RestoreSessionRequest,
   type RunServiceRequest,
@@ -1254,6 +1257,84 @@ export class SpawnBatchConflictError extends Error {
     super(message);
     this.payload = { code, sessionId, error: message };
   }
+}
+
+export class IdempotencyKeyConflictError extends Error {
+  readonly statusCode = 409;
+  readonly payload: IdempotencyKeyConflictPayload;
+
+  constructor(message: string, sessionId: string) {
+    super(message);
+    this.payload = { code: "idempotency_key_conflict", sessionId, error: message };
+  }
+}
+
+export class InvalidIdempotencyKeyError extends Error {
+  readonly statusCode = 400;
+}
+
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
+function parseIdempotencyKey(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > 128 ||
+    CONTROL_CHARACTERS.test(value)
+  ) {
+    throw new InvalidIdempotencyKeyError(
+      "idempotencyKey must be a 1-128 character string without control characters",
+    );
+  }
+  return value;
+}
+
+interface InFlightCall<T> {
+  request: unknown;
+  result: Promise<T>;
+}
+
+// Joins a pending call made with the same request and returns its result. A different request
+// waits for the pending call to settle and returns undefined: the caller re-enters and gets the
+// answer it would have had if sent after it.
+async function joinInFlight<T>(
+  pending: InFlightCall<T>,
+  request: unknown,
+): Promise<{ value: T } | undefined> {
+  if (isDeepStrictEqual(pending.request, request)) return { value: await pending.result };
+  await pending.result.catch(() => undefined);
+  return undefined;
+}
+
+// Runs a call registered under id so concurrent calls can join it; the entry leaves with it.
+async function runInFlight<T, E extends InFlightCall<T>>(
+  calls: Map<string, E>,
+  id: string,
+  entry: Omit<E, "result">,
+  run: () => Promise<T>,
+): Promise<T> {
+  // Defer execution until the identity is registered, before the first await.
+  const result = Promise.resolve().then(run);
+  calls.set(id, { ...entry, result } as E);
+  try {
+    return await result;
+  } finally {
+    if (calls.get(id)?.result === result) calls.delete(id);
+  }
+}
+
+// Stored copy of a spawn request: attachment bytes become a sha256 so records stay small
+// while a changed file still reads as a different request.
+function birthFingerprint(request: SpawnSessionRequest): SpawnSessionRequest {
+  const fingerprint = structuredClone(request);
+  if (fingerprint.attachments) {
+    fingerprint.attachments = fingerprint.attachments.map((attachment) => ({
+      ...attachment,
+      data: `sha256:${createHash("sha256").update(attachment.data).digest("hex")}`,
+    }));
+  }
+  return fingerprint;
 }
 
 export class SessionRateLimitedError extends Error {
@@ -3558,6 +3639,8 @@ interface SpawnAdmissionWaiter {
   reject: (error: SpawnAdmissionCancelledError) => void;
 }
 
+type HandoffIdempotency = Pick<HandoffIdempotencyReceipt, "key" | "request">;
+
 interface HandoffAdmission {
   token: symbol;
   session: SessionRecord;
@@ -4207,6 +4290,15 @@ export class SessionService {
   private readonly pendingSpawnIds = new Set<string>();
   private admissionStopped = false;
   private readonly foregroundSpawnReceipts = new Map<symbol, ForegroundSpawnReceipt>();
+  // Source id -> the keyed handoff running for it, so a same-key retry waits for its result.
+  private readonly keyedHandoffsInFlight = new Map<
+    string,
+    {
+      key: string;
+      request: HandoffIdempotency["request"];
+      result: Promise<HandoffSessionResponse>;
+    }
+  >();
   private readonly handoffsInFlight = new Map<
     string,
     {
@@ -14423,32 +14515,66 @@ export class SessionService {
   async spawn(request: SpawnSessionRequest, options?: SessionSpawnOptions): Promise<SessionView> {
     if (options?.triggerBirthKey) {
       const key = options.triggerBirthKey;
-      const existing = this.getTriggerBirth(request.project, key, request);
-      if (existing) {
-        return this.get(existing.id);
-      }
-      const pending = this.triggerBirthsInFlight.get(key);
-      if (pending) {
-        if (!isDeepStrictEqual(pending.request, request)) {
-          throw new Error("Trigger birth key already belongs to a different spawn request");
-        }
-        return pending.result;
-      }
-      const original = structuredClone(request);
-      // Defer execution until the identity is registered, before the first await.
-      const result = Promise.resolve().then(() =>
-        this.spawnOnce(original, { ...options, triggerBirthKey: key }),
+      const { session } = await this.spawnWithBirthKey(key, request, () =>
+        this.spawnOnce(structuredClone(request), { ...options, triggerBirthKey: key }),
       );
-      this.triggerBirthsInFlight.set(key, { request: original, result });
-      try {
-        return await result;
-      } finally {
-        if (this.triggerBirthsInFlight.get(key)?.result === result) {
-          this.triggerBirthsInFlight.delete(key);
-        }
-      }
+      return session;
     }
     return this.spawnOnce(request, options);
+  }
+
+  // HTTP entry: an idempotencyKey makes the spawn replayable under the "api:" birth namespace.
+  async spawnFromRequest(
+    request: SpawnSessionRequest,
+    delivery: "foreground" | "background",
+  ): Promise<SpawnSessionResponse> {
+    const { idempotencyKey, ...rest } = request;
+    if (idempotencyKey === undefined) {
+      return delivery === "foreground"
+        ? this.spawn(rest, { acceptQueued: true })
+        : this.spawnInBackground(rest);
+    }
+    const triggerBirthKey = `api:${parseIdempotencyKey(idempotencyKey)}`;
+    const { session, replayed } = await this.spawnWithBirthKey(
+      triggerBirthKey,
+      rest,
+      (fingerprint) =>
+        delivery === "foreground"
+          ? this.spawnOnce(rest, { acceptQueued: true, triggerBirthKey })
+          : this.acceptBackgroundSpawn(rest, {
+              triggerBirthKey,
+              triggerBirthRequest: fingerprint,
+            }).then(({ session: accepted }) => accepted),
+    );
+    return replayed ? { ...session, replayed: true } : session;
+  }
+
+  // The only spawn dedup decision: in-flight join first (the keyed placeholder is written before
+  // launch, so a record alone does not mean the launch succeeded), then record lookup.
+  private async spawnWithBirthKey(
+    key: string,
+    request: SpawnSessionRequest,
+    run: (fingerprint: SpawnSessionRequest) => Promise<SessionView>,
+  ): Promise<{ session: SessionView; replayed: boolean }> {
+    const fingerprint = birthFingerprint(request);
+    const pending = this.triggerBirthsInFlight.get(key);
+    if (pending) {
+      const joined = await joinInFlight(pending, fingerprint);
+      return joined
+        ? { session: joined.value, replayed: true }
+        : this.spawnWithBirthKey(key, request, run);
+    }
+    const existing = this.getTriggerBirth(request.project, key, request);
+    if (existing) {
+      return { session: await this.get(existing.id), replayed: true };
+    }
+    const session = await runInFlight(
+      this.triggerBirthsInFlight,
+      key,
+      { request: fingerprint },
+      () => run(fingerprint),
+    );
+    return { session, replayed: false };
   }
 
   getTriggerBirth(
@@ -14460,10 +14586,20 @@ export class SessionService {
       (session) => session.triggerBirthKey === key,
     );
     if (existing && existing.project !== projectId) {
-      throw new Error("Trigger birth key already belongs to a different project");
+      throw new IdempotencyKeyConflictError(
+        "Trigger birth key already belongs to a different project",
+        existing.id,
+      );
     }
-    if (existing && request && !isDeepStrictEqual(existing.triggerBirthRequest, request)) {
-      throw new Error("Trigger birth key already belongs to a different spawn request");
+    if (
+      existing &&
+      request &&
+      !isDeepStrictEqual(existing.triggerBirthRequest, birthFingerprint(request))
+    ) {
+      throw new IdempotencyKeyConflictError(
+        "Trigger birth key already belongs to a different spawn request",
+        existing.id,
+      );
     }
     return existing;
   }
@@ -14472,7 +14608,7 @@ export class SessionService {
     request: SpawnSessionRequest,
     options?: SessionSpawnOptions,
   ): Promise<SessionView> {
-    const triggerBirthRequest = options?.triggerBirthKey ? structuredClone(request) : undefined;
+    const triggerBirthRequest = options?.triggerBirthKey ? birthFingerprint(request) : undefined;
     request = normalizeShepherdSpawnRequest(request);
     let admissionReservation = options?.admissionReservation;
     let admissionReserved = admissionReservation !== undefined;
@@ -16392,6 +16528,9 @@ export class SessionService {
           project: request.project,
           ...(options.prAlertOwnerTransfer
             ? { prAlertTransfer: options.prAlertOwnerTransfer }
+            : {}),
+          ...(options.triggerBirthKey && triggerBirthRequest
+            ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
             : {}),
           workspaceId: erroredWorkspaceId,
           agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
@@ -22817,6 +22956,7 @@ export class SessionService {
       skipEnrichment?: false;
       todoActor?: TodoActor;
       handoffDetails?: HandoffEventDetails;
+      handoffReceipt?: HandoffIdempotencyReceipt;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
@@ -22833,6 +22973,7 @@ export class SessionService {
       skipEnrichment?: boolean;
       todoActor?: TodoActor;
       handoffDetails?: HandoffEventDetails;
+      handoffReceipt?: HandoffIdempotencyReceipt;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
@@ -22929,6 +23070,8 @@ export class SessionService {
               ...session,
               status: targetStatus,
               updatedAt: nowIso(),
+              // This write marks the source completed first; the receipt must land with it.
+              ...(options?.handoffReceipt ? { handoffIdempotency: options.handoffReceipt } : {}),
             },
             [],
             false,
@@ -23000,6 +23143,7 @@ export class SessionService {
     if (startupAttachmentsCleaned) {
       delete record.startupAttachmentIds;
     }
+    if (options?.handoffReceipt) record.handoffIdempotency = options.handoffReceipt;
     writeSession(this.config.dataDir, record);
     if (targetStatus === "completed") await this.terminateDetachedSessionProcesses(record);
     if (targetStatus === "completed") await this.cleanupTerminalTelegram(record);
@@ -25996,6 +26140,50 @@ export class SessionService {
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
   ): Promise<HandoffSessionResponse> {
+    const { idempotencyKey, ...base } = request;
+    if (idempotencyKey === undefined) return this.handoffOnce(sessionId, base, options);
+    const key = parseIdempotencyKey(idempotencyKey);
+    const fingerprint: HandoffIdempotency["request"] = {
+      agent: base.agent,
+      ...(base.model !== undefined ? { model: base.model } : {}),
+      ...(base.reasoningEffort !== undefined ? { reasoningEffort: base.reasoningEffort } : {}),
+      ...(base.notes !== undefined ? { notes: base.notes } : {}),
+    };
+    const receipt = readSession(this.config.dataDir, sessionId)?.handoffIdempotency;
+    if (receipt?.key === key) {
+      if (!isDeepStrictEqual(receipt.request, fingerprint)) {
+        throw new IdempotencyKeyConflictError(
+          "Idempotency key already belongs to a different handoff request",
+          receipt.successorId,
+        );
+      }
+      return {
+        ...(await this.get(receipt.successorId)),
+        movedTodoItems: receipt.movedTodoItems,
+        replayed: true,
+      };
+    }
+    const pending = this.keyedHandoffsInFlight.get(sessionId);
+    if (pending?.key === key) {
+      const joined = await joinInFlight(pending, fingerprint);
+      return joined
+        ? { ...joined.value, replayed: true }
+        : this.handoff(sessionId, request, options);
+    }
+    const idempotency = { key, request: fingerprint };
+    // Another key already in flight: handoffOnce refuses with "already in flight".
+    if (pending) return this.handoffOnce(sessionId, base, options, idempotency);
+    return runInFlight(this.keyedHandoffsInFlight, sessionId, idempotency, () =>
+      this.handoffOnce(sessionId, base, options, idempotency),
+    );
+  }
+
+  private async handoffOnce(
+    sessionId: string,
+    request: HandoffSessionRequest,
+    options?: { todoActor?: TodoActor },
+    idempotency?: HandoffIdempotency,
+  ): Promise<HandoffSessionResponse> {
     // Refuse before queueing for admission; handoffTransaction rechecks after the wait.
     this.assertNoHeldCloseoutTake(sessionId);
     const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
@@ -26052,10 +26240,13 @@ export class SessionService {
       claim.phase = "activating";
       const admissionReservation = reservation;
       return await this.runLifecycle("complete", [sessionId], undefined, () =>
-        this.handoffTransaction(sessionId, request, options, {
-          ...waiting,
-          admissionReservation,
-        }),
+        this.handoffTransaction(
+          sessionId,
+          request,
+          options,
+          { ...waiting, admissionReservation },
+          idempotency,
+        ),
       );
     } finally {
       if (reservation !== undefined) this.admissionReservations.delete(reservation);
@@ -26082,6 +26273,7 @@ export class SessionService {
     request: HandoffSessionRequest,
     options: { todoActor?: TodoActor } | undefined,
     waiting: HandoffAdmission,
+    idempotency?: HandoffIdempotency,
   ): Promise<HandoffSessionResponse> {
     // Persisted background takes refuse now; only foreground takes wait.
     this.assertNoHeldCloseoutTake(sessionId);
@@ -26199,6 +26391,15 @@ export class SessionService {
                   eventAction: "handoff",
                   handoffDetails: prepared.handoffDetails,
                   closeoutHeadSha,
+                  ...(idempotency
+                    ? {
+                        handoffReceipt: {
+                          ...idempotency,
+                          successorId: spawned.id,
+                          movedTodoItems: prepared.inheritedTodo.length,
+                        },
+                      }
+                    : {}),
                 },
               );
               const latest = readSession(this.config.dataDir, spawned.id);
@@ -30260,6 +30461,7 @@ export class SessionService {
       taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      handoffIdempotency: _handoffIdempotency,
       blockedTriggerNotices: _blockedTriggerNotices,
       spawnIntent: _spawnIntent,
       sidecarLaunches: _sidecarLaunches,
@@ -30767,6 +30969,7 @@ export class SessionService {
       taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      handoffIdempotency: _handoffIdempotency,
       blockedTriggerNotices: _blockedTriggerNotices,
       spawnIntent: _spawnIntent,
       sidecarLaunches: _sidecarLaunches,

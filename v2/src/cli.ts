@@ -101,6 +101,7 @@ import {
   isKillConfirmationRequiredMessage,
   isRestorableSession,
 } from "./session-service.js";
+import { normalizeSlotLinks } from "./session-slots.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import type { SidecarSweepResult } from "./sidecars/reap.js";
 import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
@@ -197,6 +198,7 @@ import {
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SpawnSessionRequest,
+  type SpawnSessionResponse,
   type SubscribeSessionStatesRequest,
   type SetSessionMemoryRequest,
   type SetSharedMemoryRequest,
@@ -2744,15 +2746,16 @@ export async function outputResult<T>(args: {
   label: string;
   action: () => Promise<T>;
   render: (value: T) => string;
-  success?: (value: T) => string;
+  success?: (value: T) => string | undefined;
   exitCode?: (value: T) => number | undefined;
 }): Promise<void> {
   const value = args.json ? await args.action() : await withSpinner(args.label, args.action);
   if (args.json) {
     printJson(value);
   } else {
-    if (args.success) {
-      writeStdout(brandLine(args.success(value)));
+    const successLine = args.success?.(value);
+    if (successLine !== undefined) {
+      writeStdout(brandLine(successLine));
     }
     writeStdout(args.render(value));
   }
@@ -3629,6 +3632,17 @@ export function createProgram(cliEntrypoint: string): Command {
       appendOptionValue,
     )
     .option("--subscribe-message <message>", "Message delivered when the subscription fires")
+    .option(
+      "--link <label=url>",
+      "Session link set at creation; repeatable",
+      collectOptionValue,
+      [],
+    )
+    .option("--prompt-file <path|->", "Read the task prompt from a file, or stdin with -")
+    .option(
+      "--idempotency-key <key>",
+      "Retry-safe key: a repeat with the same key and request returns the existing session",
+    )
     .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[] | undefined, options, command) => {
       const parentProgram = command.parent as Command;
@@ -3648,7 +3662,23 @@ export function createProgram(cliEntrypoint: string): Command {
       }
       const overrides = resolveCliSpawnOverrides(options);
       const subscriptions = resolveCliSpawnSubscriptions(options);
-      const prompt = (promptParts ?? []).join(" ").trim();
+      const positionalPrompt = (promptParts ?? []).join(" ").trim();
+      if (options.promptFile !== undefined && positionalPrompt) {
+        throw new Error("use either [prompt...] or --prompt-file");
+      }
+      const promptFile = options.promptFile as string | undefined;
+      const prompt =
+        promptFile === undefined
+          ? positionalPrompt
+          : readFileSync(promptFile === "-" ? 0 : promptFile, "utf-8").trim();
+      const links = normalizeSlotLinks((options.link as string[]).map(parseSlotLink));
+      const repeatedLabel = links.find(
+        (link, index) => links.findIndex((other) => other.label === link.label) !== index,
+      );
+      if (repeatedLabel) {
+        throw new Error(`--link label repeated: ${repeatedLabel.label}`);
+      }
+      const idempotencyKey = options.idempotencyKey as string | undefined;
       const configPath = instance.configPath;
       const availableProjects = await listProjects(cliEntrypoint, configPath);
       if (!availableProjects.some((entry) => entry.id === project)) {
@@ -3661,7 +3691,13 @@ export function createProgram(cliEntrypoint: string): Command {
       let branch: string | undefined = options.branch;
 
       // Interactive branch confirmation: TTY, no --json, no explicit --branch
-      const interactive = !options.json && !branch && process.stdin.isTTY && process.stdout.isTTY;
+      // A model-generated branch would differ between retries of one idempotency key.
+      const interactive =
+        !options.json &&
+        !branch &&
+        idempotencyKey === undefined &&
+        process.stdin.isTTY &&
+        process.stdout.isTTY;
       if (interactive && prompt) {
         const preflight = await withSpinner("running preflight", () =>
           postPreflight(
@@ -3703,11 +3739,16 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
         ...(subscriptions ? { subscriptions } : {}),
+        ...(links.length > 0 ? { slots: { links } } : {}),
+        ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
       };
       await outputResult({
         json: Boolean(options.json),
         label: "starting session",
-        action: () => postJson<SessionView>(cliEntrypoint, "/sessions", payload, configPath),
+        action: () =>
+          postJson<SpawnSessionResponse>(cliEntrypoint, "/sessions", payload, configPath),
+        success: (session) =>
+          session.replayed ? `existing session ${session.id} (same idempotency key)` : undefined,
         render: renderSessionCard,
       });
     });
@@ -4693,6 +4734,10 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--model <id>", "Model id for the target agent")
     .addOption(reasoningEffortOption())
     .option("--notes <text>", "Optional handoff notes for the next agent")
+    .option(
+      "--idempotency-key <key>",
+      "Retry-safe key: a repeat with the same key and request returns the existing successor",
+    )
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -4707,24 +4752,26 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(typeof options.notes === "string" && options.notes.trim()
           ? { notes: options.notes.trim() }
           : {}),
+        ...(typeof options.idempotencyKey === "string"
+          ? { idempotencyKey: options.idempotencyKey }
+          : {}),
       };
       await outputResult({
         json: Boolean(options.json),
         label: "handing off session",
         action: () =>
           // An older daemon omits the count.
-          postJson<SessionView & Partial<Pick<HandoffSessionResponse, "movedTodoItems">>>(
-            cliEntrypoint,
-            `/sessions/${sessionId}/handoff`,
-            payload,
-            configPath,
-          ),
+          postJson<
+            SessionView & Partial<Pick<HandoffSessionResponse, "movedTodoItems" | "replayed">>
+          >(cliEntrypoint, `/sessions/${sessionId}/handoff`, payload, configPath),
         success: (session) =>
-          `Handed off to ${session.id} (${session.agent})${
-            typeof session.movedTodoItems === "number"
-              ? `; moved ${session.movedTodoItems} ToDo items`
-              : ""
-          }.`,
+          session.replayed
+            ? `existing session ${session.id} (same idempotency key)`
+            : `Handed off to ${session.id} (${session.agent})${
+                typeof session.movedTodoItems === "number"
+                  ? `; moved ${session.movedTodoItems} ToDo items`
+                  : ""
+              }.`,
         render: renderSessionCard,
       });
     });
