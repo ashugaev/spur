@@ -911,6 +911,7 @@ export interface ProjectConfig {
   tokenBudgetWarnOnly?: boolean;
   staleAfterMinutes?: number;
   snapshots?: ProjectSnapshotsConfig;
+  closeout?: ProjectCloseoutConfig;
 }
 
 export interface ProjectSnapshotsConfig {
@@ -918,6 +919,52 @@ export interface ProjectSnapshotsConfig {
   maxBytes?: number;
   requireFinal?: boolean;
   freshnessMinutes?: number;
+}
+
+export type CloseoutRoot = "artifacts" | "work" | "workspace";
+
+export interface ProjectCloseoutConfig {
+  enabled?: boolean;
+  include?: string[];
+  maxBytes?: number;
+  retentionDays?: number;
+}
+
+export interface CloseoutManifest {
+  version: number;
+  sessionId: string;
+  project: string;
+  completedAt: string;
+  links: SessionLink[];
+  snapshotVersion: number | null;
+  headSha: string | null;
+  files: { root: CloseoutRoot; path: string; bytes: number; sha256: string }[];
+  skipped: {
+    root: CloseoutRoot;
+    path: string;
+    bytes: number;
+    reason: "max_bytes" | "unreadable" | "changed" | "unverified";
+  }[];
+  missingRoots: CloseoutRoot[];
+  error?: string;
+  expiredAt?: string;
+}
+
+export interface CloseoutManifestView extends CloseoutManifest {
+  /** Every archive version of the session, ascending. */
+  versions: number[];
+}
+
+/** Added to a complete result when the archive listed files it could not verify. */
+export interface CloseoutReport {
+  unverified: number;
+}
+export type CompleteSessionResult = SessionView & { closeout?: CloseoutReport };
+
+export interface CloseoutEntry {
+  sessionId: string;
+  status: SessionStatus;
+  manifest: CloseoutManifestView;
 }
 
 export type ProviderReasoningEffort =
@@ -1471,6 +1518,8 @@ export interface SessionDeskMember {
 
 export interface CompleteDeskResponse {
   completedIds: string[];
+  /** Summed over members; present when the archives listed unverified files. */
+  closeout?: CloseoutReport;
   lifecycle: SessionLifecycleSnapshot;
 }
 
