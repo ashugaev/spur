@@ -65,6 +65,19 @@ function steersAuthorization(key: string): boolean {
 }
 const AUTH_SETTINGS = ["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport"];
 
+function steersCodexAuthorization(key: string): boolean {
+  return key.startsWith("OPENAI_") || key === "CODEX_API_KEY";
+}
+
+// Blanks every inherited variable that could steer a managed session around the proxy.
+function blankedInheritedEnv(steers: (key: string) => boolean): Record<string, string> {
+  return Object.fromEntries(
+    Object.keys(process.env)
+      .filter(steers)
+      .map((key) => [key, ""]),
+  );
+}
+
 /** Host settings without authorization overrides, or undefined when none are present. */
 function sanitizedHostSettings(path: string): Record<string, unknown> | undefined {
   const settings = readJsonObject(path);
@@ -187,6 +200,7 @@ export function managedAuthLaunch(
     return {
       claudeConfigDir,
       env: {
+        ...blankedInheritedEnv(steersAuthorization),
         ANTHROPIC_BASE_URL: registration.endpoint,
         ANTHROPIC_AUTH_TOKEN: registration.token,
         ANTHROPIC_API_KEY: "",
@@ -195,7 +209,12 @@ export function managedAuthLaunch(
     };
   }
   return {
-    env: { SPUR_AUTH_PROXY_TOKEN: registration.token, OPENAI_API_KEY: "", CODEX_API_KEY: "" },
+    env: {
+      ...blankedInheritedEnv(steersCodexAuthorization),
+      SPUR_AUTH_PROXY_TOKEN: registration.token,
+      OPENAI_API_KEY: "",
+      CODEX_API_KEY: "",
+    },
     codexArgs: [
       ...codexArgs,
       "-c",

@@ -18,6 +18,7 @@ import {
   publicAuthSession,
   scrubManagedClaudeHome,
 } from "../../src/auth-launch.js";
+import { _buildPaneEnvForTests as buildPaneEnv } from "../../src/runtime-tmux.js";
 import { buildCodexPlan } from "../../src/agents/codex.js";
 import type { AuthRegistration } from "../../src/auth-proxy.js";
 
@@ -219,6 +220,45 @@ describe("managed native authorization launch", () => {
     );
     expect(publicAuthSession(registration)).not.toHaveProperty("token");
     expect(publicAuthSession(registration)).not.toHaveProperty("endpoint");
+  });
+
+  it("blanks inherited provider selectors and credentials in the final pane env", () => {
+    const inherited = {
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      CLAUDE_CODE_USE_VERTEX: "1",
+      CLAUDE_CODE_SKIP_BEDROCK_AUTH: "1",
+      AWS_BEARER_TOKEN_BEDROCK: "bearer",
+      ANTHROPIC_FOUNDRY_API_KEY: "foundry",
+      ANTHROPIC_MODEL: "kept-model",
+      OPENAI_BASE_URL: "http://elsewhere",
+      OPENAI_ORG_ID: "org",
+      CODEX_API_KEY: "codex",
+    };
+    for (const [key, value] of Object.entries(inherited)) vi.stubEnv(key, value);
+    const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
+    directories.push(directory);
+
+    const claude = buildPaneEnv(managedAuthLaunch(registration, directory).env);
+    expect(claude).toMatchObject({
+      CLAUDE_CODE_USE_BEDROCK: "",
+      CLAUDE_CODE_USE_VERTEX: "",
+      CLAUDE_CODE_SKIP_BEDROCK_AUTH: "",
+      AWS_BEARER_TOKEN_BEDROCK: "",
+      ANTHROPIC_FOUNDRY_API_KEY: "",
+      ANTHROPIC_MODEL: "kept-model",
+      ANTHROPIC_BASE_URL: registration.endpoint,
+      ANTHROPIC_AUTH_TOKEN: registration.token,
+    });
+
+    const codex = buildPaneEnv(
+      managedAuthLaunch({ ...registration, provider: "codex" }, directory).env,
+    );
+    expect(codex).toMatchObject({
+      OPENAI_BASE_URL: "",
+      OPENAI_ORG_ID: "",
+      CODEX_API_KEY: "",
+      SPUR_AUTH_PROXY_TOKEN: registration.token,
+    });
   });
 
   it("uses Codex Responses SSE and keeps routing credentials out of launch commands", () => {
