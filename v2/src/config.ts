@@ -11,6 +11,7 @@ import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
   GITHUB_PR_OCCURRENCE_KINDS,
+  GITHUB_PR_STATE_KINDS,
   JIRA_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   SCRIPT_ITEM_NEW_EVENT,
@@ -711,6 +712,7 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "github") {
     for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
     for (const kind of GITHUB_PR_OCCURRENCE_KINDS) events.push(`github:${kind}`);
+    for (const kind of GITHUB_PR_STATE_KINDS) events.push(`github:${kind}`);
     if (source.query !== undefined) {
       events.push("github:work_item.new");
     }

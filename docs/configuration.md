@@ -168,11 +168,11 @@ The same pass also runs a detect-only step over one shared process-table snapsho
 
 ## PR alert ownership
 
-- Native spawn `prAlertOwner` (default `false`): exclusive workspace CI/conflict recipient; eligibility, lifecycle and permissions: `v2/src/pr-alert-owner.ts`, `v2/src/session-service.ts`; [spawn API](daemon-api.md#session-routes).
+- Native spawn `prAlertOwner` (default `false`): exclusive workspace CI/conflict/out-of-date recipient; eligibility, lifecycle and permissions: `v2/src/pr-alert-owner.ts`, `v2/src/session-service.ts`; [spawn API](daemon-api.md#session-routes).
 
 ## Automatic reminders
 
-Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo-snapshot). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair. Failing CI or a conflict present at a PR's first observation pings once; legacy/unclaimed persisted snapshots do not replay it. Explicit owner-return recheck: `v2/src/event-sources/github.ts`.
+Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo-snapshot). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair. `out_of_date` pings once per head commit while the PR is behind its base without a conflict; a base move alone does not re-ping. Failing CI, a conflict, or an out-of-date branch present at a PR's first observation pings once; legacy/unclaimed persisted snapshots do not replay it. Explicit owner-return recheck: `v2/src/event-sources/github.ts`.
 
 Snapshot requests: [snapshots](snapshots.md).
 
@@ -191,8 +191,9 @@ Trigger spawn retry: cap/memory denials persist across restarts, preserve succes
 Event names by source:
 
 - `cron`: `cron:tick`.
-- `github`: `github:changes_requested`, `ci_failed`, `comment`, `merge_conflict`, `review_requested`, `ready_for_review`, `approved`, `merged`, `closed`, `work_item.new` (with `query`). PR URLs seed the native `session.pr` binding; other review URLs go to `slots.links`. `work_item.new` spawn-prompt template: `{{url}} {{number}} {{title}} {{repo}} {{externalId}}`.
+- `github`: `github:changes_requested`, `ci_failed`, `comment`, `merge_conflict`, `out_of_date`, `review_requested`, `ready_for_review`, `approved`, `merged`, `closed`, `work_item.new` (with `query`). PR URLs seed the native `session.pr` binding; other review URLs go to `slots.links`. `work_item.new` spawn-prompt template: `{{url}} {{number}} {{title}} {{repo}} {{externalId}}`.
 - `github:comment`: skips PR issue comments authored by a GitHub App or Actions bot.
+- `github:out_of_date`: session-owned open PR, `mergeStateStatus` `BEHIND`, mergeability known; `merge_conflict` wins — `v2/src/review-providers/github.ts`.
 - `github:approved`: per-login signals; initial lifecycle suppression — `v2/src/review-providers/github.ts`, `v2/src/event-sources/github.ts`.
 - `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `ci_failed`, `comment`, `merge_conflict`.
