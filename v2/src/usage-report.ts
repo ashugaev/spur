@@ -66,6 +66,7 @@ export interface ManagedQuotaAccount {
   credential?: "oauth" | "api_key";
   status: string;
   quota?: { windows: QuotaWindow[]; fetchedAt: string };
+  quotaError?: QuotaErrorKind;
 }
 
 const CLAUDE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -602,7 +603,7 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
         errorResult(
           { provider: account.provider, source: account.id, label: account.displayName },
           deps.nowMs,
-          "pending",
+          account.quotaError ?? "pending",
         ),
       ];
     }

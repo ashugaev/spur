@@ -177,6 +177,36 @@ describe("AuthQuota", () => {
     expect(stored.entries.b).toMatchObject({ failures: 1, nextAt: clock + 180_000 });
   });
 
+  it("records the last failure kind, keeps it through a 429 hold of cached quota, clears it on success", async () => {
+    const quota = create();
+    answer = (ids) =>
+      Promise.resolve(
+        ids.map((id) => ({ accountId: id, status: "error" as const, httpStatus: 401 })),
+      );
+    quota.read([claude("a")]);
+    await settle();
+    expect(quota.read([claude("a")]).size).toBe(0);
+    expect(quota.lastErrors().get("a")).toBe("unauthorized");
+
+    clock += 3_600_000;
+    calls = [];
+    answer = (ids) => Promise.resolve(ids.map((id) => ok(id, claudeBody(10, 40))));
+    quota.read([claude("a")]);
+    await settle();
+    expect(quota.read([claude("a")]).has("a")).toBe(true);
+    expect(quota.lastErrors().has("a")).toBe(false);
+
+    clock += 3_600_000;
+    calls = [];
+    answer = (ids) =>
+      Promise.resolve(
+        ids.map((id) => ({ accountId: id, status: "error" as const, httpStatus: 500 })),
+      );
+    quota.read([claude("a")]);
+    await settle();
+    expect(quota.lastErrors().get("a")).toBe("http_error");
+  });
+
   it("backs off only the id the companion could not read", async () => {
     answer = (ids) =>
       Promise.resolve(

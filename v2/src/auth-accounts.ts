@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import type { AuthQuotaSummary } from "./auth-quota.js";
+import type { AuthQuotaSummary, QuotaFailureKind } from "./auth-quota.js";
 import { listAccounts } from "./claude-accounts.js";
 
 export const authProviderSchema = z.enum(["claude", "codex"]);
@@ -54,6 +54,8 @@ export interface AuthAccountSummary extends AuthAccount {
   displayName: string;
   /** Cached quota; present only on GET /auth-accounts for ready OAuth accounts. */
   quota?: AuthQuotaSummary;
+  /** Kind of the last failed quota refresh; set with opts.quota only while no quota is cached. */
+  quotaError?: QuotaFailureKind;
   authenticated: boolean;
   status: "ready" | "sign_in_required" | "pending" | "error";
   /** True while a shared quota cooldown is active; cooldownUntil is its ISO end. */

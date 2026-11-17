@@ -1040,6 +1040,8 @@ export async function startServer(
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
+  // GET /usage logs a managed-account read failure once per run of failures.
+  let managedUsageFailing = false;
   // Single owner of a failed request: the status sets the response code and the
   // log level from one argument, so the two can never drift.
   const failRequest = (
@@ -1259,12 +1261,16 @@ export async function startServer(
         try {
           managedAccounts = (await service.listAuthorizationAccounts(undefined, { quota: true }))
             .accounts;
+          managedUsageFailing = false;
         } catch (error) {
-          logEvent("usage.managed_accounts.unavailable", {
-            level: "warn",
-            message: "Managed accounts unavailable; usage shows host logins",
-            details: { error: error instanceof Error ? error.message : String(error) },
-          });
+          if (!managedUsageFailing) {
+            logEvent("usage.managed_accounts.unavailable", {
+              level: "warn",
+              message: "Managed accounts unavailable; usage shows host logins",
+              details: { error: error instanceof Error ? error.message : String(error) },
+            });
+          }
+          managedUsageFailing = true;
         }
         sendJson(
           response,

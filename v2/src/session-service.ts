@@ -25189,12 +25189,15 @@ export class SessionService {
           })),
         )
       : undefined;
+    const quotaErrors = quotas ? this.authQuota.lastErrors() : undefined;
     return {
       accounts: all
         .filter((account) => !provider || account.provider === provider)
         .map((account) => {
           const quota = quotas?.get(account.id);
-          return quota ? { ...account, quota } : account;
+          if (quota) return { ...account, quota };
+          const quotaError = quotaErrors?.get(account.id);
+          return quotaError ? { ...account, quotaError } : account;
         }),
       pools: state.pools,
     };

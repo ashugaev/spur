@@ -282,6 +282,28 @@ describe("buildUsageReport quotas", () => {
     ]);
   });
 
+  it("shows the last refresh failure kind instead of pending", async () => {
+    const s = await setup();
+    const report = await buildUsageReport({
+      ...s.deps(vi.fn() as unknown as typeof fetch),
+      managedAccounts: [
+        {
+          id: "acc-1",
+          provider: "codex",
+          displayName: "c@example.com",
+          credential: "oauth",
+          status: "ready",
+          quotaError: "unauthorized",
+        },
+      ],
+    });
+    expect(report.quotas[0]).toMatchObject({
+      status: "error",
+      error: "unauthorized",
+      message: "saved login rejected; run the agent to refresh it",
+    });
+  });
+
   it("lists one row per ready OAuth managed account and drops that provider's host source", async () => {
     const s = await setup();
     await writeClaudeCreds(join(s.home, ".claude"), FUTURE);

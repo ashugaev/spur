@@ -35,6 +35,22 @@ export interface AuthQuotaAccount {
   credential?: "oauth" | "api_key";
 }
 
+const QUOTA_FAILURE_KINDS = [
+  "unauthorized",
+  "rate_limited",
+  "http_error",
+  "network_error",
+  "unparsable",
+] as const;
+export type QuotaFailureKind = (typeof QUOTA_FAILURE_KINDS)[number];
+
+function failureKind(answer: UsageEntry | undefined): QuotaFailureKind {
+  if (answer?.status === "ok") return "unparsable";
+  if (answer?.httpStatus === undefined) return "network_error";
+  if (answer.httpStatus === 401 || answer.httpStatus === 403) return "unauthorized";
+  return answer.httpStatus === 429 ? "rate_limited" : "http_error";
+}
+
 const MAX_SERVED_AGE_MS = MAX_RETRY_AFTER_S * 1000;
 const CHUNK = 4;
 
@@ -55,6 +71,7 @@ const entrySchema = z.object({
     .optional(),
   nextAt: z.number(),
   failures: z.number().int().nonnegative(),
+  error: z.enum(QUOTA_FAILURE_KINDS).optional(),
 });
 const fileSchema = z.object({ schema: z.literal(1), entries: z.record(z.string(), entrySchema) });
 type Entry = z.infer<typeof entrySchema>;
@@ -172,6 +189,15 @@ export class AuthQuota {
     return served;
   }
 
+  /** Kind of each account's last failed refresh; absent once a refresh succeeds. Call after read(), which prunes. */
+  lastErrors(): Map<string, QuotaFailureKind> {
+    const errors = new Map<string, QuotaFailureKind>();
+    for (const [id, entry] of Object.entries(this.load())) {
+      if (entry.error) errors.set(id, entry.error);
+    }
+    return errors;
+  }
+
   private async refresh(due: AuthQuotaAccount[]): Promise<void> {
     for (let index = 0; index < due.length; index += CHUNK) {
       const chunk = due.slice(index, index + CHUNK);
@@ -218,6 +244,7 @@ export class AuthQuota {
       ...(keepQuota ? { fetchedAt: previous.fetchedAt, quota: previous.quota } : {}),
       nextAt: now + holdSeconds * 1000,
       failures,
+      error: failureKind(answer),
     };
   }
 }
