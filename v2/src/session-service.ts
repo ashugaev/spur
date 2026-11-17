@@ -14244,16 +14244,13 @@ export class SessionService {
     return replayed ? { ...session, replayed: true } : session;
   }
 
-  // The only spawn dedup decision: record lookup, then in-flight coalescing.
+  // The only spawn dedup decision: in-flight join first (the keyed placeholder is written before
+  // launch, so a record alone does not mean the launch succeeded), then record lookup.
   private async spawnWithBirthKey(
     key: string,
     request: SpawnSessionRequest,
     run: (fingerprint: SpawnSessionRequest) => Promise<SessionView>,
   ): Promise<{ session: SessionView; replayed: boolean }> {
-    const existing = this.getTriggerBirth(request.project, key, request);
-    if (existing) {
-      return { session: await this.get(existing.id), replayed: true };
-    }
     const fingerprint = birthFingerprint(request);
     const pending = this.triggerBirthsInFlight.get(key);
     if (pending) {
@@ -14261,6 +14258,10 @@ export class SessionService {
       return joined
         ? { session: joined.value, replayed: true }
         : this.spawnWithBirthKey(key, request, run);
+    }
+    const existing = this.getTriggerBirth(request.project, key, request);
+    if (existing) {
+      return { session: await this.get(existing.id), replayed: true };
     }
     const session = await runInFlight(
       this.triggerBirthsInFlight,
@@ -22703,6 +22704,8 @@ export class SessionService {
               ...session,
               status: targetStatus,
               updatedAt: nowIso(),
+              // This write marks the source completed first; the receipt must land with it.
+              ...(options?.handoffReceipt ? { handoffIdempotency: options.handoffReceipt } : {}),
             },
             [],
             false,

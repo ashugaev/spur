@@ -362,6 +362,39 @@ describe("api idempotency key", () => {
     expect(listSessions(f.dataDir)).toHaveLength(1);
   });
 
+  it.each(["fails", "succeeds"] as const)(
+    "a same-key retry during a pending launch joins it and sees the launch %s",
+    async (outcome) => {
+      const f = fixture();
+      const service = f.fresh();
+      let settle: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      const launch = vi.spyOn(internals(service), "spawnOnce").mockImplementation(async (fp) => {
+        // The keyed placeholder is on disk before the launch settles.
+        writeSession(f.dataDir, f.record("spawning", fp, "api:k"));
+        await gate;
+        if (outcome === "fails") throw new Error("launch failed");
+        return view("running");
+      });
+      vi.spyOn(service, "get").mockResolvedValue(view("spawning"));
+      const body = { ...request, idempotencyKey: "k" };
+      const first = service.spawnFromRequest(body, "foreground").catch((error: unknown) => error);
+      await vi.waitFor(() => expect(launch).toHaveBeenCalledOnce());
+      const retry = service.spawnFromRequest(body, "foreground").catch((error: unknown) => error);
+      settle();
+      const [firstResult, retryResult] = await Promise.all([first, retry]);
+      expect(launch).toHaveBeenCalledOnce();
+      if (outcome === "fails") {
+        expect(firstResult).toMatchObject({ message: "launch failed" });
+        expect(retryResult).toMatchObject({ message: "launch failed" });
+      } else {
+        expect(retryResult).toMatchObject({ status: "running", replayed: true });
+      }
+    },
+  );
+
   it("a mismatched call waiting on a first call that leaves no record runs its own launch", async () => {
     const f = fixture();
     const service = f.fresh();

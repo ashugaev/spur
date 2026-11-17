@@ -4048,6 +4048,50 @@ describe("SessionService", () => {
           service.dispose();
         });
 
+        it("lands the receipt in the first write that completes a spawnIntent source", async () => {
+          const source = sessionRecord({
+            id: "api-1",
+            status: "spawning",
+            spawnIntent: {
+              version: 1,
+              phase: "queued",
+              request: { project: "api" },
+              defaultBranch: "main",
+              preflightBatchId: "batch-1",
+              startupAttachments: [],
+              launchSelection: {},
+              submission: { state: "pending" },
+            },
+          });
+          const { service } = await gatedService(false, source);
+          const receipt = {
+            key: "h1",
+            request: { agent: "cursor" as const },
+            successorId: "api-2",
+            movedTodoItems: 0,
+          };
+          writeSessionMock.mockClear();
+
+          await (
+            service as unknown as {
+              applyManualStatusLocked: (...args: unknown[]) => Promise<unknown>;
+            }
+          ).applyManualStatusLocked(
+            "api-1",
+            "completed",
+            { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+            { retainInList: true, eventAction: "handoff", handoffReceipt: receipt },
+          );
+
+          const completedWrites = writeSessionMock.mock.calls
+            .map(([, record]) => record as SessionRecord)
+            .filter((record) => record.id === "api-1" && record.status === "completed");
+          expect(completedWrites.length).toBeGreaterThan(0);
+          expect(completedWrites[0]).not.toHaveProperty("spawnIntent");
+          expect(completedWrites[0]?.handoffIdempotency).toEqual(receipt);
+          service.dispose();
+        });
+
         it("rejects an invalid key before touching the source", async () => {
           const { sessions, service } = await keyedHandoffService();
 
