@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { ensureAccountProjectsLink } from "./claude-accounts.js";
 import type { AuthRegistration, AuthSession } from "./auth-proxy.js";
 
@@ -88,27 +88,7 @@ function sanitizedHostSettings(path: string): Record<string, unknown> | undefine
   return sanitized;
 }
 
-/** Folders a managed session runs in: its cwd and the project repo it was cut from. */
-export interface TrustFolders {
-  cwd: string;
-  repoPath: string;
-}
-
-// Host trust applies to the cwd, any parent folder, or the repo a worktree belongs to.
-function hostTrustsFolders(folders: TrustFolders): boolean {
-  const projects = readJsonObject(join(homedir(), ".claude.json"))?.["projects"];
-  if (typeof projects !== "object" || projects === null) return false;
-  const trusted = (dir: string): boolean =>
-    (projects as Record<string, { hasTrustDialogAccepted?: unknown } | null>)[dir]
-      ?.hasTrustDialogAccepted === true;
-  for (let dir = folders.cwd; ; dir = dirname(dir)) {
-    if (trusted(dir)) return true;
-    if (dirname(dir) === dir) break;
-  }
-  return trusted(folders.repoPath);
-}
-
-function linkHostClaudeConfig(claudeConfigDir: string, trust?: TrustFolders): void {
+function linkHostClaudeConfig(claudeConfigDir: string, trustedCwd?: string): void {
   const hostHome = join(homedir(), ".claude");
   for (const name of HOST_CLAUDE_ENTRIES) {
     const target = join(hostHome, name);
@@ -130,16 +110,16 @@ function linkHostClaudeConfig(claudeConfigDir: string, trust?: TrustFolders): vo
   const onboarding = join(claudeConfigDir, ".claude.json");
   const hostServers = readJsonObject(join(homedir(), ".claude.json"))?.["mcpServers"];
   const { mcpServers: _staleServers, ...managedState } = readJsonObject(onboarding) ?? {};
-  // Claude keeps trust per folder in ~/.claude.json; carry the host decision for this session only.
+  // Claude keeps trust per folder in .claude.json; a managed session always trusts its own cwd.
   const projects = managedState["projects"];
   const trustedProjects =
-    trust && hostTrustsFolders(trust)
+    trustedCwd !== undefined
       ? {
           ...(typeof projects === "object" && projects !== null && !Array.isArray(projects)
             ? projects
             : {}),
-          [trust.cwd]: {
-            ...(projects as Record<string, object> | undefined)?.[trust.cwd],
+          [trustedCwd]: {
+            ...(projects as Record<string, object> | undefined)?.[trustedCwd],
             hasTrustDialogAccepted: true,
           },
         }
@@ -192,7 +172,7 @@ export function managedAuthLaunch(
   registration: AuthRegistration | undefined,
   sessionToolDir: string,
   codexArgs: readonly string[] = [],
-  trust?: TrustFolders,
+  trustedCwd?: string,
 ): {
   env?: Record<string, string>;
   claudeConfigDir?: string;
@@ -202,7 +182,7 @@ export function managedAuthLaunch(
   if (registration.provider === "claude") {
     const claudeConfigDir = join(sessionToolDir, MANAGED_CLAUDE_HOME);
     mkdirSync(claudeConfigDir, { recursive: true });
-    linkHostClaudeConfig(claudeConfigDir, trust);
+    linkHostClaudeConfig(claudeConfigDir, trustedCwd);
     ensureAccountProjectsLink({ configDir: claudeConfigDir });
     return {
       claudeConfigDir,

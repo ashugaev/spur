@@ -22886,7 +22886,7 @@ describe("SessionService", () => {
       mkdirSync(join(TEST_HOME, ".claude", "skills"), { recursive: true });
       writeFileSync(join(TEST_HOME, ".claude", "CLAUDE.md"), "fixture\n");
       seedManagedAccounts("claude");
-      createSessionStore();
+      const sessions = createSessionStore();
       mockClaudeJsonlState("waiting");
       authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
       const service = await createDisposedSessionService();
@@ -22899,8 +22899,11 @@ describe("SessionService", () => {
       for (const name of links) {
         expect(readlinkSync(join(managedHome, name)).startsWith(`${TEST_HOME}/`)).toBe(true);
       }
+      const spawnedWorktree = sessions.get("api-1")?.worktreePath ?? "";
+      expect(spawnedWorktree).not.toBe("");
       expect(JSON.parse(readFileSync(join(managedHome, ".claude.json"), "utf8"))).toEqual({
         hasCompletedOnboarding: true,
+        projects: { [spawnedWorktree]: { hasTrustDialogAccepted: true } },
       });
       service.dispose();
     });
@@ -23065,6 +23068,12 @@ describe("SessionService", () => {
         }),
       );
       expect(seedSessionHomeMock).not.toHaveBeenCalled();
+      const restoredHome = join(TEST_DATA_DIR, "session-tools", "api-1", "managed-claude-home");
+      const restoredWorktree = sessions.get("api-1")?.worktreePath ?? "";
+      expect(restoredWorktree).not.toBe("");
+      expect(JSON.parse(readFileSync(join(restoredHome, ".claude.json"), "utf8")).projects).toEqual(
+        { [restoredWorktree]: { hasTrustDialogAccepted: true } },
+      );
       service.dispose();
     });
 

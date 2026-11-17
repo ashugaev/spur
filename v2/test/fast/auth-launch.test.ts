@@ -149,31 +149,24 @@ describe("managed native authorization launch", () => {
     });
   });
 
-  it("carries host folder trust for the session into the managed home and scrubs it", () => {
-    const hostEntry = (trusted: boolean) => ({
-      hasTrustDialogAccepted: trusted,
-      history: ["host-secret"],
-    });
+  it("always trusts the session cwd and nothing else, and scrubs it on teardown", () => {
     writeFileSync(
       join(home, ".claude.json"),
       JSON.stringify({
         oauthAccount: { emailAddress: "host-secret" },
         projects: {
-          "/repo": hostEntry(true),
-          "/other": hostEntry(true),
-          "/denied": hostEntry(false),
+          "/wt": { hasTrustDialogAccepted: true, history: ["host-secret"] },
+          "/wt/feature/sub": { hasTrustDialogAccepted: true },
+          "/other": { hasTrustDialogAccepted: true },
         },
       }),
     );
     const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
     directories.push(directory);
-    const launch = (cwd: string) =>
-      managedAuthLaunch(registration, directory, [], { cwd, repoPath: "/repo" });
     const stateOf = (dir: string) =>
       JSON.parse(readFileSync(join(dir, ".claude.json"), "utf8")) as Record<string, unknown>;
 
-    // Worktree trusted through its repo.
-    const { claudeConfigDir } = launch("/wt/feature");
+    const { claudeConfigDir } = managedAuthLaunch(registration, directory, [], "/wt/feature");
     expect(stateOf(claudeConfigDir!)).toEqual({
       hasCompletedOnboarding: true,
       projects: { "/wt/feature": { hasTrustDialogAccepted: true } },
@@ -188,17 +181,11 @@ describe("managed native authorization launch", () => {
       projects: { "/wt/feature": {} },
     });
 
-    // Parent folder trust applies; untrusted host folder stays untrusted.
-    launch("/other/deep/wt");
-    expect(stateOf(claudeConfigDir!)["projects"]).toMatchObject({
-      "/other/deep/wt": { hasTrustDialogAccepted: true },
+    // Relaunch in the same home trusts again.
+    managedAuthLaunch(registration, directory, [], "/wt/feature");
+    expect(stateOf(claudeConfigDir!)["projects"]).toEqual({
+      "/wt/feature": { hasTrustDialogAccepted: true },
     });
-    rmSync(claudeConfigDir!, { recursive: true });
-    const untrusted = managedAuthLaunch(registration, directory, [], {
-      cwd: "/denied",
-      repoPath: "/unknown",
-    });
-    expect(stateOf(untrusted.claudeConfigDir!)).toEqual({ hasCompletedOnboarding: true });
   });
 
   it("repoints stale links at the current host home", () => {

@@ -14934,10 +14934,12 @@ export class SessionService {
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchOptions = {
         ...planOptions,
-        ...managedAuthLaunch(authRegistration, sessionToolDir, planOptions.codexArgs, {
-          cwd: workspacePath,
-          repoPath: project.path,
-        }),
+        ...managedAuthLaunch(
+          authRegistration,
+          sessionToolDir,
+          planOptions.codexArgs,
+          workspacePath,
+        ),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -16723,10 +16725,12 @@ export class SessionService {
           : requestedAuthAccount(request, agent),
         prepared.placeholder.auth !== undefined,
       );
-      const managedLaunch = managedAuthLaunch(authRegistration, sessionToolDir, project.codexArgs, {
-        cwd: workspacePath,
-        repoPath: project.path,
-      });
+      const managedLaunch = managedAuthLaunch(
+        authRegistration,
+        sessionToolDir,
+        project.codexArgs,
+        workspacePath,
+      );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -23700,10 +23704,12 @@ export class SessionService {
           true,
         )
       : undefined;
-    const managedLaunch = managedAuthLaunch(authRegistration, sessionToolDir, project.codexArgs, {
-      cwd: session.worktreePath,
-      repoPath: project.path,
-    });
+    const managedLaunch = managedAuthLaunch(
+      authRegistration,
+      sessionToolDir,
+      project.codexArgs,
+      session.worktreePath,
+    );
     const { session: mcpSidecarUpdate, mcpBindings } = await this.startMcpSidecars(
       session,
       project,
@@ -24524,7 +24530,7 @@ export class SessionService {
         authRegistration,
         sessionToolDir,
         restoreProjectConfig.codexArgs,
-        { cwd: current.worktreePath, repoPath: restoreProjectConfig.path },
+        current.worktreePath,
       );
       operation?.assertActive();
       const mcpStart = await this.startMcpSidecars(current, restoreProjectConfig, operation);
