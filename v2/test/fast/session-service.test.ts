@@ -3920,6 +3920,189 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      describe("handoff idempotency key", () => {
+        const human = { todoActor: { kind: "human", origin: "cli" } } as const;
+
+        async function keyedHandoffService() {
+          mockClaudeJsonlState("waiting");
+          const source = sessionRecord({
+            id: "api-1",
+            status: "running",
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+          });
+          const { sessions, service } = await gatedService(false, source);
+          workspaceExistsMock.mockReturnValue(true);
+          reserveNextSessionIdMock.mockResolvedValue("api-2");
+          await resolveOneItem(service);
+          return { sessions, service };
+        }
+
+        it("retry after success returns the same successor with replayed", async () => {
+          const { sessions, service } = await keyedHandoffService();
+
+          const first = await service.handoff(
+            "api-1",
+            { agent: "cursor", idempotencyKey: "h1" },
+            human,
+          );
+          expect(first).toMatchObject({ id: "api-2" });
+          expect(first).not.toHaveProperty("replayed");
+          expect(first).not.toHaveProperty("handoffIdempotency");
+          expect(sessions.get("api-1")).toMatchObject({
+            status: "completed",
+            handoffIdempotency: {
+              key: "h1",
+              request: { agent: "cursor" },
+              successorId: "api-2",
+              movedTodoItems: 0,
+            },
+          });
+
+          const second = await service.handoff(
+            "api-1",
+            { agent: "cursor", idempotencyKey: "h1" },
+            human,
+          );
+          expect(second).toMatchObject({ id: "api-2", movedTodoItems: 0, replayed: true });
+          expect(second).not.toHaveProperty("handoffIdempotency");
+          expect(reserveNextSessionIdMock).toHaveBeenCalledOnce();
+          service.dispose();
+        });
+
+        it("conflicts on a different request and refuses other keys on a completed source", async () => {
+          const { service } = await keyedHandoffService();
+          await service.handoff("api-1", { agent: "cursor", idempotencyKey: "h1" }, human);
+
+          await expect(
+            service.handoff("api-1", { agent: "codex", idempotencyKey: "h1" }, human),
+          ).rejects.toMatchObject({
+            statusCode: 409,
+            payload: { code: "idempotency_key_conflict", sessionId: "api-2" },
+          });
+          await expect(service.handoff("api-1", { agent: "cursor" }, human)).rejects.toThrow(
+            "not eligible for handoff",
+          );
+          await expect(
+            service.handoff("api-1", { agent: "cursor", idempotencyKey: "h2" }, human),
+          ).rejects.toThrow("not eligible for handoff");
+          expect(reserveNextSessionIdMock).toHaveBeenCalledOnce();
+          service.dispose();
+        });
+
+        it("runs a mismatched waiting call as a new handoff when the first leaves no receipt", async () => {
+          const { sessions, service } = await keyedHandoffService();
+          const internals = service as unknown as {
+            handoffOnce: (...args: unknown[]) => Promise<unknown>;
+          };
+          const original = internals.handoffOnce;
+          let fail: () => void = () => {};
+          const gate = new Promise<void>((_resolve, reject) => {
+            fail = () => reject(new Error("boom"));
+          });
+          const once = vi
+            .spyOn(internals, "handoffOnce")
+            .mockImplementationOnce(async () => {
+              await gate;
+              return {};
+            })
+            .mockImplementation((...args: unknown[]) => original.apply(service, args));
+
+          const first = service
+            .handoff("api-1", { agent: "cursor", idempotencyKey: "h1" }, human)
+            .catch((error: unknown) => error);
+          const second = service.handoff("api-1", { agent: "codex", idempotencyKey: "h1" }, human);
+          fail();
+
+          expect(await first).toMatchObject({ message: "boom" });
+          const result = await second;
+          expect(once).toHaveBeenCalledTimes(2);
+          expect(result).toMatchObject({ id: "api-2" });
+          expect(result).not.toHaveProperty("replayed");
+          expect(sessions.get("api-1")).toMatchObject({
+            status: "completed",
+            handoffIdempotency: { key: "h1", request: { agent: "codex" } },
+          });
+          expect(reserveNextSessionIdMock).toHaveBeenCalledOnce();
+          service.dispose();
+        });
+
+        it("coalesces concurrent same-key calls and answers a mismatched one after the first", async () => {
+          const { service } = await keyedHandoffService();
+
+          const [a, b, c] = await Promise.allSettled([
+            service.handoff("api-1", { agent: "cursor", idempotencyKey: "h1" }, human),
+            service.handoff("api-1", { agent: "cursor", idempotencyKey: "h1" }, human),
+            service.handoff("api-1", { agent: "codex", idempotencyKey: "h1" }, human),
+          ]);
+
+          expect(a).toMatchObject({ status: "fulfilled", value: { id: "api-2" } });
+          expect(b).toMatchObject({
+            status: "fulfilled",
+            value: { id: "api-2", replayed: true },
+          });
+          expect(c).toMatchObject({
+            status: "rejected",
+            reason: { payload: { code: "idempotency_key_conflict", sessionId: "api-2" } },
+          });
+          expect(reserveNextSessionIdMock).toHaveBeenCalledOnce();
+          service.dispose();
+        });
+
+        it("lands the receipt in the first write that completes a spawnIntent source", async () => {
+          const source = sessionRecord({
+            id: "api-1",
+            status: "spawning",
+            spawnIntent: {
+              version: 1,
+              phase: "queued",
+              request: { project: "api" },
+              defaultBranch: "main",
+              preflightBatchId: "batch-1",
+              startupAttachments: [],
+              launchSelection: {},
+              submission: { state: "pending" },
+            },
+          });
+          const { service } = await gatedService(false, source);
+          const receipt = {
+            key: "h1",
+            request: { agent: "cursor" as const },
+            successorId: "api-2",
+            movedTodoItems: 0,
+          };
+          writeSessionMock.mockClear();
+
+          await (
+            service as unknown as {
+              applyManualStatusLocked: (...args: unknown[]) => Promise<unknown>;
+            }
+          ).applyManualStatusLocked(
+            "api-1",
+            "completed",
+            { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+            { retainInList: true, eventAction: "handoff", handoffReceipt: receipt },
+          );
+
+          const completedWrites = writeSessionMock.mock.calls
+            .map(([, record]) => record as SessionRecord)
+            .filter((record) => record.id === "api-1" && record.status === "completed");
+          expect(completedWrites.length).toBeGreaterThan(0);
+          expect(completedWrites[0]).not.toHaveProperty("spawnIntent");
+          expect(completedWrites[0]?.handoffIdempotency).toEqual(receipt);
+          service.dispose();
+        });
+
+        it("rejects an invalid key before touching the source", async () => {
+          const { sessions, service } = await keyedHandoffService();
+
+          await expect(
+            service.handoff("api-1", { agent: "cursor", idempotencyKey: "" }, human),
+          ).rejects.toMatchObject({ statusCode: 400 });
+          expect(sessions.get("api-1")?.status).toBe("running");
+          service.dispose();
+        });
+      });
+
       it("reads the closeout head before the locked section on handoff", async () => {
         mockClaudeJsonlState("waiting");
         readWorktreeHeadMock.mockResolvedValue({ branch: "x", headSha: "beef0002", dirty: false });

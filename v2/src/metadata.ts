@@ -1558,6 +1558,19 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     (birthRequest.prompt === undefined || typeof birthRequest.prompt === "string")
       ? { triggerBirthKey: normalizedSession.triggerBirthKey, triggerBirthRequest: birthRequest }
       : {};
+  const receipt = normalizedSession.handoffIdempotency;
+  const handoffIdempotency =
+    isRecord(receipt) &&
+    typeof receipt.key === "string" &&
+    receipt.key.length > 0 &&
+    isRecord(receipt.request) &&
+    typeof receipt.request.agent === "string" &&
+    typeof receipt.successorId === "string" &&
+    receipt.successorId.length > 0 &&
+    Number.isSafeInteger(receipt.movedTodoItems) &&
+    receipt.movedTodoItems >= 0
+      ? { handoffIdempotency: receipt }
+      : {};
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const declaration = normalizeTaskStatus(normalizedSession.taskStatus);
   const taskStatus =
@@ -1611,6 +1624,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     id: normalizedSession.id,
     project: normalizedSession.project,
     ...triggerBirth,
+    ...handoffIdempotency,
     // Legacy on-disk records only have `deskId` (or neither field); this is
     // where a pre-workspaceId record gets migrated in memory on every read.
     // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself

@@ -17,6 +17,8 @@ import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
   buildForeignAgentProcessMessage,
   ForeignAgentProcessError,
+  IdempotencyKeyConflictError,
+  InvalidIdempotencyKeyError,
   LaunchPromptPendingError,
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
@@ -32,7 +34,12 @@ import {
   SpawnBatchConflictError,
   SessionService,
 } from "../../src/session-service.js";
-import type { SessionRecord, SessionView, SidecarStopView } from "../../src/types.js";
+import type {
+  SessionRecord,
+  SessionView,
+  SidecarStopView,
+  SpawnSessionResponse,
+} from "../../src/types.js";
 import {
   type ConfigRegistryFile,
   readConfigRegistryFile,
@@ -2694,6 +2701,70 @@ describe("startServer", () => {
       await server.stop();
     }
   });
+
+  it.each([
+    ["/sessions", "foreground"],
+    ["/sessions/background", "background"],
+  ] as const)(
+    "idempotency HTTP at %s: 201 replayed, 409 idempotency_key_conflict, 400 invalid key",
+    async (route, delivery) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+      const repoDir = join(root, "repo");
+      const port = await findFreePort();
+      await mkdir(repoDir, { recursive: true });
+      const configPath = join(root, "spur.yaml");
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${join(root, "data")}`,
+          `worktreeDir: ${join(root, "worktrees")}`,
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+        "utf8",
+      );
+      const spawnFromRequest = vi
+        .spyOn(SessionService.prototype, "spawnFromRequest")
+        .mockResolvedValueOnce({ id: "demo-1", replayed: true } as SpawnSessionResponse)
+        .mockRejectedValueOnce(new IdempotencyKeyConflictError("different request", "demo-1"))
+        .mockRejectedValueOnce(new InvalidIdempotencyKeyError("bad key"));
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+      try {
+        const post = () =>
+          fetch(`http://127.0.0.1:${port}${route}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project: "demo", prompt: "ship it", idempotencyKey: "k" }),
+          });
+        const replayed = await post();
+        expect(replayed.status).toBe(201);
+        await expect(replayed.json()).resolves.toMatchObject({ id: "demo-1", replayed: true });
+        const conflict = await post();
+        expect(conflict.status).toBe(409);
+        await expect(conflict.json()).resolves.toEqual({
+          code: "idempotency_key_conflict",
+          sessionId: "demo-1",
+          error: "different request",
+        });
+        expect((await post()).status).toBe(400);
+        expect(spawnFromRequest).toHaveBeenCalledTimes(3);
+        expect(spawnFromRequest).toHaveBeenCalledWith(
+          expect.objectContaining({ project: "demo", idempotencyKey: "k" }),
+          delivery,
+        );
+      } finally {
+        spawnFromRequest.mockRestore();
+        await server.stop();
+      }
+    },
+  );
 
   it("routes backlog list through the session service", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
