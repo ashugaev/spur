@@ -282,6 +282,17 @@ describe("buildUsageReport quotas", () => {
     ]);
   });
 
+  it("keeps the host wording for a rejected host login", async () => {
+    const s = await setup();
+    await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+    const fetchMock = vi.fn(async () => new Response("x", { status: 401 }));
+    const report = await buildUsageReport(s.deps(fetchMock as unknown as typeof fetch));
+    expect(report.quotas[0]).toMatchObject({
+      error: "unauthorized",
+      message: "saved login rejected; run the agent to refresh it",
+    });
+  });
+
   it("shows the last refresh failure kind instead of pending", async () => {
     const s = await setup();
     const report = await buildUsageReport({
@@ -300,7 +311,7 @@ describe("buildUsageReport quotas", () => {
     expect(report.quotas[0]).toMatchObject({
       status: "error",
       error: "unauthorized",
-      message: "saved login rejected; run the agent to refresh it",
+      message: "sign-in rejected; sign in again from the accounts menu",
     });
   });
 

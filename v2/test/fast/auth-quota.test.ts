@@ -200,6 +200,17 @@ describe("AuthQuota", () => {
     calls = [];
     answer = (ids) =>
       Promise.resolve(
+        ids.map((id) => ({ accountId: id, status: "error" as const, httpStatus: 429 })),
+      );
+    quota.read([claude("a")]);
+    await settle();
+    expect(quota.read([claude("a")]).has("a")).toBe(true);
+    expect(quota.lastErrors().get("a")).toBe("rate_limited");
+
+    clock += 3_600_000;
+    calls = [];
+    answer = (ids) =>
+      Promise.resolve(
         ids.map((id) => ({ accountId: id, status: "error" as const, httpStatus: 500 })),
       );
     quota.read([claude("a")]);

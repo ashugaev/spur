@@ -599,12 +599,15 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
   const managedQuotas = managed.flatMap((account): QuotaSourceResult[] => {
     if (account.status !== "ready" || account.credential !== "oauth") return [];
     if (!account.quota) {
+      const row = errorResult(
+        { provider: account.provider, source: account.id, label: account.displayName },
+        deps.nowMs,
+        account.quotaError ?? "pending",
+      );
       return [
-        errorResult(
-          { provider: account.provider, source: account.id, label: account.displayName },
-          deps.nowMs,
-          account.quotaError ?? "pending",
-        ),
+        row.status === "error" && row.error === "unauthorized"
+          ? { ...row, message: "sign-in rejected; sign in again from the accounts menu" }
+          : row,
       ];
     }
     return [
