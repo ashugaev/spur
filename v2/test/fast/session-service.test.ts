@@ -249,6 +249,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.js";
 import { readPrAlertOwnership, writeWorkspaceState } from "../../src/workspace-store.js";
+import type * as CloseoutArchive from "../../src/closeout-archive.js";
 import { writeCloseoutArchive } from "../../src/closeout-archive.js";
 import { allowsPrAlertBatch } from "../../src/pr-alert-owner.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
@@ -605,7 +606,7 @@ async function useRealTodoLedger(): Promise<void> {
 }
 
 vi.mock("../../src/closeout-archive.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/closeout-archive.js")>();
+  const actual = await importOriginal<typeof CloseoutArchive>();
   return { ...actual, writeCloseoutArchive: vi.fn(actual.writeCloseoutArchive) };
 });
 

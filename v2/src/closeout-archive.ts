@@ -3,7 +3,6 @@ import {
   type Dirent,
   closeSync,
   constants,
-  existsSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -337,7 +336,7 @@ export function listCloseoutVersions(dir: string): number[] {
 
 function removeStaleTemps(closeoutDir: string): string | null {
   let failure: string | null = null;
-  let names: string[] = [];
+  let names: string[];
   try {
     names = readdirSync(closeoutDir);
   } catch {
