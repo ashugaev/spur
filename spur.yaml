@@ -109,6 +109,11 @@ projects:
         event: github:merge_conflict
         send:
           prompt: "Resolve merge conflicts on the active PR. Rebase or merge fresh main into the branch. Push."
+      gh-out-of-date:
+        source: gh
+        event: github:out_of_date
+        send:
+          prompt: "The active PR is behind main. Merge fresh main into the branch (no rebase, no force-push). Push. Confirm CI passes."
       gh-merged:
         source: gh
         event: github:merged

@@ -454,7 +454,9 @@ function operation(
         contentType:
           operationId === "get_artifact"
             ? "application/octet-stream (stored MIME)"
-            : "application/json",
+            : operationId === "get_closeout_file"
+              ? "application/octet-stream"
+              : "application/json",
         description:
           options.response ?? "Daemon operation result; response is forwarded without projection.",
       },
@@ -1314,6 +1316,51 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     },
   ),
   operation(
+    "get_closeout",
+    "GET",
+    "/sessions/{sessionId}/closeout",
+    "Read a closeout archive manifest written by complete (latest unless version is given); works for live, completed and archived sessions.",
+    {
+      query: [
+        field("version", "integer", "Archive version, a positive integer; default latest.", false),
+      ],
+      examples: [{ pathParams: { sessionId: "example-sessionId" }, query: { version: "1" } }],
+      response:
+        "CloseoutManifest {version,sessionId,project,completedAt,links,snapshotVersion,headSha,files,skipped,missingRoots,error?,expiredAt?,versions}; versions lists every archive version ascending; 404 when none or unknown version; 400 invalid version; 500 closeout_corrupt.",
+      source: "v2/src/closeout-archive.ts",
+    },
+  ),
+  operation(
+    "get_closeout_file",
+    "GET",
+    "/sessions/{sessionId}/closeout/files/{path}",
+    "Download one archived file as an attachment.",
+    {
+      query: [
+        field("version", "integer", "Archive version, a positive integer; default latest.", false),
+      ],
+      catchAllPathParams: ["path"],
+      examples: [{ pathParams: { sessionId: "example-sessionId", path: "work/notes.md" } }],
+      response:
+        "Binary stream; path is <root>/<relative path> with root artifacts, work or workspace; 404 for unknown, expired or unsafe paths.",
+      source: "v2/src/closeout-archive.ts",
+    },
+  ),
+  operation(
+    "list_closeouts",
+    "GET",
+    "/closeouts",
+    "Latest closeout archive of every session whose links match, newest first, for live, completed and archived sessions.",
+    {
+      query: [
+        field("link", "string[]", "Repeatable S5 link label or label=URL; all must match.", true),
+      ],
+      examples: [{ query: { link: "pr=https://example.com/pull/42" } }],
+      response: "CloseoutEntry[] {sessionId,status,manifest incl. versions}; no link 400.",
+      source: "v2/src/closeout-archive.ts",
+    },
+  ),
+  operation(
     "get_task_status",
     "GET",
     "/sessions/{sessionId}/task-status",
@@ -1340,7 +1387,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "get_todo",
     "GET",
     "/sessions/{sessionId}/todo",
-    "Read authoritative session task ledger.",
+    "Read authoritative session task ledger; works for archived sessions.",
   ),
   operation(
     "mutate_todo",

@@ -39,8 +39,10 @@ export function assertPrAlertRoutes(
   }
 }
 
+export const PR_ALERT_KINDS = ["ci_failed", "merge_conflict", "out_of_date"] as const;
+
 export function isPrAlertEvent(event: string): boolean {
-  return event === "github:ci_failed" || event === "github:merge_conflict";
+  return PR_ALERT_KINDS.some((kind) => event === `github:${kind}`);
 }
 
 export function allowsPrAlertIdentity(

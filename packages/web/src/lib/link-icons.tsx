@@ -518,7 +518,25 @@ export function prStateColor(state: PrState | null): string | undefined {
   return state ? PR_STATE_COLORS[state] : undefined;
 }
 
-export function CiStatusDot({ status }: { status: CiStatus }) {
+function CiClockIcon({ label, stroke }: { label: string; stroke: string }) {
+  return (
+    <svg
+      aria-label={label}
+      role="img"
+      className="h-3 w-3"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={stroke}
+      strokeWidth="2.5"
+      strokeLinecap="round"
+    >
+      <circle cx="12" cy="12" r="10" strokeWidth="2" />
+      <path d="M12 6v6l4 2" />
+    </svg>
+  );
+}
+
+export function CiStatusDot({ status, running = false }: { status: CiStatus; running?: boolean }) {
   if (!status) return null;
   if (status === "success")
     return (
@@ -536,6 +554,10 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
         <path d="M20 6 9 17l-5-5" />
       </svg>
     );
+  if (running)
+    return (
+      <CiClockIcon label="CI failing, checks still running" stroke="var(--color-status-error)" />
+    );
   if (status === "failure")
     return (
       <svg
@@ -551,21 +573,7 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
         <path d="M18 6 6 18M6 6l12 12" />
       </svg>
     );
-  return (
-    <svg
-      aria-label="CI pending"
-      role="img"
-      className="h-3 w-3"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="var(--color-status-attention)"
-      strokeWidth="2.5"
-      strokeLinecap="round"
-    >
-      <circle cx="12" cy="12" r="10" strokeWidth="2" />
-      <path d="M12 6v6l4 2" />
-    </svg>
-  );
+  return <CiClockIcon label="CI pending" stroke="var(--color-status-attention)" />;
 }
 
 export function MergeConflictBadge() {

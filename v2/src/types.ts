@@ -240,6 +240,10 @@ export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 export const GITHUB_PR_OCCURRENCE_KINDS = ["review_requested"] as const;
 export type GitHubPrOccurrenceKind = (typeof GITHUB_PR_OCCURRENCE_KINDS)[number];
 
+// GitHub-only signal kinds that report a PR state, not a lifecycle transition.
+export const GITHUB_PR_STATE_KINDS = ["out_of_date"] as const;
+export type GitHubPrStateKind = (typeof GITHUB_PR_STATE_KINDS)[number];
+
 export const GITHUB_PR_LIFECYCLE_KINDS = [
   "ready_for_review",
   "approved",
@@ -657,7 +661,7 @@ export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
 export interface ReviewSignal {
   key: string;
-  kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind;
+  kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind | GitHubPrStateKind;
   text: string;
   providerThreadTarget?: AutoPingThreadTarget;
   /** Until-change mute key: a different value means the subject changed. */
@@ -907,6 +911,7 @@ export interface ProjectConfig {
   tokenBudgetWarnOnly?: boolean;
   staleAfterMinutes?: number;
   snapshots?: ProjectSnapshotsConfig;
+  closeout?: ProjectCloseoutConfig;
 }
 
 export interface ProjectSnapshotsConfig {
@@ -914,6 +919,52 @@ export interface ProjectSnapshotsConfig {
   maxBytes?: number;
   requireFinal?: boolean;
   freshnessMinutes?: number;
+}
+
+export type CloseoutRoot = "artifacts" | "work" | "workspace";
+
+export interface ProjectCloseoutConfig {
+  enabled?: boolean;
+  include?: string[];
+  maxBytes?: number;
+  retentionDays?: number;
+}
+
+export interface CloseoutManifest {
+  version: number;
+  sessionId: string;
+  project: string;
+  completedAt: string;
+  links: SessionLink[];
+  snapshotVersion: number | null;
+  headSha: string | null;
+  files: { root: CloseoutRoot; path: string; bytes: number; sha256: string }[];
+  skipped: {
+    root: CloseoutRoot;
+    path: string;
+    bytes: number;
+    reason: "max_bytes" | "unreadable" | "changed" | "unverified";
+  }[];
+  missingRoots: CloseoutRoot[];
+  error?: string;
+  expiredAt?: string;
+}
+
+export interface CloseoutManifestView extends CloseoutManifest {
+  /** Every archive version of the session, ascending. */
+  versions: number[];
+}
+
+/** Added to a complete result when the archive listed files it could not verify. */
+export interface CloseoutReport {
+  unverified: number;
+}
+export type CompleteSessionResult = SessionView & { closeout?: CloseoutReport };
+
+export interface CloseoutEntry {
+  sessionId: string;
+  status: SessionStatus;
+  manifest: CloseoutManifestView;
 }
 
 export type ProviderReasoningEffort =
@@ -1467,6 +1518,8 @@ export interface SessionDeskMember {
 
 export interface CompleteDeskResponse {
   completedIds: string[];
+  /** Summed over members; present when the archives listed unverified files. */
+  closeout?: CloseoutReport;
   lifecycle: SessionLifecycleSnapshot;
 }
 

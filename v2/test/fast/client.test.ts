@@ -1290,6 +1290,33 @@ describe("client deadlines", () => {
     );
   });
 
+  it("getBytes returns the raw body on 200", async () => {
+    const route = routeFetch(() => ready());
+    const { getBytes } = await loadClientModule();
+    const request = getBytes(
+      "/tmp/dist/cli.js",
+      "/sessions/s/closeout/files/work/a",
+      "/tmp/spur.yaml",
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    route.respond(new Response(Buffer.from([0, 255, 1]), { status: 200 }));
+    expect(await request).toEqual(Buffer.from([0, 255, 1]));
+  });
+
+  it("getBytes throws the formatted daemon error on a JSON 404", async () => {
+    const route = routeFetch(() => ready());
+    const { getBytes } = await loadClientModule();
+    const request = track(
+      getBytes("/tmp/dist/cli.js", "/sessions/s/closeout/files/work/a", "/tmp/spur.yaml"),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    route.respond(
+      new Response(JSON.stringify({ error: "Closeout file not found" }), { status: 404 }),
+    );
+    await request.done();
+    expect(request.state.error?.message).toContain("Closeout file not found");
+  });
+
   it("lock-bound GET also hits the 120s ceiling when /info keeps answering", async () => {
     routeFetch((call, init) => (call <= 2 ? ready() : pendingUntilAbort(init)));
     const { getJson } = await loadClientModule();

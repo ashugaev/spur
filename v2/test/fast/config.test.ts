@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { totalmem } from "node:os";
 import { join } from "node:path";
@@ -27,6 +27,7 @@ import {
 } from "../../src/event-log.js";
 import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
+import { writeCloseoutArchive } from "../../src/closeout-archive.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -1552,6 +1553,26 @@ projects:
     });
   });
 
+  it("accepts github:out_of_date during config validation", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      notify:
+        source: pr-watch
+        event: github:out_of_date
+        send: {}
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.triggers["notify"]).toMatchObject({
+      event: "github:out_of_date",
+    });
+  });
+
   it("accepts github PR lifecycle events during config validation", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1610,6 +1631,7 @@ projects:
       "gitlab:approved",
       "gitlab:merged",
       "gitlab:closed",
+      "gitlab:out_of_date",
     ]) {
       const configPath = await writeConfig(`
 projects:
@@ -5169,6 +5191,90 @@ projects:
     expect(() => loadConfig(configPath)).toThrow(
       'projects.api.mcp only supports "exclude" (got: inherit)',
     );
+  });
+
+  it("leaves closeout unset and parses projects.<id>.closeout", async () => {
+    const absent = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(absent).projects["api"]?.closeout).toBeUndefined();
+
+    const set = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    closeout:
+      enabled: true
+      include: ["work:**", "workspace:docs/**", "artifacts:agent-history-*"]
+      maxBytes: 1024
+      retentionDays: 30
+`);
+    expect(loadConfig(set).projects["api"]?.closeout).toEqual({
+      enabled: true,
+      include: ["work:**", "workspace:docs/**", "artifacts:agent-history-*"],
+      maxBytes: 1024,
+      retentionDays: 30,
+    });
+  });
+
+  it.each([
+    ["unknown key", "exclude: [a]", "projects.api.closeout only supports"],
+    ["bad root", 'include: ["home:x"]', "projects.api.closeout.include[0]"],
+    ["no root", 'include: ["x"]', "projects.api.closeout.include[0]"],
+    ["dotdot", 'include: ["work:a/../b"]', "projects.api.closeout.include[0]"],
+    ["absolute", 'include: ["work:/etc"]', "projects.api.closeout.include[0]"],
+    ["dot segment", 'include: ["work:./x"]', "projects.api.closeout.include[0]"],
+    ["empty segment", 'include: ["work:a//x"]', "projects.api.closeout.include[0]"],
+    ["blank glob", 'include: ["work: "]', "projects.api.closeout.include[0]"],
+    ["fractional maxBytes", "maxBytes: 1.5", "projects.api.closeout.maxBytes"],
+    ["zero retention", "retentionDays: 0", "projects.api.closeout.retentionDays"],
+  ])("rejects closeout %s", async (_name, line, message) => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    closeout:
+      ${line}
+`);
+    expect(() => loadConfig(configPath)).toThrow(message);
+  });
+
+  it.each([
+    ["@(report.md|notes.md)", ["report.md"]],
+    ["+(report).md", ["report.md"]],
+    ["!(private).md", ["report.md"]],
+  ])("accepts closeout include %s and the archive selects it", async (glob, expected) => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    closeout:
+      include: ["artifacts:${glob}"]
+`);
+    const include = loadConfig(configPath).projects["api"]?.closeout?.include ?? [];
+    expect(include).toEqual([`artifacts:${glob}`]);
+    const root = await createTempDir("spur-closeout-glob-");
+    const artifacts = join(root, "artifacts");
+    mkdirSync(artifacts, { recursive: true });
+    for (const name of ["report.md", "private.md"]) writeFileSync(join(artifacts, name), name);
+    const sessionDir = join(root, "sessions", "s1");
+    mkdirSync(sessionDir, { recursive: true });
+    const manifest = writeCloseoutArchive({
+      sessionDir,
+      sessionId: "s1",
+      project: "api",
+      completedAt: "2026-01-01T00:00:00.000Z",
+      links: [],
+      snapshotVersion: null,
+      headSha: null,
+      roots: { artifacts, work: null, workspace: null },
+      include,
+      maxBytes: 1000,
+    });
+    expect(manifest.files.map((file) => file.path)).toEqual(expected);
+    expect(manifest.error).toBeUndefined();
   });
 
   it("leaves snapshots unset and parses projects.<id>.snapshots", async () => {

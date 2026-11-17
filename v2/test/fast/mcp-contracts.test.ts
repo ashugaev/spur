@@ -25,10 +25,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "9e78fd3d9043b14f33e3da18ee63c6b0b96dfd1e30b82fef6cc087e7d476a35c",
-  "types.ts": "a5956e1068d25400d900887d961f6b460471f41b82fc082d53ab00954b9d4452",
+  "server.ts": "84c937235374d7b48fcbb47e2c598bd3b756d8767b0eb6e8e9102efb59a53ab8",
+  "types.ts": "40983651b4429b20f025a14264b1a387c0fd7be2ce792a97c9c086322b9f2196",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "cf493fa55aa476f90c43ddc80cc808f6af7adf23da734c00857d887312ec53e4",
+  "session-service.ts": "ea2566801d60e9c734044630d73688e79d62a1fbf7d2bb0ff47140aead7ae374",
   "session-transitions.ts": "832771b8d95a6722cf67fc05685f2fd5f03e7a60a923c7a438e1b5b3bc0dcbb0",
   "session-slots.ts": "cb766d6b58c70f34775a18edf6afa77312acdc766a017770b30102462535ed73",
   "task-status.ts": "98700844f71e5d5edfd628c92653ed3cfcde4ff6c213acd24b9751935034bea1",
@@ -73,12 +73,20 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(111);
+    expect(routes).toHaveLength(114);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(111);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(114);
     expect(getDaemonOperation("get_latest_snapshots_by_link")?.query).toContainEqual(
       expect.objectContaining({ name: "link", type: "string[]", required: true }),
     );
+    expect(getDaemonOperation("list_closeouts")?.query).toContainEqual(
+      expect.objectContaining({ name: "link", type: "string[]", required: true }),
+    );
+    expect(getDaemonOperation("get_closeout_file")?.catchAllPathParams).toEqual(["path"]);
+    for (const id of ["get_closeout", "get_closeout_file"])
+      expect(getDaemonOperation(id)?.query).toContainEqual(
+        expect.objectContaining({ name: "version", type: "integer", required: false }),
+      );
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("list_sessions")?.query).toContainEqual(
       expect.objectContaining({ name: "link", type: "string[]", required: false }),
@@ -444,7 +452,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(111);
+      expect(page.total).toBe(114);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
