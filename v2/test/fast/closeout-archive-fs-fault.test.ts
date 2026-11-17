@@ -16,6 +16,7 @@ const hooks = vi.hoisted(() => ({
   beforeOpen: null as null | { match: string; run: () => void },
   fakeSize: null as null | number,
   procFails: false,
+  inodes: null as null | { match: string; values: bigint[] },
   beforeRealpath: null as null | { match: string; run: () => void },
 }));
 
@@ -57,6 +58,18 @@ vi.mock("node:fs", async (importOriginal) => {
       }) as typeof NodeFs.realpathSync,
       { native: actual.realpathSync.native },
     ),
+    lstatSync: ((...args: unknown[]) => {
+      const stat = (actual.lstatSync as (...a: unknown[]) => NodeFs.BigIntStats)(...args);
+      const hook = hooks.inodes;
+      const path = args[0];
+      const options = args[1] as { bigint?: boolean } | undefined;
+      if (!hook || !options?.bigint || typeof path !== "string" || !path.endsWith(hook.match)) {
+        return stat;
+      }
+      return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+        ino: hook.values.shift() ?? stat.ino,
+      });
+    }) as typeof NodeFs.lstatSync,
     readlinkSync: ((...args: unknown[]) => {
       const path = args[0];
       if (hooks.procFails && typeof path === "string" && path.startsWith("/proc/self/fd/")) {
@@ -88,6 +101,7 @@ afterEach(() => {
   hooks.fakeSize = null;
   hooks.procFails = false;
   hooks.beforeRealpath = null;
+  hooks.inodes = null;
   rmSync(base, { recursive: true, force: true });
 });
 
@@ -231,5 +245,18 @@ describe("closeout archive with unknown dirent types", () => {
     });
     expect(manifest.files).toEqual([]);
     expect(manifest.missingRoots).toEqual(["artifacts", "work"]);
+  });
+
+  it("compares root inodes as bigint: ids differing only above 2^53 mark the root missing", () => {
+    base = mkdtempSync(join(tmpdir(), "closeout-fault-"));
+    const root = join(base, "root");
+    mkdirSync(root);
+    writeFileSync(join(root, "f.txt"), "data");
+    // As numbers these two round to the same value; as bigint they differ.
+    expect(Number(2n ** 53n)).toBe(Number(2n ** 53n + 1n));
+    hooks.inodes = { match: "/root", values: [2n ** 53n, 2n ** 53n + 1n] };
+    const manifest = archive(root, ["artifacts:**"]);
+    expect(manifest.files).toEqual([]);
+    expect(manifest.missingRoots).toEqual(["artifacts"]);
   });
 });

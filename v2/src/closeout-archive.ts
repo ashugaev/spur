@@ -10,7 +10,7 @@ import {
   openSync,
   readSync,
   readlinkSync,
-  type Stats,
+  type BigIntStats,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -138,18 +138,21 @@ function entryKind(entry: Dirent, fullPath: string): "file" | "directory" | "oth
   }
 }
 
+// bigint stats: inode numbers above 2^53 must not round to equal as numbers.
+function sameFile(a: BigIntStats, b: BigIntStats): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
 // A root that is itself a symlink is missing: only its ancestors may be links (home dirs).
 function realRoot(root: string | null): string | null {
   if (root === null) return null;
   try {
-    const before = lstatSync(root);
+    const before = lstatSync(root, { bigint: true });
     if (!before.isDirectory()) return null;
     const real = realpathSync(root);
     // Bind identity: the canonical dir must be the one lstat saw, not a swapped-in target.
-    const after = lstatSync(real);
-    return after.isDirectory() && after.dev === before.dev && after.ino === before.ino
-      ? real
-      : null;
+    const after = lstatSync(real, { bigint: true });
+    return after.isDirectory() && sameFile(after, before) ? real : null;
   } catch {
     return null;
   }
@@ -170,13 +173,13 @@ function nestedRoot(
   const segments = relative(parentRaw, child).split(sep);
   const path = join(parentReal, ...segments);
   try {
-    let last: Stats | undefined;
+    let last: BigIntStats | undefined;
     for (let depth = 1; depth <= segments.length; depth += 1) {
-      last = lstatSync(join(parentReal, ...segments.slice(0, depth)));
+      last = lstatSync(join(parentReal, ...segments.slice(0, depth)), { bigint: true });
       if (last.isSymbolicLink() || !last.isDirectory()) return null;
     }
-    const after = lstatSync(realpathSync(path));
-    if (!last || after.dev !== last.dev || after.ino !== last.ino) return null;
+    const after = lstatSync(realpathSync(path), { bigint: true });
+    if (!last || !sameFile(after, last)) return null;
   } catch {
     return null;
   }
