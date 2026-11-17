@@ -1253,6 +1253,19 @@ export async function startServer(
         const nowMs = Date.now();
         const todayStart = new Date(nowMs);
         todayStart.setHours(0, 0, 0, 0);
+        let managedAccounts: Awaited<
+          ReturnType<typeof service.listAuthorizationAccounts>
+        >["accounts"] = [];
+        try {
+          managedAccounts = (await service.listAuthorizationAccounts(undefined, { quota: true }))
+            .accounts;
+        } catch (error) {
+          logEvent("usage.managed_accounts.unavailable", {
+            level: "warn",
+            message: "Managed accounts unavailable; usage shows host logins",
+            details: { error: error instanceof Error ? error.message : String(error) },
+          });
+        }
         sendJson(
           response,
           200,
@@ -1262,8 +1275,7 @@ export async function startServer(
             dataDir: service.config.dataDir,
             nowMs,
             todayStartMs: todayStart.getTime(),
-            managedAccounts: (await service.listAuthorizationAccounts(undefined, { quota: true }))
-              .accounts,
+            managedAccounts,
           }),
         );
         return;

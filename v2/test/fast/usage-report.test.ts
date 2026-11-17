@@ -237,6 +237,51 @@ describe("buildUsageReport quotas", () => {
     expect(JSON.stringify(report)).not.toContain(s.home);
   });
 
+  it("keeps the host row when the provider has only non-ready managed accounts", async () => {
+    const s = await setup();
+    const report = await buildUsageReport({
+      ...s.deps(vi.fn() as unknown as typeof fetch),
+      managedAccounts: [
+        {
+          id: "acc-1",
+          provider: "codex",
+          displayName: "c@example.com",
+          credential: "oauth",
+          status: "sign_in_required",
+        },
+      ],
+    });
+    expect(report.quotas.map((q) => [q.provider, q.source])).toEqual([["codex", "codex"]]);
+  });
+
+  it("returns a pending row for a ready OAuth account with no cached quota", async () => {
+    const s = await setup();
+    const report = await buildUsageReport({
+      ...s.deps(vi.fn() as unknown as typeof fetch),
+      managedAccounts: [
+        {
+          id: "acc-1",
+          provider: "codex",
+          displayName: "c@example.com",
+          credential: "oauth",
+          status: "ready",
+        },
+      ],
+    });
+    expect(report.quotas).toEqual([
+      {
+        provider: "codex",
+        source: "acc-1",
+        label: "c@example.com",
+        fetchedAt: new Date(NOW).toISOString(),
+        status: "error",
+        error: "pending",
+        message: "quota not fetched yet",
+        httpStatus: null,
+      },
+    ]);
+  });
+
   it("lists one row per ready OAuth managed account and drops that provider's host source", async () => {
     const s = await setup();
     await writeClaudeCreds(join(s.home, ".claude"), FUTURE);

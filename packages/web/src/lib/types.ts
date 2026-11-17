@@ -141,7 +141,8 @@ export type QuotaErrorKind =
   | "rate_limited"
   | "http_error"
   | "network_error"
-  | "unparsable";
+  | "unparsable"
+  | "pending";
 
 interface QuotaSourceBase {
   provider: QuotaProvider;

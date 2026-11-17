@@ -24,7 +24,8 @@ export type QuotaErrorKind =
   | "rate_limited"
   | "http_error"
   | "network_error"
-  | "unparsable";
+  | "unparsable"
+  | "pending";
 
 interface QuotaSourceBase {
   provider: QuotaProvider;
@@ -81,6 +82,7 @@ const ERROR_MESSAGES: Record<QuotaErrorKind, string> = {
   http_error: "usage endpoint returned an error",
   network_error: "usage endpoint unreachable",
   unparsable: "usage response not recognized",
+  pending: "quota not fetched yet",
 };
 
 type Obj = Record<string, unknown>;
@@ -574,7 +576,9 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
     accounts.unshift({ id: "default", label: "default", configDir: defaultDir, createdAt: "" });
   }
   const managed = deps.managedAccounts ?? [];
-  const managedProviders = new Set(managed.map((account) => account.provider));
+  const managedProviders = new Set(
+    managed.filter((account) => account.status === "ready").map((account) => account.provider),
+  );
   const hostAccounts = managedProviders.has("claude")
     ? accounts.filter((account) => account.configDir !== defaultDir)
     : accounts;
@@ -591,21 +595,29 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
     ]),
     tokenActivity(deps, sessions),
   ]);
-  const managedQuotas = managed.flatMap((account): QuotaSourceResult[] =>
-    account.status === "ready" && account.credential === "oauth" && account.quota
-      ? [
-          {
-            provider: account.provider,
-            source: account.id,
-            label: account.displayName,
-            fetchedAt: account.quota.fetchedAt,
-            status: "ok",
-            plan: null,
-            windows: account.quota.windows,
-          },
-        ]
-      : [],
-  );
+  const managedQuotas = managed.flatMap((account): QuotaSourceResult[] => {
+    if (account.status !== "ready" || account.credential !== "oauth") return [];
+    if (!account.quota) {
+      return [
+        errorResult(
+          { provider: account.provider, source: account.id, label: account.displayName },
+          deps.nowMs,
+          "pending",
+        ),
+      ];
+    }
+    return [
+      {
+        provider: account.provider,
+        source: account.id,
+        label: account.displayName,
+        fetchedAt: account.quota.fetchedAt,
+        status: "ok",
+        plan: null,
+        windows: account.quota.windows,
+      },
+    ];
+  });
   const quotas = [...hostQuotas, ...managedQuotas];
   return {
     generatedAt: new Date(deps.nowMs).toISOString(),
