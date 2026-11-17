@@ -243,6 +243,7 @@ describe("managed authorization HTTP boundary", () => {
       target: { host: "codex" as const },
       tmuxSession: "auth-login-host-codex",
       status: "running" as const,
+      command: "codex login --device-auth",
     };
     const start = vi
       .spyOn(SessionService.prototype, "startTerminalLogin")

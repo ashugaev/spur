@@ -585,7 +585,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "start_auth_terminal_login",
     "POST",
     "/auth-terminal-logins",
-    "Start a native CLI sign-in in a tmux terminal for an account or the host; a repeat for the same target restarts.",
+    "Start a native CLI sign-in in a tmux terminal for an account or the host; a repeat for the same target restarts. The response carries command, the display string of the native login command.",
     {
       body: body("StartAuthTerminalLoginRequest", [
         field("accountId", "string", "Managed account; excludes host."),
@@ -598,7 +598,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "get_auth_terminal_login",
     "GET",
     "/auth-terminal-logins/{id}",
-    "Read terminal sign-in status; 404 unknown id.",
+    "Read terminal sign-in status, reason and login command; 404 unknown id.",
   ),
   operation(
     "stop_auth_terminal_login",

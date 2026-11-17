@@ -22,8 +22,8 @@
 - `POST /auth-accounts/:id/login` — start sign-in; body `{method?}` `oauth` (Claude default), `device` (Codex default), `browser`; other provider combinations `400`; `v2/src/server.ts`.
 - `POST /auth-accounts/:id/api-key` — body `{apiKey}`; saves only after a test request succeeds; key never returned; `v2/src/server.ts`.
 - `GET /auth-alerts` — `{alerts}` one per broken managed account or host login; event `session.auth.failed` once per breakage; `v2/src/auth-alerts.ts`.
-- `POST /auth-terminal-logins` — body `{accountId}` or `{host:"claude"|"codex"}`; native CLI sign-in in tmux; repeat restarts; `v2/src/auth-terminal-login.ts`.
-- `GET /auth-terminal-logins/:id` — status `running|verifying|ready|not_signed_in`, `reason`; `404` unknown; `v2/src/auth-terminal-login.ts`.
+- `POST /auth-terminal-logins` — body `{accountId}` or `{host:"claude"|"codex"}`; native CLI sign-in in tmux; repeat restarts; response carries `command`, the display string of the native login command; `v2/src/auth-terminal-login.ts`.
+- `GET /auth-terminal-logins/:id` — status `running|verifying|ready|not_signed_in`, `reason` (`duplicate` when the account is already saved), `command`; `404` unknown; `v2/src/auth-terminal-login.ts`.
 - `DELETE /auth-terminal-logins/:id` — stop and delete the throwaway home; `v2/src/auth-terminal-login.ts`.
 - `POST /auth-accounts/:id/login-input` — submit code or cancel; `v2/src/server.ts`.
 - `GET /auth-accounts/:id/login-status` — durable OAuth readiness; `v2/src/server.ts`.

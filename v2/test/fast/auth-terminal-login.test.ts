@@ -135,6 +135,55 @@ describe("auth terminal logins", () => {
     for (const item of [s, codex]) item.terminals.dispose();
   });
 
+  describe("command", () => {
+    it("start and get carry the login command for account and host targets, with no env or path", async () => {
+      const s = await setup({ agentCommand: (provider) => `/opt/bin/${provider} x` });
+      const account = await s.terminals.start({ accountId: ACCOUNT });
+      const hostClaude = await s.terminals.start({ host: "claude" });
+      const hostCodex = await s.terminals.start({ host: "codex" });
+
+      expect(account.command).toBe("claude auth login");
+      expect(hostClaude.command).toBe("claude auth login");
+      expect(hostCodex.command).toBe("codex login --device-auth");
+      expect(s.terminals.get(account.id).command).toBe("claude auth login");
+      for (const { command } of [account, hostClaude, hostCodex]) {
+        expect(command).not.toMatch(/\/|=|-u /);
+      }
+      const codex = await setup({ accountProvider: () => "codex" });
+      expect((await codex.terminals.start({ accountId: ACCOUNT })).command).toBe(
+        "codex login --device-auth",
+      );
+      for (const item of [s, codex]) item.terminals.dispose();
+    });
+
+    it("survives setRunning, the verifying rebuild and finish", async () => {
+      const s = await setup();
+      s.deps.importNativeLogin.mockRejectedValueOnce(new Error("down"));
+      const started = await s.terminals.start({ accountId: ACCOUNT });
+      await s.advance();
+      expect(s.terminals.get(started.id)).toMatchObject({
+        reason: "companion_unavailable",
+        command: "claude auth login",
+      });
+
+      s.deps.importNativeLogin.mockResolvedValueOnce(login("pending", { stage: "verifying" }));
+      await s.advance();
+      expect(s.terminals.get(started.id)).toMatchObject({
+        status: "verifying",
+        command: "claude auth login",
+      });
+
+      s.deps.loginStatus.mockResolvedValueOnce(login("failed", { errorCode: "duplicate" }));
+      await s.advance();
+      expect(s.terminals.get(started.id)).toMatchObject({
+        status: "not_signed_in",
+        reason: "duplicate",
+        command: "claude auth login",
+      });
+      s.terminals.dispose();
+    });
+  });
+
   it("rejects an unsafe account id before touching anything", async () => {
     const s = await setup();
     await expect(s.terminals.start({ accountId: "../x" })).rejects.toThrow("Invalid");
@@ -222,6 +271,7 @@ describe("auth terminal logins", () => {
   it("failed identity/not_confirmed map to not_signed_in with reason", async () => {
     for (const [errorCode, reason] of [
       ["identity", "identity"],
+      ["duplicate", "duplicate"],
       ["not_confirmed", "not_confirmed"],
       ["expired", "failed"],
     ] as const) {

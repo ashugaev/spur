@@ -57,6 +57,7 @@ const loginSchema = z.object({
       "provider_blocked",
       "not_confirmed",
       "identity",
+      "duplicate",
       "failed",
     ])
     .optional(),

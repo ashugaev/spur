@@ -14,6 +14,7 @@ export type TerminalLoginReason =
   | "timed_out"
   | "stopped"
   | "identity"
+  | "duplicate"
   | "not_confirmed"
   | "failed"
   | "another_sign_in_pending"
@@ -25,6 +26,8 @@ export interface TerminalLogin {
   tmuxSession: string;
   status: TerminalLoginStatus;
   reason?: TerminalLoginReason;
+  /** Display string of the native login command running in the terminal; no env, no path. */
+  command: string;
 }
 
 export interface AuthTerminalDeps {
@@ -58,9 +61,16 @@ const CLAUDE_UNSET_ENV = [
   "CLAUDE_CODE_OAUTH_TOKEN",
 ];
 const CODEX_UNSET_ENV = ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"];
+/** Arguments of the native login command: builds the tmux launch command and the displayed one. */
+const LOGIN_ARGS: Record<AuthProvider, string> = {
+  claude: "auth login",
+  codex: "login --device-auth",
+};
 
 interface Entry {
   login: TerminalLogin;
+  /** The displayed login command; copied into every rebuilt login. */
+  command: string;
   home?: string;
   startedAt: number;
   ended: boolean;
@@ -107,8 +117,16 @@ export class AuthTerminalLogins {
     if ("accountId" in resolved) await this.deps.cancelLogin(resolved.accountId);
 
     const provider = "host" in resolved ? resolved.host : resolved.provider;
+    const displayCommand = `${provider} ${LOGIN_ARGS[provider]}`;
     const entry: Entry = {
-      login: { id, target: resolved, tmuxSession: id, status: "running" },
+      login: {
+        id,
+        target: resolved,
+        tmuxSession: id,
+        status: "running",
+        command: displayCommand,
+      },
+      command: displayCommand,
       startedAt: this.deps.now(),
       ended: false,
       following: false,
@@ -132,13 +150,13 @@ export class AuthTerminalLogins {
       cwd = home;
       launchCommand =
         provider === "claude"
-          ? `env ${unsetFlags(CLAUDE_UNSET_ENV)} CLAUDE_CONFIG_DIR=${shellEscape(home)} ${command} auth login`
-          : `env ${unsetFlags(CODEX_UNSET_ENV)} CODEX_HOME=${shellEscape(home)} ${command} login --device-auth`;
+          ? `env ${unsetFlags(CLAUDE_UNSET_ENV)} CLAUDE_CONFIG_DIR=${shellEscape(home)} ${command} ${LOGIN_ARGS.claude}`
+          : `env ${unsetFlags(CODEX_UNSET_ENV)} CODEX_HOME=${shellEscape(home)} ${command} ${LOGIN_ARGS.codex}`;
     } else {
       launchCommand =
         provider === "claude"
-          ? `env -u CLAUDE_CONFIG_DIR ${command} auth login`
-          : `env -u CODEX_HOME ${command} login --device-auth`;
+          ? `env -u CLAUDE_CONFIG_DIR ${command} ${LOGIN_ARGS.claude}`
+          : `env -u CODEX_HOME ${command} ${LOGIN_ARGS.codex}`;
     }
 
     await this.deps.killTmuxSession(id);
@@ -225,6 +243,7 @@ export class AuthTerminalLogins {
       tmuxSession: entry.login.tmuxSession,
       status,
       ...(reason ? { reason } : {}),
+      command: entry.command,
     };
     await this.cleanup(entry);
   }
@@ -237,6 +256,7 @@ export class AuthTerminalLogins {
       tmuxSession: entry.login.tmuxSession,
       status: "running",
       ...(reason ? { reason } : {}),
+      command: entry.command,
     };
   }
 
@@ -314,6 +334,7 @@ export class AuthTerminalLogins {
             target: entry.login.target,
             tmuxSession: entry.login.tmuxSession,
             status: "verifying",
+            command: entry.command,
           };
           await this.cleanup(entry);
         }
@@ -325,7 +346,9 @@ export class AuthTerminalLogins {
         await this.finish(
           entry,
           "not_signed_in",
-          result.errorCode === "identity" || result.errorCode === "not_confirmed"
+          result.errorCode === "identity" ||
+            result.errorCode === "duplicate" ||
+            result.errorCode === "not_confirmed"
             ? result.errorCode
             : "failed",
         );

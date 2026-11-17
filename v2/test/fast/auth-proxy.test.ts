@@ -203,6 +203,7 @@ describe("authorization proxy private control", () => {
     for (const [errorCode, error] of [
       ["code_rejected", "Provider rejected the sign-in code (HTTP 400)"],
       ["provider_blocked", "Provider blocked the sign-in request (HTTP 403)"],
+      ["duplicate", "This account is already saved; select its existing profile"],
     ] as const) {
       next = { accountId: "a", status: "failed", errorCode, error };
       await expect(proxy!.loginStatus("a")).resolves.toEqual(next);
