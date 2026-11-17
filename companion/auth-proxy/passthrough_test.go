@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // headerUpstream wraps the provider fake and answers inference requests with rate-limit headers plus
@@ -114,4 +117,22 @@ func TestErrorResponseStripsUpstreamHeaders(t *testing.T) {
 		t.Fatalf("status %d, want an error: %s", resp.StatusCode, body)
 	}
 	assertHeaders(t, resp)
+}
+
+// A flush before any write commits the headers; the cookie must not survive it.
+func TestStrippingWriterFlushFirst(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	w := &strippingWriter{ResponseWriter: c.Writer}
+	w.Header().Set("Set-Cookie", "__cf_bm=secret")
+	w.Header().Set("X-Codex-Primary-Used-Percent", "42")
+	w.Flush()
+	got := rec.Result().Header
+	if got.Get("Set-Cookie") != "" {
+		t.Fatalf("Set-Cookie survived Flush: %v", got["Set-Cookie"])
+	}
+	if got.Get("X-Codex-Primary-Used-Percent") != "42" {
+		t.Fatalf("rate-limit header lost: %v", got)
+	}
 }

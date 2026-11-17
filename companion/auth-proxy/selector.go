@@ -400,6 +400,7 @@ func (w *strippingWriter) Write(b []byte) (int, error) {
 	w.strip()
 	return w.ResponseWriter.Write(b)
 }
+func (w *strippingWriter) Flush() { w.strip(); w.ResponseWriter.Flush() }
 func (w *strippingWriter) WriteString(s string) (int, error) {
 	w.strip()
 	return w.ResponseWriter.WriteString(s)
