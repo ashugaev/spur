@@ -20,7 +20,7 @@ import {
   type PruneOutcome,
 } from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { readJson } from "./github-app.js";
 import { basename, join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
@@ -43,6 +43,7 @@ import {
   connectProjectConfig,
   deleteJson,
   disconnectProjectConfig,
+  getBytes,
   getJson,
   getExistingJson,
   listProjects,
@@ -205,6 +206,9 @@ import {
   type HandoffSessionResponse,
   type TodoMutationRequest,
   type TodoProjection,
+  type CloseoutEntry,
+  type CloseoutManifestView,
+  type CompleteSessionResult,
   type LatestSnapshotEntry,
   type WorkSnapshotMeta,
   type WorkSnapshotRead,
@@ -802,14 +806,14 @@ function replaceListedSession(
   return sortSessionsForList(sessions.map((entry) => (entry.id === updated.id ? updated : entry)));
 }
 
-function postSessionAction(
+function postSessionAction<T extends SessionView = SessionView>(
   cliEntrypoint: string,
   sessionId: string,
   action: "pause" | "complete" | "kill" | "reopen" | "restore",
   configPath?: string,
   body: object = {},
-): Promise<SessionView> {
-  return postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
+): Promise<T> {
+  return postJson<T>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
 }
 
 function resolveAutoPingSessionId(explicitSession: string | undefined): string {
@@ -4124,9 +4128,19 @@ export function createProgram(cliEntrypoint: string): Command {
       await outputResult({
         json: Boolean(options.json),
         label: "closing session",
-        action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath, body),
+        action: () =>
+          postSessionAction<CompleteSessionResult>(
+            cliEntrypoint,
+            sessionId,
+            "complete",
+            configPath,
+            body,
+          ),
         success: (session) => `Closed ${session.id}.`,
-        render: renderSessionCard,
+        render: (session) =>
+          session.closeout
+            ? `${renderSessionCard(session)}\ncloseout: ${session.closeout.unverified} files not archived: path verification needs Linux (see manifest skipped)`
+            : renderSessionCard(session),
       });
     });
 
@@ -4385,6 +4399,97 @@ export function createProgram(cliEntrypoint: string): Command {
                 "",
                 entry.snapshot.content,
               ].join("\n"),
+            )
+            .join("\n"),
+      });
+    });
+
+  const closeoutCommand = program
+    .command("closeout")
+    .description("Read the archive complete keeps: show, get a file, or find by link.");
+  const closeoutPath = (sessionId: string): string =>
+    `/sessions/${encodeURIComponent(sessionId)}/closeout`;
+  const closeoutVersionQuery = (versionArg: string | undefined): string =>
+    versionArg === undefined ? "" : `?version=${encodeURIComponent(versionArg.trim())}`;
+  const closeoutLines = (manifest: CloseoutManifestView): string[] => [
+    `version ${manifest.version} of ${manifest.versions.join(",")} completed ${manifest.completedAt} snapshot ${manifest.snapshotVersion ?? "-"} head ${manifest.headSha ?? "-"}`,
+    ...(manifest.error ? [`error ${manifest.error}`] : []),
+    ...(manifest.expiredAt ? [`expired ${manifest.expiredAt}`] : []),
+    ...manifest.files.map((file) => `${file.root}/${file.path}\t${file.bytes}`),
+    ...manifest.skipped.map(
+      (file) => `skipped ${file.root}/${file.path}\t${file.bytes}\t${file.reason}`,
+    ),
+  ];
+  closeoutCommand
+    .command("show")
+    .argument("<sessionId>", "Session id")
+    .argument("[version]", "Archive version; defaults to the latest")
+    .option("--json", "Print the manifest as JSON")
+    .action(async (sessionId: string, versionArg: string | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const query = closeoutVersionQuery(versionArg);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading closeout",
+        action: () =>
+          getJson<CloseoutManifestView>(
+            cliEntrypoint,
+            `${closeoutPath(sessionId)}${query}`,
+            configPath,
+          ),
+        render: (manifest) => closeoutLines(manifest).join("\n"),
+      });
+    });
+  closeoutCommand
+    .command("get")
+    .argument("<sessionId>", "Session id")
+    .argument("<file>", "<root>/<path> as printed by closeout show")
+    .argument("[version]", "Archive version; defaults to the latest")
+    .option("--out <file>", "Write to a file instead of stdout")
+    .action(
+      async (sessionId: string, file: string, versionArg: string | undefined, options, command) => {
+        const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+        const query = closeoutVersionQuery(versionArg);
+        const encoded = file
+          .split("/")
+          .map((segment) => encodeURIComponent(segment))
+          .join("/");
+        const bytes = await withSpinner("downloading closeout file", () =>
+          getBytes(
+            cliEntrypoint,
+            `${closeoutPath(sessionId)}/files/${encoded}${query}`,
+            configPath,
+          ),
+        );
+        if (options.out) {
+          writeFileSync(options.out as string, bytes);
+          writeStdout(`Wrote ${bytes.length} bytes to ${options.out as string}`);
+        } else {
+          process.stdout.write(bytes);
+        }
+      },
+    );
+  closeoutCommand
+    .command("list")
+    .description("Latest closeout archive of every session whose links match.")
+    .option("--link <label[=url]>", "Session link; repeat to require all", collectOptionValue, [])
+    .option("--json", "Print the entries as JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      if (options.link.length === 0) throw new Error("closeout list requires --link");
+      const query = new URLSearchParams();
+      for (const link of options.link) query.append("link", link);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading closeouts",
+        action: () =>
+          getJson<CloseoutEntry[]>(cliEntrypoint, `/closeouts?${query.toString()}`, configPath),
+        render: (entries) =>
+          entries
+            .map((entry) =>
+              [`## ${entry.sessionId} (${entry.status})`, ...closeoutLines(entry.manifest)].join(
+                "\n",
+              ),
             )
             .join("\n"),
       });

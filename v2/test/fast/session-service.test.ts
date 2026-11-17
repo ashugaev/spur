@@ -262,6 +262,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.js";
 import { readPrAlertOwnership, writeWorkspaceState } from "../../src/workspace-store.js";
+import type * as CloseoutArchive from "../../src/closeout-archive.js";
+import { writeCloseoutArchive } from "../../src/closeout-archive.js";
 import { allowsPrAlertBatch } from "../../src/pr-alert-owner.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { createPage } from "../../src/pages.js";
@@ -616,6 +618,11 @@ async function useRealTodoLedger(): Promise<void> {
   const actual = await vi.importActual<typeof todoModule>("../../src/todo.js");
   vi.mocked(mocked.ensureTodoLedger).mockImplementation(actual.ensureTodoLedger);
 }
+
+vi.mock("../../src/closeout-archive.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof CloseoutArchive>();
+  return { ...actual, writeCloseoutArchive: vi.fn(actual.writeCloseoutArchive) };
+});
 
 describe("SessionService", () => {
   describe("task-status", () => {
@@ -3924,6 +3931,53 @@ describe("SessionService", () => {
 
         expect(spawned.id).toBe("api-2");
         expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("reads the closeout head before the locked section on handoff", async () => {
+        mockClaudeJsonlState("waiting");
+        readWorktreeHeadMock.mockResolvedValue({ branch: "x", headSha: "beef0002", dirty: false });
+        const source = sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        });
+        const { service } = await gatedService(false, source);
+        workspaceExistsMock.mockReturnValue(true);
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        await resolveOneItem(service);
+        const original = (
+          Object.getPrototypeOf(service) as {
+            applyManualStatusLocked: (...a: unknown[]) => Promise<unknown>;
+          }
+        ).applyManualStatusLocked;
+        const seen: { options: unknown; before: number; after: number }[] = [];
+        vi.spyOn(
+          service as unknown as {
+            applyManualStatusLocked: (...args: unknown[]) => Promise<unknown>;
+          },
+          "applyManualStatusLocked",
+        ).mockImplementation(async (...args: unknown[]) => {
+          const before = readWorktreeHeadMock.mock.calls.length;
+          const result = await original.apply(service, args);
+          seen.push({ options: args[3], before, after: readWorktreeHeadMock.mock.calls.length });
+          return result;
+        });
+
+        await service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: { kind: "human", origin: "cli" } },
+        );
+
+        const handoffCall = seen.find(
+          (entry) => (entry.options as { eventAction?: string }).eventAction === "handoff",
+        );
+        expect(handoffCall?.options).toMatchObject({ closeoutHeadSha: "beef0002" });
+        expect(readWorktreeHeadMock).toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1");
+        expect(handoffCall?.before).toBeGreaterThan(0);
+        expect(handoffCall?.after).toBe(handoffCall?.before);
         service.dispose();
       });
 
@@ -40604,6 +40658,482 @@ describe("SessionService", () => {
         sessionId: "api-1",
       }),
     );
+  });
+
+  describe("closeout archive", () => {
+    const LINK_URL = "https://example.test/pr/1";
+    const closeoutJson = (id: string) =>
+      join(TEST_DATA_DIR, "sessions", id, "closeout", "1", "manifest.json");
+
+    function ownWorktreeSession(overrides: Partial<SessionRecord> = {}) {
+      return sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        ...overrides,
+      });
+    }
+
+    async function completeWith(session: SessionRecord, closeout?: Record<string, unknown>) {
+      if (closeout) {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          projects: { api: { ...config.projects.api, closeout } },
+        });
+      }
+      createSessionStore(session);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+      const workDir = join(TEST_ARTIFACTS_ROOT, session.id, ".spur-work");
+      mkdirSync(workDir, { recursive: true });
+      writeFileSync(join(workDir, "notes.md"), "keep me");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const locked = vi.spyOn(
+        service as unknown as { applyManualStatusLocked: (...args: unknown[]) => Promise<unknown> },
+        "applyManualStatusLocked",
+      );
+      const headCallsAtEntry: number[] = [];
+      locked.mockImplementation(async function (this: unknown, ...args: unknown[]) {
+        headCallsAtEntry.push(readWorktreeHeadMock.mock.calls.length);
+        return (
+          Object.getPrototypeOf(service) as {
+            applyManualStatusLocked: (...a: unknown[]) => Promise<unknown>;
+          }
+        ).applyManualStatusLocked.apply(service, args);
+      });
+      const result = await service.complete(session.id);
+      return { service, result, locked, headCallsAtEntry };
+    }
+
+    it("copies .spur-work before the artifacts dir is removed and records head and snapshot", async () => {
+      readWorktreeHeadMock.mockResolvedValue({
+        branch: "api-1",
+        headSha: "cafe1234",
+        dirty: false,
+      });
+      mkdirSync(TEST_ARTIFACTS_ROOT + "/api-1", { recursive: true });
+      writeFileSync(join(TEST_ARTIFACTS_ROOT, "api-1", "report.txt"), "rep");
+      const { result, locked, headCallsAtEntry } = await completeWith(
+        ownWorktreeSession({ slots: { links: [{ label: "board-worker", url: LINK_URL }] } }),
+      );
+
+      expect(result.status).toBe("completed");
+      const manifest = JSON.parse(readFileSync(closeoutJson("api-1"), "utf8"));
+      expect(manifest).toMatchObject({
+        sessionId: "api-1",
+        project: "api",
+        headSha: "cafe1234",
+        snapshotVersion: null,
+        links: [{ label: "board-worker", url: LINK_URL }],
+        files: [
+          { root: "work", path: "notes.md", bytes: 7 },
+          { root: "artifacts", path: "report.txt", bytes: 3 },
+        ],
+      });
+      expect(
+        readFileSync(
+          join(TEST_DATA_DIR, "sessions", "api-1", "closeout", "1", "files", "work", "notes.md"),
+          "utf8",
+        ),
+      ).toBe("keep me");
+      expect(existsSync(join(TEST_ARTIFACTS_ROOT, "api-1"))).toBe(false);
+      // Head read before the lifecycle lock section: once, with the worktree path, and none under it.
+      expect(readWorktreeHeadMock).toHaveBeenCalledTimes(1);
+      expect(readWorktreeHeadMock).toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1");
+      expect(headCallsAtEntry).toEqual([1]);
+      expect(locked.mock.calls[0]?.[3]).toMatchObject({ closeoutHeadSha: "cafe1234" });
+      expect(readWorktreeHeadMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("reads each head before entering the locked section for selfDestruct and completeDesk", async () => {
+      readWorktreeHeadMock.mockResolvedValue({ branch: "x", headSha: "feed0001", dirty: false });
+      createSessionStore(
+        ownWorktreeSession({ workspaceId: "desk-1" }),
+        ownWorktreeSession({ id: "api-2", workspaceId: "desk-1" }),
+      );
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const original = (
+        Object.getPrototypeOf(service) as {
+          applyManualStatusLocked: (...a: unknown[]) => Promise<unknown>;
+        }
+      ).applyManualStatusLocked;
+      const entries: { options: unknown; headCalls: number }[] = [];
+      vi.spyOn(
+        service as unknown as { applyManualStatusLocked: (...args: unknown[]) => Promise<unknown> },
+        "applyManualStatusLocked",
+      ).mockImplementation(async (...args: unknown[]) => {
+        entries.push({ options: args[3], headCalls: readWorktreeHeadMock.mock.calls.length });
+        return original.apply(service, args);
+      });
+
+      await service.selfDestruct("api-1");
+      expect(entries).toEqual([
+        { options: expect.objectContaining({ closeoutHeadSha: "feed0001" }), headCalls: 1 },
+      ]);
+
+      await service.completeDesk(
+        "api-2",
+        { skipPrCheck: true },
+        {
+          todoActor: { kind: "human", origin: "cli" },
+        },
+      );
+      expect(entries.at(-1)).toEqual({
+        options: expect.objectContaining({ closeoutHeadSha: "feed0001" }),
+        headCalls: 3,
+      });
+      expect(readWorktreeHeadMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("records no head for a worktree:false session and never reads the project checkout", async () => {
+      const { locked } = await completeWith(sessionRecord({ id: "api-1" }));
+
+      expect(JSON.parse(readFileSync(closeoutJson("api-1"), "utf8")).headSha).toBeNull();
+      expect(readWorktreeHeadMock).not.toHaveBeenCalledWith("/repo/api");
+      expect(locked.mock.calls[0]?.[3]).toMatchObject({ closeoutHeadSha: null });
+    });
+
+    it("keeps the first archive readable when a reopened session completes again", async () => {
+      const sessions = createSessionStore(ownWorktreeSession());
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(false);
+      const workDir = join(TEST_ARTIFACTS_ROOT, "api-1", ".spur-work");
+      mkdirSync(workDir, { recursive: true });
+      writeFileSync(join(workDir, "first.md"), "one");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      await service.complete("api-1");
+
+      const completed = sessions.get("api-1") as SessionRecord;
+      sessions.set("api-1", { ...completed, status: "running" });
+      mkdirSync(workDir, { recursive: true });
+      writeFileSync(join(workDir, "second.md"), "two");
+      await service.complete("api-1");
+
+      expect(service.readCloseout("api-1")).toMatchObject({
+        version: 2,
+        versions: [1, 2],
+        files: [{ path: "second.md" }],
+      });
+      expect(service.readCloseout("api-1", 1).files).toEqual([
+        expect.objectContaining({ root: "work", path: "first.md" }),
+      ]);
+      expect(readFileSync(service.readCloseoutFile("api-1", "work/first.md", 1).path, "utf8")).toBe(
+        "one",
+      );
+      expect(() => service.readCloseout("api-1", 3)).toThrow(/not found/);
+    });
+
+    it("writes no closeout dir when closeout.enabled is false", async () => {
+      await completeWith(ownWorktreeSession(), { enabled: false });
+
+      expect(existsSync(join(TEST_DATA_DIR, "sessions", "api-1", "closeout"))).toBe(false);
+      expect(readWorktreeHeadMock).not.toHaveBeenCalled();
+    });
+
+    it("writes no closeout dir on kill", async () => {
+      createSessionStore(ownWorktreeSession());
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      await service.kill("api-1", { force: true, skipPrCheck: true });
+
+      expect(existsSync(join(TEST_DATA_DIR, "sessions", "api-1", "closeout"))).toBe(false);
+    });
+
+    it("still completes and logs session.closeout_archive.failed when the archive throws", async () => {
+      vi.mocked(writeCloseoutArchive).mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+      const { result } = await completeWith(ownWorktreeSession());
+
+      expect(result.status).toBe("completed");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.closeout_archive.failed",
+          level: "warn",
+          sessionId: "api-1",
+          details: { error: "disk full" },
+        }),
+      );
+      expect(existsSync(join(TEST_ARTIFACTS_ROOT, "api-1"))).toBe(false);
+    });
+
+    it("reports unverified closeout files on the complete result", async () => {
+      vi.mocked(writeCloseoutArchive).mockImplementationOnce((input) => {
+        const skipped = [
+          { root: "work" as const, path: "a.md", bytes: 1, reason: "unverified" as const },
+          { root: "work" as const, path: "b.md", bytes: 1, reason: "unverified" as const },
+          { root: "work" as const, path: "c.md", bytes: 1, reason: "max_bytes" as const },
+        ];
+        const manifest = {
+          version: 1,
+          sessionId: input.sessionId,
+          project: input.project,
+          completedAt: new Date().toISOString(),
+          links: [],
+          snapshotVersion: null,
+          headSha: null,
+          files: [],
+          skipped,
+          missingRoots: [],
+        };
+        const dir = join(input.sessionDir, "closeout", "1");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+        return manifest;
+      });
+      const { result } = await completeWith(ownWorktreeSession());
+      expect(result.closeout).toEqual({ unverified: 2 });
+    });
+
+    it("omits the summary when a reopened session completes with closeout disabled", async () => {
+      vi.mocked(writeCloseoutArchive).mockImplementationOnce((input) => {
+        const manifest = {
+          version: 1,
+          sessionId: input.sessionId,
+          project: input.project,
+          completedAt: new Date().toISOString(),
+          links: [],
+          snapshotVersion: null,
+          headSha: null,
+          files: [],
+          skipped: [
+            { root: "work" as const, path: "a.md", bytes: 1, reason: "unverified" as const },
+          ],
+          missingRoots: [],
+        };
+        const dir = join(input.sessionDir, "closeout", "1");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+        return manifest;
+      });
+      const { service, result } = await completeWith(ownWorktreeSession());
+      expect(result.closeout).toEqual({ unverified: 1 });
+
+      const internals = service as unknown as {
+        config: { projects: Record<string, { closeout?: { enabled: boolean } }> };
+      };
+      (internals.config.projects["api"] as { closeout?: { enabled: boolean } }).closeout = {
+        enabled: false,
+      };
+      const reopened = readSessionMock(TEST_DATA_DIR, "api-1") as SessionRecord;
+      writeSessionMock(TEST_DATA_DIR, { ...reopened, status: "running" });
+      vi.setSystemTime(Date.now() + 1000);
+      const again = await service.complete("api-1");
+      expect(again.closeout).toBeUndefined();
+      expect(existsSync(join(TEST_DATA_DIR, "sessions", "api-1", "closeout", "2"))).toBe(false);
+    });
+
+    function mockUnverifiedArchive(unverified: number) {
+      vi.mocked(writeCloseoutArchive).mockImplementationOnce((input) => {
+        const manifest = {
+          version: 1,
+          sessionId: input.sessionId,
+          project: input.project,
+          completedAt: new Date().toISOString(),
+          links: [],
+          snapshotVersion: null,
+          headSha: null,
+          files: [],
+          skipped: Array.from({ length: unverified }, (_, index) => ({
+            root: "work" as const,
+            path: `f${index}.md`,
+            bytes: 1,
+            reason: "unverified" as const,
+          })),
+          missingRoots: [],
+        };
+        const dir = join(input.sessionDir, "closeout", "1");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+        return manifest;
+      });
+    }
+    const unverifiedEvents = () =>
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          (entry as { event?: string }).event === "session.closeout_archive.unverified",
+      );
+
+    it("emits the unverified event and sums the count on desk complete", async () => {
+      createSessionStore(
+        ownWorktreeSession({ workspaceId: "desk-1" }),
+        ownWorktreeSession({ id: "api-2", workspaceId: "desk-1" }),
+      );
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      mockUnverifiedArchive(2);
+      mockUnverifiedArchive(1);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      const result = await service.completeDesk(
+        "api-1",
+        { skipPrCheck: true },
+        { todoActor: { kind: "human", origin: "cli" } },
+      );
+
+      expect(result.closeout).toEqual({ unverified: 3 });
+      expect(
+        unverifiedEvents().map(([, entry]) => (entry as { details: unknown }).details),
+      ).toEqual([{ count: 2 }, { count: 1 }]);
+    });
+
+    it("emits the unverified event on paths that discard the result (self-destruct)", async () => {
+      createSessionStore(ownWorktreeSession());
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      mockUnverifiedArchive(1);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      await service.selfDestruct("api-1");
+
+      expect(unverifiedEvents()).toHaveLength(1);
+    });
+
+    it("emits no unverified event when nothing is unverified", async () => {
+      await completeWith(ownWorktreeSession());
+      expect(unverifiedEvents()).toEqual([]);
+    });
+
+    it("omits the closeout summary when nothing is unverified", async () => {
+      const { result } = await completeWith(ownWorktreeSession());
+      expect(result.closeout).toBeUndefined();
+    });
+
+    it("throttles the retention sweep to once per hour", async () => {
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        projects: { api: { ...config.projects.api, closeout: { retentionDays: 1 } } },
+      });
+      createSessionStore(sessionRecord({ id: "api-1", status: "completed" }));
+      const dir = join(TEST_DATA_DIR, "sessions", "api-1", "closeout", "1");
+      mkdirSync(join(dir, "files"), { recursive: true });
+      writeFileSync(
+        join(dir, "manifest.json"),
+        JSON.stringify({
+          version: 1,
+          sessionId: "api-1",
+          project: "api",
+          completedAt: "2020-01-01T00:00:00.000Z",
+          links: [],
+          snapshotVersion: null,
+          headSha: null,
+          files: [],
+          skipped: [],
+          missingRoots: [],
+        }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const internals = service as unknown as {
+        lastCloseoutRetentionSweepAt: number;
+        runCloseoutRetentionSweep: () => void;
+      };
+      internals.runCloseoutRetentionSweep();
+      expect(existsSync(join(dir, "files"))).toBe(true);
+      internals.lastCloseoutRetentionSweepAt = Date.now() - 61 * 60_000;
+      internals.runCloseoutRetentionSweep();
+      expect(existsSync(join(dir, "files"))).toBe(false);
+    });
+
+    it("expires old live and archived closeouts of a project with retentionDays only", async () => {
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        projects: {
+          api: { ...config.projects.api, closeout: { retentionDays: 1 } },
+          web: { ...config.projects.api, path: "/repo/web", sessionPrefix: "web", closeout: {} },
+        },
+      });
+      const old = "2020-01-01T00:00:00.000Z";
+      const manifestFor = (id: string, project: string, version: number, completedAt: string) =>
+        JSON.stringify({
+          version,
+          sessionId: id,
+          project,
+          completedAt,
+          links: [],
+          snapshotVersion: null,
+          headSha: null,
+          files: [],
+          skipped: [],
+          missingRoots: [],
+        });
+      const place = (root: string, id: string, project: string, version = 1, completedAt = old) => {
+        const dir = join(root, "closeout", String(version));
+        mkdirSync(join(dir, "files"), { recursive: true });
+        writeFileSync(join(dir, "files", "x"), "x");
+        writeFileSync(join(dir, "manifest.json"), manifestFor(id, project, version, completedAt));
+        return dir;
+      };
+      createSessionStore(
+        sessionRecord({ id: "api-1", status: "completed" }),
+        sessionRecord({ id: "web-1", project: "web", status: "completed" }),
+      );
+      const liveApi = place(join(TEST_DATA_DIR, "sessions", "api-1"), "api-1", "api");
+      const liveApiNew = place(
+        join(TEST_DATA_DIR, "sessions", "api-1"),
+        "api-1",
+        "api",
+        2,
+        new Date().toISOString(),
+      );
+      const liveWeb = place(join(TEST_DATA_DIR, "sessions", "web-1"), "web-1", "web");
+      const archivedRoot = join(TEST_DATA_DIR, "sessions-archive", "api");
+      mkdirSync(archivedRoot, { recursive: true });
+      writeFileSync(
+        join(archivedRoot, "api-2.json"),
+        JSON.stringify(sessionRecord({ id: "api-2", status: "completed" })),
+      );
+      const archivedApi = place(join(archivedRoot, "api-2"), "api-2", "api");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const internals = service as unknown as {
+        lastCloseoutRetentionSweepAt: number;
+        runCloseoutRetentionSweep: () => void;
+      };
+      internals.lastCloseoutRetentionSweepAt = 0;
+      internals.runCloseoutRetentionSweep();
+
+      expect(existsSync(join(liveApi, "files"))).toBe(false);
+      expect(existsSync(join(archivedApi, "files"))).toBe(false);
+      expect(
+        JSON.parse(readFileSync(join(liveApi, "manifest.json"), "utf8")).expiredAt,
+      ).toBeTruthy();
+      expect(existsSync(join(liveApiNew, "files", "x"))).toBe(true);
+      expect(existsSync(join(liveWeb, "files", "x"))).toBe(true);
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.closeout_archive.expired",
+          details: { expired: 2, errors: 0 },
+        }),
+      );
+    });
   });
 
   it("clears startupAttachmentIds after completing a solo session whose artifacts dir was deleted", async () => {

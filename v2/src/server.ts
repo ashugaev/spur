@@ -168,6 +168,8 @@ import {
   TodoOpenWorkError,
   TodoTransitionConflictError,
 } from "./todo.js";
+import { CLOSEOUT_VERSION, CloseoutCorruptError } from "./closeout-archive.js";
+import { parseArtifactRelativePath } from "./session-artifacts.js";
 import {
   InvalidSnapshotRequestError,
   SnapshotConflictError,
@@ -518,6 +520,13 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
     "content-length": String(body.byteLength),
   });
   response.end(body);
+}
+
+/** undefined: absent (latest); null: not a positive integer. */
+function parseCloseoutVersion(params: URLSearchParams): number | undefined | null {
+  const raw = params.get("version");
+  if (raw === null) return undefined;
+  return CLOSEOUT_VERSION.test(raw) ? Number(raw) : null;
 }
 
 function sendError(response: ServerResponse, statusCode: number, message: string): void {
@@ -2678,6 +2687,86 @@ export async function startServer(
         return;
       }
 
+      const closeoutMatch = path.match(/^\/sessions\/([^/]+)\/closeout$/);
+      if (method === "GET" && closeoutMatch?.[1]) {
+        const version = parseCloseoutVersion(url.searchParams);
+        if (version === null) {
+          sendError(response, 400, "version must be a positive integer");
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          service.readCloseout(decodeURIComponent(closeoutMatch[1]), version),
+        );
+        return;
+      }
+
+      const closeoutFileMatch = path.match(/^\/sessions\/([^/]+)\/closeout\/files\/(.+)$/);
+      if (method === "GET" && closeoutFileMatch?.[1] && closeoutFileMatch[2]) {
+        const version = parseCloseoutVersion(url.searchParams);
+        if (version === null) {
+          sendError(response, 400, "version must be a positive integer");
+          return;
+        }
+        let sessionId: string;
+        let relativePath: string | null;
+        try {
+          sessionId = decodeURIComponent(closeoutFileMatch[1]);
+          relativePath = parseArtifactRelativePath(
+            closeoutFileMatch[2]
+              .split("/")
+              .map((segment) => decodeURIComponent(segment))
+              .join("/"),
+          );
+        } catch {
+          sendError(response, 404, `Closeout file not found: ${closeoutFileMatch[2]}`);
+          return;
+        }
+        if (relativePath === null) {
+          sendError(response, 404, `Closeout file not found: ${closeoutFileMatch[2]}`);
+          return;
+        }
+        const file = service.readCloseoutFile(sessionId, relativePath, version);
+        response.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": String(file.size),
+          "content-disposition": `attachment; filename="${encodeURIComponent(basename(file.name))}"`,
+          "x-content-type-options": "nosniff",
+          "cache-control": "no-store",
+        });
+        const stream = createReadStream(file.path);
+        stream.on("error", () => {
+          if (!response.headersSent) {
+            sendError(response, 500, "Failed to read closeout file");
+          } else {
+            response.destroy();
+          }
+        });
+        stream.pipe(response);
+        return;
+      }
+
+      if (method === "GET" && path === "/closeouts") {
+        let links: SessionLinkFilter[];
+        try {
+          links = parseSessionLinkFilters(url.searchParams.getAll("link"));
+        } catch (parseError) {
+          sendError(
+            response,
+            400,
+            parseError instanceof Error ? parseError.message : "Invalid link",
+          );
+          return;
+        }
+        if (links.length === 0) {
+          sendError(response, 400, "link is required");
+          return;
+        }
+        sendJson(response, 200, service.closeoutsByLink(links));
+        return;
+      }
+
       if (method === "GET" && path === "/snapshots/latest") {
         let links: SessionLinkFilter[];
         try {
@@ -3360,6 +3449,14 @@ export async function startServer(
             actualBytes: error.actualBytes,
             error: error.message,
           },
+        });
+        return;
+      }
+      if (error instanceof CloseoutCorruptError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { code: error.code, sessionId: error.sessionId, error: error.message },
         });
         return;
       }

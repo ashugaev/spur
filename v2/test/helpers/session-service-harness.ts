@@ -1099,6 +1099,10 @@ vi.mock("../../src/session-artifacts.js", () => ({
     mkdirSync(dir, { recursive: true });
     return dir;
   }),
+  SESSION_WORK_DIR: ".spur-work",
+  sessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) =>
+    artifactDirForSession(sessionId),
+  ),
   deleteSessionArtifactById: deleteSessionArtifactByIdMock,
   deleteSessionArtifactsExcept: deleteSessionArtifactsExceptMock,
   deleteSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
