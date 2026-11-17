@@ -159,6 +159,11 @@ const spawn = body("SpawnSessionRequest", [
     '{targetSessionId:string,states:("working"|"waiting"|"completed"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[],message?:string}[]',
     "At most 20 state subscriptions; referenced sessions must exist.",
   ),
+  field(
+    "idempotencyKey",
+    "string",
+    "1-128 chars, no control characters. Same key and request returns the existing session with replayed:true (201); different request or project returns 409 idempotency_key_conflict {code,sessionId,error}. Global; kept until spur gc archives the session; a key whose spawn errored keeps returning that session.",
+  ),
 ]);
 const send = body("SendMessageRequest", [
   field("message", "string", "Message text; attachments may accompany the message.", true),
@@ -379,6 +384,11 @@ const requestBodies = {
     model,
     nullableEffort,
     field("notes", "string", "Handoff context for new agent."),
+    field(
+      "idempotencyKey",
+      "string",
+      "1-128 chars, no control characters. Retry with the same key and request returns the existing successor with replayed:true (200); different request returns 409 idempotency_key_conflict with sessionId = successor. Scoped to the source session.",
+    ),
   ]),
   slots: body("UpdateSessionSlotsRequest", [
     field("title", "string", "Session title."),
@@ -1023,7 +1033,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
       ],
       status: 201,
       response:
-        "SessionView; under resource admission pressure, accepts a spawning identity before launch. Healthy foreground requests wait for launch.",
+        "SessionView; under resource admission pressure, accepts a spawning identity before launch. Healthy foreground requests wait for launch. replayed:true when answered from an existing idempotencyKey.",
     },
   ),
   operation(
@@ -1036,7 +1046,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
       examples: [{ body: { project: "example-project", prompt: "Inspect code", agent: "codex" } }],
       status: 201,
       response:
-        "SessionView with accepted spawning identity; durable launch intent retains that identity across daemon restart. Uncertain runtime ownership remains held.",
+        "SessionView with accepted spawning identity; durable launch intent retains that identity across daemon restart. Uncertain runtime ownership remains held. replayed:true when answered from an existing idempotencyKey.",
     },
   ),
   operation("spawn_shepherd", "POST", "/shepherd/spawn", "Spawn or reuse shepherd session.", {
@@ -1469,6 +1479,8 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     {
       body: requestBodies.handoff,
       examples: [{ body: { agent: "codex", notes: "Continue task" } }],
+      response:
+        "Successor SessionView with movedTodoItems; replayed:true when answered from an existing idempotencyKey.",
     },
   ),
   operation(

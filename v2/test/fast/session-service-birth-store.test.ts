@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +10,12 @@ import {
   readSession,
   writeSession,
 } from "../../src/metadata.js";
-import { SessionAdmissionDeniedError, SessionService } from "../../src/session-service.js";
+import {
+  IdempotencyKeyConflictError,
+  InvalidIdempotencyKeyError,
+  SessionAdmissionDeniedError,
+  SessionService,
+} from "../../src/session-service.js";
 import { startConfiguredTriggers } from "../../src/triggers.js";
 import type { SessionRecord, SessionView, SpawnSessionRequest } from "../../src/types.js";
 
@@ -208,5 +214,223 @@ describe("durable trigger birth store", () => {
     } as unknown as SessionRecord);
     expect(readSession(f.dataDir, "test-birth")).not.toHaveProperty("triggerBirthKey");
     expect(readSession(f.dataDir, "test-birth")).not.toHaveProperty("triggerBirthRequest");
+  });
+});
+
+describe("api idempotency key", () => {
+  const request: SpawnSessionRequest = {
+    project: "test",
+    prompt: "ship it",
+    overrides: { worktree: false },
+  };
+  type Internals = {
+    spawnOnce(request: SpawnSessionRequest): Promise<SessionView>;
+    acceptBackgroundSpawn(
+      request: SpawnSessionRequest,
+      options: { triggerBirthKey: string; triggerBirthRequest: SpawnSessionRequest },
+    ): Promise<{ session: SessionView }>;
+  };
+  const internals = (service: SessionService) => service as unknown as Internals;
+  const view = (status: SessionView["status"] = "running") =>
+    ({ id: "test-birth", status }) as SessionView;
+
+  it("repeat spawn returns the first session with replayed", async () => {
+    const f = fixture();
+    const service = f.fresh();
+    const launch = vi.spyOn(internals(service), "spawnOnce").mockImplementation(async (fp) => {
+      writeSession(f.dataDir, f.record("running", fp, "api:k"));
+      return view();
+    });
+    vi.spyOn(service, "get").mockResolvedValue(view());
+    const first = await service.spawnFromRequest({ ...request, idempotencyKey: "k" }, "foreground");
+    const second = await service.spawnFromRequest(
+      { ...request, idempotencyKey: "k" },
+      "foreground",
+    );
+    expect(launch).toHaveBeenCalledOnce();
+    expect(first).not.toHaveProperty("replayed");
+    expect(second).toMatchObject({ id: "test-birth", replayed: true });
+    expect(listSessions(f.dataDir)).toHaveLength(1);
+    expect(launch.mock.calls[0]?.[0]).not.toHaveProperty("idempotencyKey");
+  });
+
+  it("concurrent calls coalesce on one launch", async () => {
+    const f = fixture();
+    const service = f.fresh();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const launch = vi.spyOn(internals(service), "spawnOnce").mockImplementation(async () => {
+      await gate;
+      return view();
+    });
+    const accept = vi.spyOn(internals(service), "acceptBackgroundSpawn");
+    const body = { ...request, idempotencyKey: "k" };
+    const calls = Promise.all([
+      service.spawnFromRequest(body, "foreground"),
+      service.spawnFromRequest(body, "background"),
+    ]);
+    release();
+    const results = await calls;
+    expect(launch).toHaveBeenCalledOnce();
+    expect(accept).not.toHaveBeenCalled();
+    expect(results.filter((result) => result.replayed === true)).toHaveLength(1);
+  });
+
+  it("background spawn dedups and stores attachment sha256", async () => {
+    const f = fixture();
+    const service = f.fresh();
+    const accept = vi
+      .spyOn(internals(service), "acceptBackgroundSpawn")
+      .mockImplementation(async (_request, options) => {
+        writeSession(f.dataDir, f.record("spawning", options.triggerBirthRequest, "api:k"));
+        return { session: view("spawning") };
+      });
+    vi.spyOn(service, "get").mockResolvedValue(view("spawning"));
+    const body = {
+      ...request,
+      attachments: [{ name: "a.png", data: "QUJD" }],
+      idempotencyKey: "k",
+    };
+    await service.spawnFromRequest(body, "background");
+    const [sent, options] = accept.mock.calls[0] ?? [];
+    const digest = createHash("sha256").update("QUJD").digest("hex");
+    expect(options).toMatchObject({
+      triggerBirthKey: "api:k",
+      triggerBirthRequest: { attachments: [{ name: "a.png", data: `sha256:${digest}` }] },
+    });
+    expect(sent).not.toHaveProperty("idempotencyKey");
+    expect(options?.triggerBirthRequest).not.toHaveProperty("idempotencyKey");
+    expect(JSON.stringify(readSession(f.dataDir, "test-birth"))).not.toContain("QUJD");
+    await expect(service.spawnFromRequest(body, "background")).resolves.toMatchObject({
+      replayed: true,
+    });
+    expect(accept).toHaveBeenCalledOnce();
+    await expect(
+      service.spawnFromRequest(
+        { ...body, attachments: [{ name: "a.png", data: "REVG" }] },
+        "background",
+      ),
+    ).rejects.toBeInstanceOf(IdempotencyKeyConflictError);
+  });
+
+  it("different request or project conflicts without spawning", async () => {
+    const f = fixture();
+    const service = f.fresh();
+    const launch = vi.spyOn(internals(service), "spawnOnce");
+    const accept = vi.spyOn(internals(service), "acceptBackgroundSpawn");
+    writeSession(f.dataDir, f.record("running", request, "api:k"));
+    const conflict = await service
+      .spawnFromRequest({ ...request, prompt: "other", idempotencyKey: "k" }, "foreground")
+      .catch((error: unknown) => error);
+    expect(conflict).toBeInstanceOf(IdempotencyKeyConflictError);
+    expect((conflict as IdempotencyKeyConflictError).payload).toMatchObject({
+      code: "idempotency_key_conflict",
+      sessionId: "test-birth",
+    });
+    await expect(
+      service.spawnFromRequest({ ...request, project: "other", idempotencyKey: "k" }, "background"),
+    ).rejects.toBeInstanceOf(IdempotencyKeyConflictError);
+    expect(launch).not.toHaveBeenCalled();
+    expect(accept).not.toHaveBeenCalled();
+    expect(listSessions(f.dataDir)).toHaveLength(1);
+  });
+
+  it("a mismatched call made while the first is pending is answered after it", async () => {
+    const f = fixture();
+    const service = f.fresh();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const launch = vi.spyOn(internals(service), "spawnOnce").mockImplementation(async (fp) => {
+      await gate;
+      writeSession(f.dataDir, f.record("running", fp, "api:k"));
+      return view();
+    });
+    const first = service.spawnFromRequest({ ...request, idempotencyKey: "k" }, "foreground");
+    const second = service
+      .spawnFromRequest({ ...request, prompt: "other", idempotencyKey: "k" }, "foreground")
+      .catch((error: unknown) => error);
+    release();
+    await first;
+    const conflict = await second;
+    expect(conflict).toBeInstanceOf(IdempotencyKeyConflictError);
+    expect((conflict as IdempotencyKeyConflictError).payload.sessionId).toBe("test-birth");
+    expect(launch).toHaveBeenCalledOnce();
+    expect(listSessions(f.dataDir)).toHaveLength(1);
+  });
+
+  it("errored birth keeps answering the key", async () => {
+    const f = fixture();
+    const service = f.fresh();
+    const launch = vi.spyOn(internals(service), "spawnOnce");
+    writeSession(f.dataDir, f.record("errored", request, "api:k"));
+    vi.spyOn(service, "get").mockResolvedValue(view("errored"));
+    await expect(
+      service.spawnFromRequest({ ...request, idempotencyKey: "k" }, "foreground"),
+    ).resolves.toMatchObject({ status: "errored", replayed: true });
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "x".repeat(129), "a\nb", 7])("rejects invalid idempotency key %j", async (bad) => {
+    const f = fixture();
+    const service = f.fresh();
+    const launch = vi.spyOn(internals(service), "spawnOnce");
+    await expect(
+      service.spawnFromRequest(
+        { ...request, idempotencyKey: bad as unknown as string },
+        "foreground",
+      ),
+    ).rejects.toBeInstanceOf(InvalidIdempotencyKeyError);
+    expect(launch).not.toHaveBeenCalled();
+  });
+});
+
+describe("api idempotency key after a failed launch", () => {
+  const request: SpawnSessionRequest = {
+    project: "test",
+    prompt: "ship it",
+    overrides: { worktree: false },
+  };
+
+  it("keeps the key on a failed foreground launch and the retry replays it", async () => {
+    const f = fixture();
+    const service = f.fresh();
+    vi.spyOn(
+      service as unknown as { prepareSessionTools(): string },
+      "prepareSessionTools",
+    ).mockImplementation(() => {
+      throw new Error("boom");
+    });
+    await expect(
+      service.spawnFromRequest({ ...request, idempotencyKey: "k" }, "foreground"),
+    ).rejects.toThrow("boom");
+    const [created] = listSessions(f.dataDir);
+    expect(created).toMatchObject({ status: "errored", triggerBirthKey: "api:k" });
+    await expect(
+      service.spawnFromRequest({ ...request, idempotencyKey: "k" }, "foreground"),
+    ).resolves.toMatchObject({ id: created?.id, status: "errored", replayed: true });
+    expect(listSessions(f.dataDir)).toHaveLength(1);
+  });
+
+  it("keeps the key on a failed background prepare and the retry replays it", async () => {
+    const f = fixture();
+    const service = f.fresh();
+    vi.spyOn(service as unknown as { logUserInput(): void }, "logUserInput").mockImplementation(
+      () => {
+        throw new Error("boom");
+      },
+    );
+    await expect(
+      service.spawnFromRequest({ ...request, idempotencyKey: "k" }, "background"),
+    ).rejects.toThrow("boom");
+    const [created] = listSessions(f.dataDir);
+    expect(created).toMatchObject({ status: "errored", triggerBirthKey: "api:k" });
+    await expect(
+      service.spawnFromRequest({ ...request, idempotencyKey: "k" }, "background"),
+    ).resolves.toMatchObject({ id: created?.id, status: "errored", replayed: true });
+    expect(listSessions(f.dataDir)).toHaveLength(1);
   });
 });
