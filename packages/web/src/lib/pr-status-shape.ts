@@ -150,6 +150,14 @@ export function prStatusIndicator(
   return { kind: "ci", status: info.ciStatus };
 }
 
+// Display-only: a failed check plus checks still running. Not part of the
+// API payload or prStatusIndicator.
+export function isCiFailingWhileRunning(info: PrInfo): boolean {
+  if (info.ciStatus !== "failure" && info.ciStatus !== "pending") return false;
+  const checks = info.checks ?? [];
+  return checks.some((c) => c.state === "failed") && checks.some((c) => c.state === "pending");
+}
+
 export function prInfosEqual(a: PrInfo, b: PrInfo): boolean {
   return (
     a.state === b.state &&
