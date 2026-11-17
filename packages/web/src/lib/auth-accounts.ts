@@ -53,11 +53,17 @@ function isAuthAlertsResponse(value: unknown): value is AuthAlertsResponse {
 
 export function isTerminalLogin(value: unknown): value is TerminalLogin {
   if (typeof value !== "object" || value === null) return false;
-  const record = value as { id?: unknown; tmuxSession?: unknown; status?: unknown };
+  const record = value as {
+    id?: unknown;
+    tmuxSession?: unknown;
+    status?: unknown;
+    command?: unknown;
+  };
   return (
     typeof record.id === "string" &&
     typeof record.tmuxSession === "string" &&
-    typeof record.status === "string"
+    typeof record.status === "string" &&
+    typeof record.command === "string"
   );
 }
 

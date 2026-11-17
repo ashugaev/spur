@@ -71,6 +71,7 @@ beforeEach(() => {
             target: { host: "codex" },
             tmuxSession: "auth-login-x",
             status: "running",
+            command: "codex login --device-auth",
           },
         };
       }

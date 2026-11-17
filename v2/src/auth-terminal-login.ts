@@ -69,8 +69,6 @@ const LOGIN_ARGS: Record<AuthProvider, string> = {
 
 interface Entry {
   login: TerminalLogin;
-  /** The displayed login command; copied into every rebuilt login. */
-  command: string;
   home?: string;
   startedAt: number;
   ended: boolean;
@@ -117,16 +115,15 @@ export class AuthTerminalLogins {
     if ("accountId" in resolved) await this.deps.cancelLogin(resolved.accountId);
 
     const provider = "host" in resolved ? resolved.host : resolved.provider;
-    const displayCommand = `${provider} ${LOGIN_ARGS[provider]}`;
+    const loginArgs = LOGIN_ARGS[provider];
     const entry: Entry = {
       login: {
         id,
         target: resolved,
         tmuxSession: id,
         status: "running",
-        command: displayCommand,
+        command: `${provider} ${loginArgs}`,
       },
-      command: displayCommand,
       startedAt: this.deps.now(),
       ended: false,
       following: false,
@@ -150,13 +147,13 @@ export class AuthTerminalLogins {
       cwd = home;
       launchCommand =
         provider === "claude"
-          ? `env ${unsetFlags(CLAUDE_UNSET_ENV)} CLAUDE_CONFIG_DIR=${shellEscape(home)} ${command} ${LOGIN_ARGS.claude}`
-          : `env ${unsetFlags(CODEX_UNSET_ENV)} CODEX_HOME=${shellEscape(home)} ${command} ${LOGIN_ARGS.codex}`;
+          ? `env ${unsetFlags(CLAUDE_UNSET_ENV)} CLAUDE_CONFIG_DIR=${shellEscape(home)} ${command} ${loginArgs}`
+          : `env ${unsetFlags(CODEX_UNSET_ENV)} CODEX_HOME=${shellEscape(home)} ${command} ${loginArgs}`;
     } else {
       launchCommand =
         provider === "claude"
-          ? `env -u CLAUDE_CONFIG_DIR ${command} ${LOGIN_ARGS.claude}`
-          : `env -u CODEX_HOME ${command} ${LOGIN_ARGS.codex}`;
+          ? `env -u CLAUDE_CONFIG_DIR ${command} ${loginArgs}`
+          : `env -u CODEX_HOME ${command} ${loginArgs}`;
     }
 
     await this.deps.killTmuxSession(id);
@@ -243,7 +240,7 @@ export class AuthTerminalLogins {
       tmuxSession: entry.login.tmuxSession,
       status,
       ...(reason ? { reason } : {}),
-      command: entry.command,
+      command: entry.login.command,
     };
     await this.cleanup(entry);
   }
@@ -256,7 +253,7 @@ export class AuthTerminalLogins {
       tmuxSession: entry.login.tmuxSession,
       status: "running",
       ...(reason ? { reason } : {}),
-      command: entry.command,
+      command: entry.login.command,
     };
   }
 
@@ -334,7 +331,7 @@ export class AuthTerminalLogins {
             target: entry.login.target,
             tmuxSession: entry.login.tmuxSession,
             status: "verifying",
-            command: entry.command,
+            command: entry.login.command,
           };
           await this.cleanup(entry);
         }
