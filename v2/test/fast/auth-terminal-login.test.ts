@@ -369,6 +369,57 @@ describe("auth terminal logins", () => {
     s.terminals.dispose();
   });
 
+  it("overlapping starts for one target keep exactly one live terminal", async () => {
+    const live = new Set<string>();
+    let kills = 0;
+    const s = await setup({
+      createTmuxCommandSession: vi.fn(async ({ sessionName }) => {
+        if (live.has(sessionName)) throw new Error(`duplicate session: ${sessionName}`);
+        live.add(sessionName);
+        await new Promise((resolve) => realSetTimeout(resolve, 5));
+      }),
+      // Holds each kill until the other start's kill arrives (or 50ms pass when starts are
+      // serialized), so unserialized starts both clear the name before either one creates.
+      killTmuxSession: vi.fn(async (name: string) => {
+        kills += 1;
+        live.delete(name);
+        await new Promise<void>((resolve) => {
+          const poll = (waited: number): void => {
+            if (kills >= 2 || waited >= 50) resolve();
+            else realSetTimeout(() => poll(waited + 5), 5);
+          };
+          poll(0);
+        });
+      }),
+    });
+    const [first, second] = await Promise.all([
+      s.terminals.start({ accountId: ACCOUNT }),
+      s.terminals.start({ accountId: ACCOUNT }),
+    ]);
+    expect(second.id).toBe(first.id);
+    expect(live.has(first.id)).toBe(true);
+    expect(s.terminals.get(first.id).status).toBe("running");
+    await s.terminals.stop(first.id);
+    expect(live.size).toBe(0);
+    s.terminals.dispose();
+  });
+
+  it("a failed start does not block the next start for the target", async () => {
+    let failNext = true;
+    const s = await setup({
+      createTmuxCommandSession: vi.fn(async () => {
+        if (failNext) {
+          failNext = false;
+          throw new Error("tmux unavailable");
+        }
+      }),
+    });
+    await expect(s.terminals.start({ accountId: ACCOUNT })).rejects.toThrow("tmux unavailable");
+    const started = await s.terminals.start({ accountId: ACCOUNT });
+    expect(s.terminals.get(started.id).status).toBe("running");
+    s.terminals.dispose();
+  });
+
   it("unknown id is 404", async () => {
     const s = await setup();
     expect(() => s.terminals.get("auth-login-nope")).toThrow("Unknown terminal login");

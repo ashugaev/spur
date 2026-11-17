@@ -85,6 +85,7 @@ function unsetFlags(names: string[]): string {
 /** Daemon-owned native sign-in terminals: tmux session, throwaway home, import watcher. */
 export class AuthTerminalLogins {
   private readonly entries = new Map<string, Entry>();
+  private readonly starts = new Map<string, Promise<unknown>>();
   private disposed = false;
 
   constructor(private readonly deps: AuthTerminalDeps) {}
@@ -109,6 +110,20 @@ export class AuthTerminalLogins {
         : target;
     const id =
       "host" in resolved ? `auth-login-host-${resolved.host}` : `auth-login-${resolved.accountId}`;
+    // Starts for one target run one after another: a repeat start replaces the finished one.
+    const run = (this.starts.get(id) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => this.startSerialized(id, resolved));
+    const tail = run.catch(() => undefined);
+    this.starts.set(id, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.starts.get(id) === tail) this.starts.delete(id);
+    }
+  }
+
+  private async startSerialized(id: string, resolved: TerminalLoginTarget): Promise<TerminalLogin> {
     const previous = this.entries.get(id);
     if (previous && !previous.ended) await this.finish(previous, "not_signed_in", "stopped");
 
