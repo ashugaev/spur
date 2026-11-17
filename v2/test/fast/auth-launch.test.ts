@@ -149,6 +149,58 @@ describe("managed native authorization launch", () => {
     });
   });
 
+  it("carries host folder trust for the session into the managed home and scrubs it", () => {
+    const hostEntry = (trusted: boolean) => ({
+      hasTrustDialogAccepted: trusted,
+      history: ["host-secret"],
+    });
+    writeFileSync(
+      join(home, ".claude.json"),
+      JSON.stringify({
+        oauthAccount: { emailAddress: "host-secret" },
+        projects: {
+          "/repo": hostEntry(true),
+          "/other": hostEntry(true),
+          "/denied": hostEntry(false),
+        },
+      }),
+    );
+    const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
+    directories.push(directory);
+    const launch = (cwd: string) =>
+      managedAuthLaunch(registration, directory, [], { cwd, repoPath: "/repo" });
+    const stateOf = (dir: string) =>
+      JSON.parse(readFileSync(join(dir, ".claude.json"), "utf8")) as Record<string, unknown>;
+
+    // Worktree trusted through its repo.
+    const { claudeConfigDir } = launch("/wt/feature");
+    expect(stateOf(claudeConfigDir!)).toEqual({
+      hasCompletedOnboarding: true,
+      projects: { "/wt/feature": { hasTrustDialogAccepted: true } },
+    });
+    expect(readFileSync(join(claudeConfigDir!, ".claude.json"), "utf8")).not.toContain(
+      "host-secret",
+    );
+
+    scrubManagedClaudeHome(directory);
+    expect(stateOf(claudeConfigDir!)).toEqual({
+      hasCompletedOnboarding: true,
+      projects: { "/wt/feature": {} },
+    });
+
+    // Parent folder trust applies; untrusted host folder stays untrusted.
+    launch("/other/deep/wt");
+    expect(stateOf(claudeConfigDir!)["projects"]).toMatchObject({
+      "/other/deep/wt": { hasTrustDialogAccepted: true },
+    });
+    rmSync(claudeConfigDir!, { recursive: true });
+    const untrusted = managedAuthLaunch(registration, directory, [], {
+      cwd: "/denied",
+      repoPath: "/unknown",
+    });
+    expect(stateOf(untrusted.claudeConfigDir!)).toEqual({ hasCompletedOnboarding: true });
+  });
+
   it("repoints stale links at the current host home", () => {
     mkdirSync(join(home, ".claude", "skills"), { recursive: true });
     const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));

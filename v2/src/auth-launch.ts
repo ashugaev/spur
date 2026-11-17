@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { ensureAccountProjectsLink } from "./claude-accounts.js";
 import type { AuthRegistration, AuthSession } from "./auth-proxy.js";
 
@@ -88,7 +88,27 @@ function sanitizedHostSettings(path: string): Record<string, unknown> | undefine
   return sanitized;
 }
 
-function linkHostClaudeConfig(claudeConfigDir: string): void {
+/** Folders a managed session runs in: its cwd and the project repo it was cut from. */
+export interface TrustFolders {
+  cwd: string;
+  repoPath: string;
+}
+
+// Host trust applies to the cwd, any parent folder, or the repo a worktree belongs to.
+function hostTrustsFolders(folders: TrustFolders): boolean {
+  const projects = readJsonObject(join(homedir(), ".claude.json"))?.["projects"];
+  if (typeof projects !== "object" || projects === null) return false;
+  const trusted = (dir: string): boolean =>
+    (projects as Record<string, { hasTrustDialogAccepted?: unknown } | null>)[dir]
+      ?.hasTrustDialogAccepted === true;
+  for (let dir = folders.cwd; ; dir = dirname(dir)) {
+    if (trusted(dir)) return true;
+    if (dirname(dir) === dir) break;
+  }
+  return trusted(folders.repoPath);
+}
+
+function linkHostClaudeConfig(claudeConfigDir: string, trust?: TrustFolders): void {
   const hostHome = join(homedir(), ".claude");
   for (const name of HOST_CLAUDE_ENTRIES) {
     const target = join(hostHome, name);
@@ -110,10 +130,25 @@ function linkHostClaudeConfig(claudeConfigDir: string): void {
   const onboarding = join(claudeConfigDir, ".claude.json");
   const hostServers = readJsonObject(join(homedir(), ".claude.json"))?.["mcpServers"];
   const { mcpServers: _staleServers, ...managedState } = readJsonObject(onboarding) ?? {};
+  // Claude keeps trust per folder in ~/.claude.json; carry the host decision for this session only.
+  const projects = managedState["projects"];
+  const trustedProjects =
+    trust && hostTrustsFolders(trust)
+      ? {
+          ...(typeof projects === "object" && projects !== null && !Array.isArray(projects)
+            ? projects
+            : {}),
+          [trust.cwd]: {
+            ...(projects as Record<string, object> | undefined)?.[trust.cwd],
+            hasTrustDialogAccepted: true,
+          },
+        }
+      : projects;
   writeFileSync(
     onboarding,
     `${JSON.stringify({
       ...managedState,
+      ...(trustedProjects !== undefined ? { projects: trustedProjects } : {}),
       hasCompletedOnboarding: true,
       ...(hostServers !== undefined ? { mcpServers: hostServers } : {}),
     })}\n`,
@@ -126,9 +161,28 @@ export function scrubManagedClaudeHome(sessionToolDir: string): void {
   const claudeConfigDir = join(sessionToolDir, MANAGED_CLAUDE_HOME);
   const onboarding = join(claudeConfigDir, ".claude.json");
   const state = readJsonObject(onboarding);
-  if (state && "mcpServers" in state) {
-    const { mcpServers: _servers, ...rest } = state;
-    writeFileSync(onboarding, `${JSON.stringify(rest)}\n`, { mode: 0o600 });
+  if (state) {
+    const { mcpServers: _servers, projects, ...rest } = state;
+    const kept =
+      typeof projects === "object" && projects !== null && !Array.isArray(projects)
+        ? Object.fromEntries(
+            Object.entries(projects).map(([dir, entry]) => {
+              if (typeof entry !== "object" || entry === null) return [dir, entry];
+              const { hasTrustDialogAccepted: _trust, ...project } = entry as Record<
+                string,
+                unknown
+              >;
+              return [dir, project];
+            }),
+          )
+        : projects;
+    if ("mcpServers" in state || projects !== undefined) {
+      writeFileSync(
+        onboarding,
+        `${JSON.stringify({ ...rest, ...(kept !== undefined ? { projects: kept } : {}) })}\n`,
+        { mode: 0o600 },
+      );
+    }
   }
   const settings = join(claudeConfigDir, "settings.json");
   if (lstatOrUndefined(settings)?.isFile()) unlinkSync(settings);
@@ -138,6 +192,7 @@ export function managedAuthLaunch(
   registration: AuthRegistration | undefined,
   sessionToolDir: string,
   codexArgs: readonly string[] = [],
+  trust?: TrustFolders,
 ): {
   env?: Record<string, string>;
   claudeConfigDir?: string;
@@ -147,7 +202,7 @@ export function managedAuthLaunch(
   if (registration.provider === "claude") {
     const claudeConfigDir = join(sessionToolDir, MANAGED_CLAUDE_HOME);
     mkdirSync(claudeConfigDir, { recursive: true });
-    linkHostClaudeConfig(claudeConfigDir);
+    linkHostClaudeConfig(claudeConfigDir, trust);
     ensureAccountProjectsLink({ configDir: claudeConfigDir });
     return {
       claudeConfigDir,
