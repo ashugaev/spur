@@ -679,6 +679,7 @@ describe("automatic ping mute footer", () => {
 
   it.each([
     ["merge_conflict", "until next commit here or on base"],
+    ["out_of_date", "until next commit"],
     ["changes_requested", "until next commit"],
     ["review_requested", "until next commit"],
     ["ready_for_review", "until next commit"],
@@ -845,6 +846,20 @@ describe("restoreSendBatch", () => {
     expect(github.retryItems()[0]?.mergeConflict).toEqual({ prNumber: 42 });
     expect(gitlab.retryItems()[0]?.mergeConflict).toBeUndefined();
     expect(restoreSendBatch(gitlab.serialize())?.retryItems()[0]?.mergeConflict).toBeUndefined();
+  });
+
+  it("budgets github out_of_date like a conflict and prompts a merge without force-push", () => {
+    const data = githubEventData({
+      signals: [{ key: "out_of_date", kind: "out_of_date", text: "Behind base", revision: "h1" }],
+    });
+    const github = requireBatch(
+      createSendBatchParser("github", "proj", "src")(data),
+      "GitHub batch",
+    );
+    expect(github.retryItems()[0]?.mergeConflict).toEqual({ prNumber: 42 });
+    const text = github.format();
+    expect(text).toContain("Merge the latest base branch");
+    expect(text).toContain("no force-push");
   });
   it("preserves semantic identity across control and title changes while separating edited items", () => {
     const parse = createSendBatchParser("github", "proj", "src-1");
