@@ -20,6 +20,7 @@ import { parseConsent, type InterfaceConsent } from "./review-interface-consent.
 import {
   isSessionState,
   isTerminalSessionStatus,
+  AUTH_CHANGE_PING_MAX_ATTEMPTS,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   DELIVERY_MAX_ATTEMPTS,
   type AvailableBacklogItem,
@@ -1761,6 +1762,15 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     normalizedSession.serverErrorReactivationAttempts >= 0 &&
     normalizedSession.serverErrorReactivationAttempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
       ? { serverErrorReactivationAttempts: normalizedSession.serverErrorReactivationAttempts }
+      : {}),
+    ...(normalizedSession.authChangePing &&
+    typeof normalizedSession.authChangePing.key === "string" &&
+    normalizedSession.authChangePing.key !== "" &&
+    typeof normalizedSession.authChangePing.pinged === "boolean" &&
+    Number.isInteger(normalizedSession.authChangePing.attempts) &&
+    normalizedSession.authChangePing.attempts >= 0 &&
+    normalizedSession.authChangePing.attempts <= AUTH_CHANGE_PING_MAX_ATTEMPTS
+      ? { authChangePing: normalizedSession.authChangePing }
       : {}),
     ...(normalizedSession.todoNudge &&
     typeof normalizedSession.todoNudge.fingerprint === "string" &&

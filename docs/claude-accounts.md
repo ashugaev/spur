@@ -42,6 +42,7 @@ Direct sessions enter managed routing on explicit restore/respawn.
 Handoff to the same provider keeps a pinned profile; another provider, Auto, or a removed profile gives Auto.
 
 Managed routing preserves native session context and process identity during account changes.
+A session rate limited when its effective account changes gets one `Account changed. Continue.` ping; idle and working sessions get none.
 Managed Claude links host `~/.claude` user config (`CLAUDE.md`, `settings.json`, skills, agents, commands, plugins, hooks, output styles) and user MCP servers; never host credentials. Host `settings.json` with `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport` or auth/endpoint env (`ANTHROPIC_*` except `*_MODEL`, `CLAUDE_CODE_USE_*`, `CLAUDE_CODE_SKIP_*_AUTH`, `CLAUDE_CODE_OAUTH_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`) becomes a private copy without those keys.
 User MCP servers and that settings copy live in owner-only (0600) files under the session tool dir; complete or kill removes them, restore writes them again.
 Codex uses Responses HTTP streaming; provider credentials stay with the local proxy.
@@ -49,7 +50,7 @@ Codex uses Responses HTTP streaming; provider credentials stay with the local pr
 ## Auto-rotation
 
 Each provider pool owns its default and Auto-rotation choice.
-Auto retains its account after success; quota triggers failover when enabled.
+Auto follows the pool default on its next request; quota triggers failover when enabled.
 Auto leaves an account that needs sign-in for a ready one; failover prefers the least-used ready account.
 Pinned sessions never fail over.
 

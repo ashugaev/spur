@@ -636,6 +636,7 @@ import {
   type UpdateSessionSlotsRequest,
   type UpdateSessionSlotsResponse,
   type TodoActor,
+  AUTH_CHANGE_PING_MAX_ATTEMPTS,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
   type TodoProjection,
@@ -778,6 +779,7 @@ const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
 const CLAUDE_SERVER_ERROR_REACTIVATION_MS = 30 * 60 * 1000;
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
+const AUTH_CHANGE_PING_MESSAGE = "Account changed. Continue.";
 const SIDECAR_REAPER_INTERVAL_MS = 60_000;
 const MEMORY_SHED_INTERVAL_MS = 1_000;
 // Consecutive 1s ticks above the restore floor plus margin required before
@@ -7598,6 +7600,71 @@ export class SessionService {
     scrubManagedClaudeHome(slotToolDir(this.config.dataDir, sessionId));
   }
 
+  /**
+   * Claim for the one continue ping owed to a session that was rate limited when its effective
+   * account changed. Undefined: nothing owed (no change, or not limited).
+   * Written with the auth change, so the claim exists before any send and survives a restart.
+   */
+  private authChangePingClaim(
+    current: SessionRecord,
+    next: NonNullable<SessionRecord["auth"]>,
+  ): SessionRecord["authChangePing"] | undefined {
+    if (
+      current.status !== "running" ||
+      !current.auth ||
+      current.auth.effectiveAccountId === next.effectiveAccountId ||
+      !this.isLiveStateRateLimited(current)
+    )
+      return undefined;
+    return { key: `${next.generation}:${next.effectiveAccountId}`, attempts: 0, pinged: false };
+  }
+
+  /** Sends the one continue ping for a claimed account change; at most AUTH_CHANGE_PING_MAX_ATTEMPTS tries. */
+  private async sendAuthChangePing(sessionId: string, key: string): Promise<void> {
+    for (let attempt = 0; attempt < AUTH_CHANGE_PING_MAX_ATTEMPTS; attempt += 1) {
+      const counted = await this.withSessionLifecycleLock(sessionId, async () => {
+        const current = readSession(this.config.dataDir, sessionId);
+        const claim = current?.authChangePing;
+        if (
+          !current ||
+          current.status !== "running" ||
+          claim?.key !== key ||
+          claim.pinged ||
+          claim.attempts >= AUTH_CHANGE_PING_MAX_ATTEMPTS
+        )
+          return false;
+        writeSession(this.config.dataDir, {
+          ...current,
+          authChangePing: { ...claim, attempts: claim.attempts + 1 },
+        });
+        return true;
+      });
+      if (!counted) return;
+      try {
+        await this.clearRateLimit(sessionId, true, "auth-change").catch((error: unknown) => {
+          if (!(error instanceof RateLimitClearError)) throw error;
+        });
+        await this.send(sessionId, { message: AUTH_CHANGE_PING_MESSAGE });
+        await this.withSessionLifecycleLock(sessionId, async () => {
+          const current = readSession(this.config.dataDir, sessionId);
+          if (current?.authChangePing?.key !== key) return;
+          writeSession(this.config.dataDir, {
+            ...current,
+            authChangePing: { ...current.authChangePing, pinged: true },
+          });
+        });
+        return;
+      } catch (error) {
+        this.logEvent("session.auth.ping_failed", {
+          level: "warn",
+          sessionId,
+          message: "Could not send the continue ping after the account change",
+          details: { error: error instanceof Error ? error.message : String(error), attempt },
+        });
+      }
+    }
+  }
+
   /** Persists a companion-reported effective-account change and logs it once. */
   private async recordAuthRotation(rotation: AuthRotation): Promise<void> {
     this.authSnapshot = undefined;
@@ -7607,19 +7674,25 @@ export class SessionService {
       record?.auth?.generation === rotation.generation &&
       record.auth.effectiveAccountId !== rotation.toAccountId;
     if (!matches(readSession(this.config.dataDir, rotation.sessionId))) return;
+    let pingKey: string | undefined;
     try {
       const project = await this.withSessionLifecycleLock(rotation.sessionId, async () => {
         const current = readSession(this.config.dataDir, rotation.sessionId);
         if (!matches(current)) return null;
+        const auth = { ...current.auth, effectiveAccountId: rotation.toAccountId };
+        const authChangePing = this.authChangePingClaim(current, auth);
         writeSession(this.config.dataDir, {
           ...current,
-          auth: { ...current.auth, effectiveAccountId: rotation.toAccountId },
+          auth,
+          ...(authChangePing ? { authChangePing } : {}),
           updatedAt: nowIso(),
         });
         this.stateCache.delete(rotation.sessionId);
+        if (authChangePing) pingKey = authChangePing.key;
         return current.project;
       });
       if (project === null) return;
+      if (pingKey) void this.sendAuthChangePing(rotation.sessionId, pingKey);
       this.logEvent("session.auth.rotated", {
         level: "info",
         sessionId: rotation.sessionId,
@@ -25011,6 +25084,7 @@ export class SessionService {
         );
       }
     }
+    let pingKey: string | undefined;
     const updated = await this.withSessionLifecycleLocks(
       this.lifecycleIdsFor(session),
       async () => {
@@ -25021,9 +25095,13 @@ export class SessionService {
         const registration = await this.authProxy.switchSession(sessionId, accountId);
         this.authSnapshot = undefined;
         const { claudeAccountId: _legacyAccountId, ...base } = current;
+        const auth = publicAuthSession(registration);
+        const authChangePing = this.authChangePingClaim(current, auth);
+        pingKey = authChangePing?.key;
         const next: SessionRecord = {
           ...base,
-          auth: publicAuthSession(registration),
+          auth,
+          ...(authChangePing ? { authChangePing } : {}),
           updatedAt: nowIso(),
         };
         writeSession(this.config.dataDir, next);
@@ -25031,6 +25109,7 @@ export class SessionService {
         return next;
       },
     );
+    if (pingKey) void this.sendAuthChangePing(sessionId, pingKey);
     this.logEvent("session.auth.switched", {
       level: "info",
       sessionId,

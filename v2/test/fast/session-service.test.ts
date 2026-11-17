@@ -23142,6 +23142,144 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    describe("continue ping after an account change", () => {
+      const LIMITED_AT = "2026-03-18T10:00:00.000Z";
+      function autoAuth(accountId = "primary") {
+        const { endpoint: _endpoint, token: _token, ...pinned } = registration("claude", accountId);
+        return { ...pinned, mode: "auto" as const, accountId: null };
+      }
+      function rotation(sessionId: string, generation = 1) {
+        return {
+          sessionId,
+          provider: "claude" as const,
+          fromAccountId: "primary",
+          toAccountId: "backup",
+          generation,
+        };
+      }
+      async function pingService() {
+        const service = await createDisposedSessionService();
+        const send = vi.spyOn(service, "send").mockResolvedValue({} as never);
+        const clear = vi.spyOn(service, "clearRateLimit").mockResolvedValue({} as never);
+        return { service, send, clear };
+      }
+      function pings(send: ReturnType<typeof vi.fn>) {
+        return send.mock.calls.filter(
+          ([, request]) => request.message === "Account changed. Continue.",
+        );
+      }
+
+      it("pings a rate-limited session once after a manual switch", async () => {
+        seedManagedAccounts("claude");
+        const sessions = createSessionStore(
+          runningSession({ auth: autoAuth(), rateLimitedAt: LIMITED_AT }),
+        );
+        authProxySwitchSessionMock.mockResolvedValue({
+          ...registration("claude", "backup"),
+          generation: 2,
+        });
+        const { service, send, clear } = await pingService();
+        await service.switchAuth("api-1", "backup", { reason: "manual" });
+        await vi.waitFor(() => expect(pings(send)).toHaveLength(1));
+        expect(clear).toHaveBeenCalledExactlyOnceWith("api-1", true, "auth-change");
+        expect(clear.mock.invocationCallOrder[0]).toBeLessThan(send.mock.invocationCallOrder[0]!);
+        expect(sessions.get("api-1")?.authChangePing).toEqual({
+          key: "2:backup",
+          attempts: 1,
+          pinged: true,
+        });
+        service.dispose();
+      });
+
+      it("does not ping a session that is not rate limited", async () => {
+        seedManagedAccounts("claude");
+        createSessionStore(runningSession({ auth: autoAuth() }));
+        authProxySwitchSessionMock.mockResolvedValue({
+          ...registration("claude", "backup"),
+          generation: 2,
+        });
+        const { service, send } = await pingService();
+        await service.switchAuth("api-1", "backup", { reason: "manual" });
+        authProxyRotationHandler.current!(rotation("api-1", 2));
+        await vi.advanceTimersByTimeAsync(20);
+        expect(send).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("does not ping when the switch leaves the effective account unchanged", async () => {
+        seedManagedAccounts("claude");
+        createSessionStore(runningSession({ auth: autoAuth(), rateLimitedAt: LIMITED_AT }));
+        authProxySwitchSessionMock.mockResolvedValue({
+          ...registration("claude", "primary"),
+          generation: 2,
+        });
+        const { service, send } = await pingService();
+        await service.switchAuth("api-1", "primary", { reason: "manual" });
+        await vi.advanceTimersByTimeAsync(20);
+        expect(send).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("pings once for a repeated rotation of the same generation", async () => {
+        createSessionStore(runningSession({ auth: autoAuth(), rateLimitedAt: LIMITED_AT }));
+        const { service, send } = await pingService();
+        authProxyRotationHandler.current!(rotation("api-1"));
+        authProxyRotationHandler.current!(rotation("api-1"));
+        await vi.waitFor(() => expect(pings(send)).toHaveLength(1));
+        authProxyRotationHandler.current!(rotation("api-1"));
+        await vi.advanceTimersByTimeAsync(20);
+        expect(pings(send)).toHaveLength(1);
+        service.dispose();
+      });
+
+      it("does not ping again after a daemon restart", async () => {
+        createSessionStore(runningSession({ auth: autoAuth(), rateLimitedAt: LIMITED_AT }));
+        const first = await pingService();
+        authProxyRotationHandler.current!(rotation("api-1"));
+        await vi.waitFor(() => expect(pings(first.send)).toHaveLength(1));
+        first.service.dispose();
+        const second = await pingService();
+        authProxyRotationHandler.current!(rotation("api-1"));
+        await vi.advanceTimersByTimeAsync(20);
+        expect(second.send).not.toHaveBeenCalled();
+        second.service.dispose();
+      });
+
+      it("stops after the retry budget when the send keeps failing", async () => {
+        createSessionStore(runningSession({ auth: autoAuth(), rateLimitedAt: LIMITED_AT }));
+        const { service, send } = await pingService();
+        send.mockRejectedValue(new Error("pane busy"));
+        authProxyRotationHandler.current!(rotation("api-1"));
+        await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+        await vi.advanceTimersByTimeAsync(20);
+        expect(send).toHaveBeenCalledTimes(2);
+        service.dispose();
+      });
+
+      it("pings each rate-limited session once on a mass rotation", async () => {
+        const ids = ["api-1", "api-2", "api-3"];
+        createSessionStore(
+          ...ids.map((id) =>
+            runningSession({
+              id,
+              tmuxSession: `tmux-${id}`,
+              auth: { ...autoAuth(), sessionId: id },
+              rateLimitedAt: LIMITED_AT,
+            }),
+          ),
+        );
+        const { service, send } = await pingService();
+        for (const id of ids) {
+          authProxyRotationHandler.current!(rotation(id));
+          authProxyRotationHandler.current!(rotation(id));
+        }
+        await vi.waitFor(() => expect(pings(send)).toHaveLength(3));
+        await vi.advanceTimersByTimeAsync(20);
+        expect(send.mock.calls.map(([id]) => id).sort()).toEqual(ids);
+        service.dispose();
+      });
+    });
+
     it("keeps the routing key for a completed marker with live native", async () => {
       const { endpoint: _endpoint, token: _token, ...auth } = registration("claude");
       const sessions = createSessionStore(runningSession({ auth, worktree: false }));

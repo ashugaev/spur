@@ -5,6 +5,7 @@ import type { AuthSession } from "./auth-proxy.js";
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
 export const AUTOMATIC_REMINDER_MAX_ATTEMPTS = 3;
+export const AUTH_CHANGE_PING_MAX_ATTEMPTS = 2;
 
 export const SESSION_STATUSES = [
   "spawning",
@@ -1404,6 +1405,8 @@ export interface SessionRecord {
     sourceOrdinals: Record<string, number>;
     paneLatched: boolean;
   };
+  /** One continue ping per account change: key is `generation:effectiveAccountId`, written before the send. */
+  authChangePing?: { key: string; attempts: number; pinged: boolean };
   serverErrorAt?: string;
   serverErrorReactivationAttempts?: number;
   todoNudge?: { fingerprint: string; attempts: number };
