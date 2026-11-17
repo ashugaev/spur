@@ -84,7 +84,7 @@ func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Re
 	if err != nil {
 		return err
 	}
-	cfg, err := config.ParseConfigBytes([]byte("host: 127.0.0.1\nport: 1\nrequest-retry: 0\nmax-retry-credentials: 0\nmax-retry-interval: 0\ndisable-claude-cloak-mode: true\ncommercial-mode: true\nplugins:\n  enabled: false\nremote-management:\n  disable-control-panel: true\n"))
+	cfg, err := config.ParseConfigBytes([]byte("host: 127.0.0.1\nport: 1\npassthrough-headers: true\nrequest-retry: 0\nmax-retry-credentials: 0\nmax-retry-interval: 0\ndisable-claude-cloak-mode: true\ncommercial-mode: true\nplugins:\n  enabled: false\nremote-management:\n  disable-control-panel: true\n"))
 	if err != nil {
 		return errors.New("could not configure auth transport")
 	}
@@ -108,6 +108,10 @@ func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Re
 		WithHooks(cliproxy.Hooks{OnAfterStart: func(*cliproxy.Service) { started <- struct{}{} }}).Build()
 	if err != nil {
 		return errors.New("could not initialize auth transport")
+	}
+	if transport != nil {
+		// Build installs the default provider; a test transport also carries inference traffic.
+		manager.SetRoundTripperProvider(fixedTransport{transport})
 	}
 	serverDone := make(chan error, 1)
 	go func() {
@@ -166,3 +170,8 @@ func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Re
 		return errors.New("auth transport stopped")
 	}
 }
+
+// fixedTransport gives every credential one transport.
+type fixedTransport struct{ http.RoundTripper }
+
+func (t fixedTransport) RoundTripperFor(*coreauth.Auth) http.RoundTripper { return t.RoundTripper }
