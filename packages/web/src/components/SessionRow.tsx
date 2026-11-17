@@ -426,9 +426,7 @@ export function SessionRow({
         {session.projectName}
       </span>
 
-      <span className="hidden shrink-0 sm:inline">
-        <TokenCount session={session} align="left" hideEmpty />
-      </span>
+      <TokenCount session={session} align="left" hideEmpty />
       <span className="hidden w-[3.5rem] shrink-0 text-[var(--color-text-tertiary)] md:inline">
         {session.agent}
       </span>
