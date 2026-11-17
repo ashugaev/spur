@@ -362,6 +362,39 @@ describe("api idempotency key", () => {
     expect(listSessions(f.dataDir)).toHaveLength(1);
   });
 
+  it("a mismatched call waiting on a first call that leaves no record runs its own launch", async () => {
+    const f = fixture();
+    const service = f.fresh();
+    let fail: () => void = () => {};
+    const gate = new Promise<void>((_resolve, reject) => {
+      fail = () => reject(new Error("boom"));
+    });
+    const launch = vi
+      .spyOn(internals(service), "spawnOnce")
+      .mockImplementationOnce(async () => {
+        await gate;
+        return view();
+      })
+      .mockImplementationOnce(async (fp) => {
+        writeSession(f.dataDir, f.record("running", fp, "api:k"));
+        return view();
+      });
+    const first = service
+      .spawnFromRequest({ ...request, idempotencyKey: "k" }, "foreground")
+      .catch((error: unknown) => error);
+    const second = service.spawnFromRequest(
+      { ...request, prompt: "other", idempotencyKey: "k" },
+      "foreground",
+    );
+    fail();
+    expect(await first).toMatchObject({ message: "boom" });
+    const result = await second;
+    expect(launch).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ id: "test-birth" });
+    expect(result).not.toHaveProperty("replayed");
+    expect(listSessions(f.dataDir)).toHaveLength(1);
+  });
+
   it("errored birth keeps answering the key", async () => {
     const f = fixture();
     const service = f.fresh();

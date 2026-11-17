@@ -1263,6 +1263,40 @@ function parseIdempotencyKey(value: unknown): string {
   return value;
 }
 
+interface InFlightCall<T> {
+  request: unknown;
+  result: Promise<T>;
+}
+
+// Joins a pending call made with the same request and returns its result. A different request
+// waits for the pending call to settle and returns undefined: the caller re-enters and gets the
+// answer it would have had if sent after it.
+async function joinInFlight<T>(
+  pending: InFlightCall<T>,
+  request: unknown,
+): Promise<{ value: T } | undefined> {
+  if (isDeepStrictEqual(pending.request, request)) return { value: await pending.result };
+  await pending.result.catch(() => undefined);
+  return undefined;
+}
+
+// Runs a call registered under id so concurrent calls can join it; the entry leaves with it.
+async function runInFlight<T, E extends InFlightCall<T>>(
+  calls: Map<string, E>,
+  id: string,
+  entry: Omit<E, "result">,
+  run: () => Promise<T>,
+): Promise<T> {
+  // Defer execution until the identity is registered, before the first await.
+  const result = Promise.resolve().then(run);
+  calls.set(id, { ...entry, result } as E);
+  try {
+    return await result;
+  } finally {
+    if (calls.get(id)?.result === result) calls.delete(id);
+  }
+}
+
 // Stored copy of a spawn request: attachment bytes become a sha256 so records stay small
 // while a changed file still reads as a different request.
 function birthFingerprint(request: SpawnSessionRequest): SpawnSessionRequest {
@@ -14223,26 +14257,18 @@ export class SessionService {
     const fingerprint = birthFingerprint(request);
     const pending = this.triggerBirthsInFlight.get(key);
     if (pending) {
-      if (isDeepStrictEqual(pending.request, fingerprint)) {
-        return { session: await pending.result, replayed: true };
-      }
-      // A different request waits for the first call, then gets the sequential answer.
-      await pending.result.catch(() => undefined);
-      if (this.triggerBirthsInFlight.get(key) === pending) {
-        this.triggerBirthsInFlight.delete(key);
-      }
-      return this.spawnWithBirthKey(key, request, run);
+      const joined = await joinInFlight(pending, fingerprint);
+      return joined
+        ? { session: joined.value, replayed: true }
+        : this.spawnWithBirthKey(key, request, run);
     }
-    // Defer execution until the identity is registered, before the first await.
-    const result = Promise.resolve().then(() => run(fingerprint));
-    this.triggerBirthsInFlight.set(key, { request: fingerprint, result });
-    try {
-      return { session: await result, replayed: false };
-    } finally {
-      if (this.triggerBirthsInFlight.get(key)?.result === result) {
-        this.triggerBirthsInFlight.delete(key);
-      }
-    }
+    const session = await runInFlight(
+      this.triggerBirthsInFlight,
+      key,
+      { request: fingerprint },
+      () => run(fingerprint),
+    );
+    return { session, replayed: false };
   }
 
   getTriggerBirth(
@@ -25689,30 +25715,17 @@ export class SessionService {
     }
     const pending = this.keyedHandoffsInFlight.get(sessionId);
     if (pending?.key === key) {
-      if (isDeepStrictEqual(pending.request, fingerprint)) {
-        return { ...(await pending.result), replayed: true };
-      }
-      // A different request waits for the first call, then gets the sequential answer.
-      await pending.result.catch(() => undefined);
-      if (this.keyedHandoffsInFlight.get(sessionId) === pending) {
-        this.keyedHandoffsInFlight.delete(sessionId);
-      }
-      return this.handoff(sessionId, request, options);
+      const joined = await joinInFlight(pending, fingerprint);
+      return joined
+        ? { ...joined.value, replayed: true }
+        : this.handoff(sessionId, request, options);
     }
     const idempotency = { key, request: fingerprint };
     // Another key already in flight: handoffOnce refuses with "already in flight".
     if (pending) return this.handoffOnce(sessionId, base, options, idempotency);
-    const result = Promise.resolve().then(() =>
+    return runInFlight(this.keyedHandoffsInFlight, sessionId, idempotency, () =>
       this.handoffOnce(sessionId, base, options, idempotency),
     );
-    this.keyedHandoffsInFlight.set(sessionId, { key, request: fingerprint, result });
-    try {
-      return await result;
-    } finally {
-      if (this.keyedHandoffsInFlight.get(sessionId)?.result === result) {
-        this.keyedHandoffsInFlight.delete(sessionId);
-      }
-    }
   }
 
   private async handoffOnce(

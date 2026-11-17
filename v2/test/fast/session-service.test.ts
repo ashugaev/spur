@@ -3989,6 +3989,43 @@ describe("SessionService", () => {
           service.dispose();
         });
 
+        it("runs a mismatched waiting call as a new handoff when the first leaves no receipt", async () => {
+          const { sessions, service } = await keyedHandoffService();
+          const internals = service as unknown as {
+            handoffOnce: (...args: unknown[]) => Promise<unknown>;
+          };
+          const original = internals.handoffOnce;
+          let fail: () => void = () => {};
+          const gate = new Promise<void>((_resolve, reject) => {
+            fail = () => reject(new Error("boom"));
+          });
+          const once = vi
+            .spyOn(internals, "handoffOnce")
+            .mockImplementationOnce(async () => {
+              await gate;
+              return {};
+            })
+            .mockImplementation((...args: unknown[]) => original.apply(service, args));
+
+          const first = service
+            .handoff("api-1", { agent: "cursor", idempotencyKey: "h1" }, human)
+            .catch((error: unknown) => error);
+          const second = service.handoff("api-1", { agent: "codex", idempotencyKey: "h1" }, human);
+          fail();
+
+          expect(await first).toMatchObject({ message: "boom" });
+          const result = await second;
+          expect(once).toHaveBeenCalledTimes(2);
+          expect(result).toMatchObject({ id: "api-2" });
+          expect(result).not.toHaveProperty("replayed");
+          expect(sessions.get("api-1")).toMatchObject({
+            status: "completed",
+            handoffIdempotency: { key: "h1", request: { agent: "codex" } },
+          });
+          expect(reserveNextSessionIdMock).toHaveBeenCalledOnce();
+          service.dispose();
+        });
+
         it("coalesces concurrent same-key calls and answers a mismatched one after the first", async () => {
           const { service } = await keyedHandoffService();
 
