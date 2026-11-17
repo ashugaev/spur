@@ -40237,6 +40237,81 @@ describe("SessionService", () => {
       expect(existsSync(join(TEST_DATA_DIR, "sessions", "api-1", "closeout", "2"))).toBe(false);
     });
 
+    function mockUnverifiedArchive(unverified: number) {
+      vi.mocked(writeCloseoutArchive).mockImplementationOnce((input) => {
+        const manifest = {
+          version: 1,
+          sessionId: input.sessionId,
+          project: input.project,
+          completedAt: new Date().toISOString(),
+          links: [],
+          snapshotVersion: null,
+          headSha: null,
+          files: [],
+          skipped: Array.from({ length: unverified }, (_, index) => ({
+            root: "work" as const,
+            path: `f${index}.md`,
+            bytes: 1,
+            reason: "unverified" as const,
+          })),
+          missingRoots: [],
+        };
+        const dir = join(input.sessionDir, "closeout", "1");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+        return manifest;
+      });
+    }
+    const unverifiedEvents = () =>
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          (entry as { event?: string }).event === "session.closeout_archive.unverified",
+      );
+
+    it("emits the unverified event and sums the count on desk complete", async () => {
+      createSessionStore(
+        ownWorktreeSession({ workspaceId: "desk-1" }),
+        ownWorktreeSession({ id: "api-2", workspaceId: "desk-1" }),
+      );
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      mockUnverifiedArchive(2);
+      mockUnverifiedArchive(1);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      const result = await service.completeDesk(
+        "api-1",
+        { skipPrCheck: true },
+        { todoActor: { kind: "human", origin: "cli" } },
+      );
+
+      expect(result.closeout).toEqual({ unverified: 3 });
+      expect(
+        unverifiedEvents().map(([, entry]) => (entry as { details: unknown }).details),
+      ).toEqual([{ count: 2 }, { count: 1 }]);
+    });
+
+    it("emits the unverified event on paths that discard the result (self-destruct)", async () => {
+      createSessionStore(ownWorktreeSession());
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      mockUnverifiedArchive(1);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      await service.selfDestruct("api-1");
+
+      expect(unverifiedEvents()).toHaveLength(1);
+    });
+
+    it("emits no unverified event when nothing is unverified", async () => {
+      await completeWith(ownWorktreeSession());
+      expect(unverifiedEvents()).toEqual([]);
+    });
+
     it("omits the closeout summary when nothing is unverified", async () => {
       const { result } = await completeWith(ownWorktreeSession());
       expect(result.closeout).toBeUndefined();

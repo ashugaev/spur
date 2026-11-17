@@ -952,7 +952,10 @@ export interface CloseoutManifestView extends CloseoutManifest {
 }
 
 /** Added to a complete result when the archive listed files it could not verify. */
-export type CompleteSessionResult = SessionView & { closeout?: { unverified: number } };
+export interface CloseoutReport {
+  unverified: number;
+}
+export type CompleteSessionResult = SessionView & { closeout?: CloseoutReport };
 
 export interface CloseoutEntry {
   sessionId: string;
@@ -1511,6 +1514,8 @@ export interface SessionDeskMember {
 
 export interface CompleteDeskResponse {
   completedIds: string[];
+  /** Summed over members; present when the archives listed unverified files. */
+  closeout?: CloseoutReport;
   lifecycle: SessionLifecycleSnapshot;
 }
 

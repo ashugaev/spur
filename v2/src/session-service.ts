@@ -629,6 +629,7 @@ import {
   type SessionLinkFilter,
   type CloseoutEntry,
   type CloseoutManifestView,
+  type CloseoutReport,
   type CompleteSessionResult,
   type TodoItemProjection,
   type WorkSnapshot,
@@ -20611,33 +20612,19 @@ export class SessionService {
     request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean; todoActor?: TodoActor },
   ): Promise<CompleteSessionResult> {
-    const startedAt = Date.now();
+    const report: CloseoutReport = { unverified: 0 };
     const view = await this.runLifecycle("complete", [sessionId], request.operationId, () =>
       this.withCloseoutHeads([sessionId], (heads) =>
         this.withWorkspaceLifecycleLocks(sessionId, () =>
           this.applyManualStatusLocked(sessionId, "completed", request, {
             ...options,
             closeoutHeadSha: heads.get(sessionId) ?? null,
+            closeoutReport: report,
           }),
         ),
       ),
     );
-    const unverified = this.unverifiedCloseoutFiles(view, startedAt);
-    return unverified > 0 ? { ...view, closeout: { unverified } } : view;
-  }
-
-  // Counts "unverified" skips of the archive this complete wrote; never throws.
-  private unverifiedCloseoutFiles(session: SessionView, startedAt: number): number {
-    try {
-      const manifest = readCloseoutManifest(
-        closeoutDirAt(this.config.dataDir, session, "live"),
-        session.id,
-      );
-      if (!manifest || Date.parse(manifest.completedAt) < startedAt) return 0;
-      return manifest.skipped.filter((file) => file.reason === "unverified").length;
-    } catch {
-      return 0;
-    }
+    return report.unverified > 0 ? { ...view, closeout: { unverified: report.unverified } } : view;
   }
 
   async readTodo(sessionId: string): Promise<TodoProjection> {
@@ -20700,10 +20687,10 @@ export class SessionService {
     session: SessionRecord,
     links: SessionLink[],
     headSha: string | null | undefined,
-  ): void {
+  ): number {
     try {
       const settings = this.closeoutSettingsFor(session);
-      if (!settings.enabled) return;
+      if (!settings.enabled) return 0;
       const artifacts = sessionArtifactsDir(this.config.dataDir, workspaceIdOf(session));
       const manifest = writeCloseoutArchive({
         sessionDir: join(this.config.dataDir, "sessions", session.id),
@@ -20723,11 +20710,23 @@ export class SessionService {
         maxBytes: settings.maxBytes,
       });
       if (manifest.error) this.logCloseoutArchiveFailure(session, manifest.error);
+      const unverified = manifest.skipped.filter((file) => file.reason === "unverified").length;
+      if (unverified > 0) {
+        this.logEvent("session.closeout_archive.unverified", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Closeout archive for ${session.id} listed ${unverified} unverified file(s)`,
+          details: { count: unverified },
+        });
+      }
+      return unverified;
     } catch (error) {
       this.logCloseoutArchiveFailure(
         session,
         error instanceof Error ? error.message : String(error),
       );
+      return 0;
     }
   }
 
@@ -21223,6 +21222,7 @@ export class SessionService {
     }
     const candidates = this.listDeskSessions(session);
 
+    const report: CloseoutReport = { unverified: 0 };
     const work = () =>
       this.withCloseoutHeads(
         candidates.map((candidate) => candidate.id),
@@ -21301,10 +21301,13 @@ export class SessionService {
                   ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
                   eventAction: "desk_complete",
                   closeoutHeadSha: closeoutHeads.get(candidate.id) ?? null,
+                  closeoutReport: report,
                 });
                 completedIds.push(candidate.id);
               }
-              return { completedIds };
+              return report.unverified > 0
+                ? { completedIds, closeout: { unverified: report.unverified } }
+                : { completedIds };
             },
           ),
       );
@@ -22436,6 +22439,7 @@ export class SessionService {
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
       closeoutHeadSha?: string | null;
+      closeoutReport?: CloseoutReport;
     },
   ): Promise<void>;
   private async applyManualStatusLocked(
@@ -22451,6 +22455,7 @@ export class SessionService {
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
       closeoutHeadSha?: string | null;
+      closeoutReport?: CloseoutReport;
     },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
@@ -22466,6 +22471,7 @@ export class SessionService {
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
       closeoutHeadSha?: string | null;
+      closeoutReport?: CloseoutReport;
     },
   ): Promise<SessionView | void> {
     const reopenClaim = this.reopensInFlight.get(sessionId);
@@ -22575,7 +22581,12 @@ export class SessionService {
       }
       if (targetStatus === "completed") {
         terminalSlots = this.captureTerminalSlots(session);
-        this.archiveCloseout(session, terminalSlots?.links ?? [], options?.closeoutHeadSha);
+        const unverified = this.archiveCloseout(
+          session,
+          terminalSlots?.links ?? [],
+          options?.closeoutHeadSha,
+        );
+        if (options?.closeoutReport) options.closeoutReport.unverified += unverified;
         const { ranCleanup } = this.removeSessionArtifacts(session, {
           preserveAgentHistory: true,
         });

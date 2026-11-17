@@ -173,7 +173,7 @@ describe("published interface contracts", () => {
     expect(daemonApi).toContain("closeout_corrupt");
     for (const key of ["enabled", "include", "maxBytes", "retentionDays"])
       expect(configuration).toContain(`projects.<id>.closeout.${key}`);
-    expect(configuration).toContain("session.closeout_archive.{failed,expired}");
+    expect(configuration).toContain("session.closeout_archive.{failed,expired,unverified}");
     expect(commands).toContain("spur closeout show");
     expect(commands).toContain("`kill` archives nothing");
     expect(claudeSkill).toContain("spur closeout show|get|list --link");
