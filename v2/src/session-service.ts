@@ -7602,7 +7602,7 @@ export class SessionService {
 
   /**
    * Claim for the one continue ping owed to a session that was rate limited when its effective
-   * account changed. Undefined: nothing owed (no change, or not limited).
+   * account changed. Undefined: nothing owed (no change, not limited, or this key already claimed).
    * Written with the auth change, so the claim exists before any send and survives a restart.
    */
   private authChangePingClaim(
@@ -7616,43 +7616,67 @@ export class SessionService {
       !this.isLiveStateRateLimited(current)
     )
       return undefined;
-    return { key: `${next.generation}:${next.effectiveAccountId}`, attempts: 0, pinged: false };
+    const key = `${next.generation}:${next.effectiveAccountId}`;
+    return current.authChangePing?.key === key ? undefined : { key, attempts: 0, pinged: false };
   }
 
-  /** Sends the one continue ping for a claimed account change; at most AUTH_CHANGE_PING_MAX_ATTEMPTS tries. */
+  /**
+   * Under the lifecycle lock: applies `update` to the unsent claim for `key` on a running session.
+   * Returns false, writing nothing, when the claim is gone or sent, the session is not running,
+   * or `update` returns null.
+   */
+  private async updateAuthChangePing(
+    sessionId: string,
+    key: string,
+    update: (
+      claim: NonNullable<SessionRecord["authChangePing"]>,
+    ) => SessionRecord["authChangePing"] | null,
+  ): Promise<boolean> {
+    return this.withSessionLifecycleLock(sessionId, async () => {
+      const current = readSession(this.config.dataDir, sessionId);
+      const claim = current?.authChangePing;
+      if (!current || current.status !== "running" || claim?.key !== key || claim.pinged)
+        return false;
+      const next = update(claim);
+      if (!next) return false;
+      writeSession(this.config.dataDir, { ...current, authChangePing: next });
+      return true;
+    });
+  }
+
+  /**
+   * Sends the one continue ping for a claimed account change, at most AUTH_CHANGE_PING_MAX_ATTEMPTS
+   * tries. Sends only when the forced rate-limit clear succeeds and leaves the agent waiting at its
+   * prompt; any clear error or other state spends the claim without a send.
+   */
   private async sendAuthChangePing(sessionId: string, key: string): Promise<void> {
+    const spend = () =>
+      this.updateAuthChangePing(sessionId, key, (claim) => ({
+        ...claim,
+        attempts: AUTH_CHANGE_PING_MAX_ATTEMPTS,
+      }));
     for (let attempt = 0; attempt < AUTH_CHANGE_PING_MAX_ATTEMPTS; attempt += 1) {
-      const counted = await this.withSessionLifecycleLock(sessionId, async () => {
-        const current = readSession(this.config.dataDir, sessionId);
-        const claim = current?.authChangePing;
-        if (
-          !current ||
-          current.status !== "running" ||
-          claim?.key !== key ||
-          claim.pinged ||
-          claim.attempts >= AUTH_CHANGE_PING_MAX_ATTEMPTS
-        )
-          return false;
-        writeSession(this.config.dataDir, {
-          ...current,
-          authChangePing: { ...claim, attempts: claim.attempts + 1 },
-        });
-        return true;
-      });
+      const counted = await this.updateAuthChangePing(sessionId, key, (claim) =>
+        claim.attempts >= AUTH_CHANGE_PING_MAX_ATTEMPTS
+          ? null
+          : { ...claim, attempts: claim.attempts + 1 },
+      );
       if (!counted) return;
       try {
-        await this.clearRateLimit(sessionId, true, "auth-change").catch((error: unknown) => {
-          if (!(error instanceof RateLimitClearError)) throw error;
-        });
+        const cleared = await this.clearRateLimit(sessionId, true, "auth-change").catch(
+          (error: unknown) => {
+            if (error instanceof RateLimitClearError) return null;
+            throw error;
+          },
+        );
+        if (cleared?.state !== "waiting") {
+          await spend();
+          return;
+        }
+        // Re-checked under the lock: a session paused or stopped during the clear is never sent to.
+        if (!(await this.updateAuthChangePing(sessionId, key, (claim) => claim))) return;
         await this.send(sessionId, { message: AUTH_CHANGE_PING_MESSAGE });
-        await this.withSessionLifecycleLock(sessionId, async () => {
-          const current = readSession(this.config.dataDir, sessionId);
-          if (current?.authChangePing?.key !== key) return;
-          writeSession(this.config.dataDir, {
-            ...current,
-            authChangePing: { ...current.authChangePing, pinged: true },
-          });
-        });
+        await this.updateAuthChangePing(sessionId, key, (claim) => ({ ...claim, pinged: true }));
         return;
       } catch (error) {
         this.logEvent("session.auth.ping_failed", {

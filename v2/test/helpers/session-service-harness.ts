@@ -1423,6 +1423,7 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 type SessionServiceInternals = {
+  sendAuthChangePing(sessionId: string, key: string): Promise<void>;
   captureAgentSessionId(session: SessionRecord, timeoutMs: number): Promise<SessionRecord>;
   agentSessionIdPersistBackoffUntil: Map<string, number>;
   lastSuccessfulTodoNudgeAt: Map<string, number>;

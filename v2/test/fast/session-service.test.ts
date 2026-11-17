@@ -23158,10 +23158,15 @@ describe("SessionService", () => {
         };
       }
       async function pingService() {
-        const service = await createDisposedSessionService();
+        const { SessionService, RateLimitClearError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
         const send = vi.spyOn(service, "send").mockResolvedValue({} as never);
-        const clear = vi.spyOn(service, "clearRateLimit").mockResolvedValue({} as never);
-        return { service, send, clear };
+        const clear = vi
+          .spyOn(service, "clearRateLimit")
+          .mockResolvedValue({ sessionId: "api-1", state: "waiting" } as never);
+        return { service, send, clear, RateLimitClearError };
       }
       function pings(send: ReturnType<typeof vi.fn>) {
         return send.mock.calls.filter(
@@ -23232,17 +23237,105 @@ describe("SessionService", () => {
         service.dispose();
       });
 
-      it("does not ping again after a daemon restart", async () => {
-        createSessionStore(runningSession({ auth: autoAuth(), rateLimitedAt: LIMITED_AT }));
-        const first = await pingService();
-        authProxyRotationHandler.current!(rotation("api-1"));
-        await vi.waitFor(() => expect(pings(first.send)).toHaveLength(1));
-        first.service.dispose();
-        const second = await pingService();
-        authProxyRotationHandler.current!(rotation("api-1"));
+      it("does not ping again for a stored claim of the same key after a restart", async () => {
+        seedManagedAccounts("claude");
+        createSessionStore(
+          runningSession({
+            auth: autoAuth(),
+            rateLimitedAt: LIMITED_AT,
+            authChangePing: { key: "2:backup", attempts: 1, pinged: true },
+          }),
+        );
+        authProxySwitchSessionMock.mockResolvedValue({
+          ...registration("claude", "backup"),
+          generation: 2,
+        });
+        const { service, send, clear } = await pingService();
+        await service.switchAuth("api-1", "backup", { reason: "manual" });
         await vi.advanceTimersByTimeAsync(20);
-        expect(second.send).not.toHaveBeenCalled();
-        second.service.dispose();
+        expect(send).not.toHaveBeenCalled();
+        expect(clear).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("sends nothing for a stored claim that spent its attempts", async () => {
+        const sessions = createSessionStore(
+          runningSession({
+            auth: autoAuth(),
+            rateLimitedAt: LIMITED_AT,
+            authChangePing: { key: "2:backup", attempts: 2, pinged: false },
+          }),
+        );
+        const { service, send, clear } = await pingService();
+        await sessionServiceInternals(service).sendAuthChangePing("api-1", "2:backup");
+        expect(send).not.toHaveBeenCalled();
+        expect(clear).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.authChangePing?.attempts).toBe(2);
+        service.dispose();
+      });
+
+      it.each([
+        { name: "already sent", claim: { key: "2:backup", attempts: 1, pinged: true } },
+        { name: "for another key", claim: { key: "3:other", attempts: 0, pinged: false } },
+      ])("sends nothing for a stored claim $name", async ({ claim }) => {
+        createSessionStore(
+          runningSession({ auth: autoAuth(), rateLimitedAt: LIMITED_AT, authChangePing: claim }),
+        );
+        const { service, send, clear } = await pingService();
+        await sessionServiceInternals(service).sendAuthChangePing("api-1", "2:backup");
+        expect(send).not.toHaveBeenCalled();
+        expect(clear).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("spends the claim without a send when the clear leaves the agent working", async () => {
+        const sessions = createSessionStore(
+          runningSession({ auth: autoAuth(), rateLimitedAt: LIMITED_AT }),
+        );
+        const { service, send, clear } = await pingService();
+        clear.mockResolvedValue({ sessionId: "api-1", state: "working" } as never);
+        authProxyRotationHandler.current!(rotation("api-1"));
+        await vi.waitFor(() => expect(clear).toHaveBeenCalledTimes(1));
+        await vi.advanceTimersByTimeAsync(20);
+        expect(send).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.authChangePing).toEqual({
+          key: "1:backup",
+          attempts: 2,
+          pinged: false,
+        });
+        service.dispose();
+      });
+
+      it("spends the claim without a send when the clear is refused", async () => {
+        const sessions = createSessionStore(
+          runningSession({ auth: autoAuth(), rateLimitedAt: LIMITED_AT }),
+        );
+        const { service, send, clear, RateLimitClearError } = await pingService();
+        clear.mockRejectedValue(new RateLimitClearError("not live and rate limited"));
+        authProxyRotationHandler.current!(rotation("api-1"));
+        await vi.waitFor(() => expect(clear).toHaveBeenCalledTimes(1));
+        await vi.advanceTimersByTimeAsync(20);
+        expect(send).not.toHaveBeenCalled();
+        expect(clear).toHaveBeenCalledTimes(1);
+        expect(sessions.get("api-1")?.authChangePing?.attempts).toBe(2);
+        service.dispose();
+      });
+
+      it("does not send to a session paused during the clear", async () => {
+        const sessions = createSessionStore(
+          runningSession({ auth: autoAuth(), rateLimitedAt: LIMITED_AT }),
+        );
+        const { service, send, clear } = await pingService();
+        clear.mockImplementation(async () => {
+          const paused = sessions.get("api-1")!;
+          sessions.set("api-1", { ...paused, status: "paused" });
+          return { sessionId: "api-1", state: "waiting" } as never;
+        });
+        authProxyRotationHandler.current!(rotation("api-1"));
+        await vi.waitFor(() => expect(clear).toHaveBeenCalledTimes(1));
+        await vi.advanceTimersByTimeAsync(20);
+        expect(send).not.toHaveBeenCalled();
+        service.dispose();
       });
 
       it("stops after the retry budget when the send keeps failing", async () => {

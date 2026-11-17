@@ -1775,6 +1775,32 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, "api-3")?.snapshotNudge).toBeUndefined();
   });
 
+  it("round-trips authChangePing and drops malformed claims", async () => {
+    const dataDir = await newDataDir();
+    const claim = { key: "2:backup", attempts: 2, pinged: false };
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      authChangePing: claim,
+    });
+    expect(readSession(dataDir, "api-2")?.authChangePing).toEqual(claim);
+    for (const bad of [
+      { ...claim, key: "" },
+      { ...claim, attempts: 3 },
+      { ...claim, attempts: -1 },
+      { ...claim, pinged: "yes" },
+    ]) {
+      writeSession(dataDir, {
+        ...legacyBase,
+        id: "api-3",
+        tmuxSession: "api-3",
+        authChangePing: bad,
+      } as SessionRecord);
+      expect(readSession(dataDir, "api-3")?.authChangePing).toBeUndefined();
+    }
+  });
+
   it("drops a malformed ToDo reminder fingerprint", async () => {
     const dataDir = await newDataDir();
     writeSession(dataDir, {
