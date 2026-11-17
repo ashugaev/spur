@@ -76,7 +76,7 @@
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/handoff` — caller from `x-spur-caller-session` (agent actor, may name another session), none = human; `403 handoff_target_not_stalled` body `{ code, sessionId, status, error }`; agent self-handoff `409 todo_ledger_empty`, `409 work_snapshot_required` (running source without rate-limit/server-error marker only); response adds `movedTodoItems`; `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
-- `POST /sessions/:id/switch-auth` — next-request managed account or Auto; 404 unless `authRotation.switchAuth: true`; `v2/src/server.ts`.
+- `POST /sessions/:id/switch-auth` — next-request managed account or Auto; `v2/src/server.ts`.
 - `GET /sessions/:id/todo` — archived too; `404` without a ledger
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo-snapshot)
 - `GET /sessions/:id/snapshots` — metadata; `order=asc|desc` (default asc), `limit` 1..100, exclusive `before`/`after` versions; archived too; `400 invalid_snapshot_request|404|500 snapshot_corrupt`; `v2/src/snapshots.ts`
