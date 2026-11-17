@@ -241,6 +241,10 @@ export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 export const GITHUB_PR_OCCURRENCE_KINDS = ["review_requested"] as const;
 export type GitHubPrOccurrenceKind = (typeof GITHUB_PR_OCCURRENCE_KINDS)[number];
 
+// GitHub-only signal kinds that report a PR state, not a lifecycle transition.
+export const GITHUB_PR_STATE_KINDS = ["out_of_date"] as const;
+export type GitHubPrStateKind = (typeof GITHUB_PR_STATE_KINDS)[number];
+
 export const GITHUB_PR_LIFECYCLE_KINDS = [
   "ready_for_review",
   "approved",
@@ -658,7 +662,7 @@ export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
 export interface ReviewSignal {
   key: string;
-  kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind;
+  kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind | GitHubPrStateKind;
   text: string;
   providerThreadTarget?: AutoPingThreadTarget;
   /** Until-change mute key: a different value means the subject changed. */

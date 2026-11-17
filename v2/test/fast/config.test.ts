@@ -1552,6 +1552,26 @@ projects:
     });
   });
 
+  it("accepts github:out_of_date during config validation", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      notify:
+        source: pr-watch
+        event: github:out_of_date
+        send: {}
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.triggers["notify"]).toMatchObject({
+      event: "github:out_of_date",
+    });
+  });
+
   it("accepts github PR lifecycle events during config validation", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1610,6 +1630,7 @@ projects:
       "gitlab:approved",
       "gitlab:merged",
       "gitlab:closed",
+      "gitlab:out_of_date",
     ]) {
       const configPath = await writeConfig(`
 projects:

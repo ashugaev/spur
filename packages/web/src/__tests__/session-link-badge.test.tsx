@@ -244,6 +244,66 @@ describe("SessionLinkBadge", () => {
       expect(document.querySelector("[data-pr-card-more]")).toHaveTextContent("+5 more");
     });
 
+    describe("CI icon state", () => {
+      const svg = (c: HTMLElement, label: string) => c.querySelector(`svg[aria-label='${label}']`);
+      const RUNNING = "CI failing, checks still running";
+
+      it("shows a red clock while a check failed and others run", () => {
+        const { container } = renderBadge();
+        const icon = svg(container, RUNNING);
+        expect(icon).not.toBeNull();
+        expect(icon).toHaveAttribute("stroke", "var(--color-status-error)");
+        expect(icon?.querySelector("circle[r='10']")).not.toBeNull();
+        expect(icon?.querySelector("path[d='M12 6v6l4 2']")).not.toBeNull();
+        expect(svg(container, "CI failing")).toBeNull();
+        expect(container.querySelector("[role='group']")).toHaveAttribute("aria-label", RUNNING);
+      });
+
+      it("shows the red clock when the rollup is pending but a check failed", () => {
+        const { container } = renderBadge({ ...cardInfo, ciStatus: "pending" });
+        expect(svg(container, RUNNING)).not.toBeNull();
+      });
+
+      it("shows a red cross when all checks finished with a failure", () => {
+        const { container } = renderBadge({
+          ...cardInfo,
+          checks: [
+            { name: "lint", state: "passed" },
+            { name: "test", state: "failed" },
+          ],
+        });
+        const icon = svg(container, "CI failing");
+        expect(icon).not.toBeNull();
+        expect(icon?.querySelector("path[d='M18 6 6 18M6 6l12 12']")).not.toBeNull();
+        expect(svg(container, RUNNING)).toBeNull();
+      });
+
+      it("keeps the yellow clock for pending without failures", () => {
+        const { container } = renderBadge({
+          ...cardInfo,
+          ciStatus: "pending",
+          checks: [
+            { name: "lint", state: "passed" },
+            { name: "e2e", state: "pending" },
+          ],
+        });
+        expect(svg(container, "CI pending")).toHaveAttribute(
+          "stroke",
+          "var(--color-status-attention)",
+        );
+      });
+
+      it("keeps the red cross for GitLab failures without checks", () => {
+        const { container } = render(
+          <SessionLinkBadge
+            link={{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/3" }}
+            prInfo={{ ...cardInfo, checks: undefined }}
+          />,
+        );
+        expect(svg(container, "CI failing")).not.toBeNull();
+      });
+    });
+
     it("keeps the native title when no check rows exist", () => {
       const { container } = renderBadge({ ...cardInfo, checks: null });
       const status = container.querySelector("[aria-label='CI failing']")?.parentElement;
