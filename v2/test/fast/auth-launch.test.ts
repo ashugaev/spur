@@ -6,6 +6,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -175,11 +176,14 @@ describe("managed native authorization launch", () => {
       "host-secret",
     );
 
+    expect(statSync(join(claudeConfigDir!, ".claude.json")).mode & 0o777).toBe(0o600);
+
     scrubManagedClaudeHome(directory);
     expect(stateOf(claudeConfigDir!)).toEqual({
       hasCompletedOnboarding: true,
       projects: { "/wt/feature": {} },
     });
+    expect(statSync(join(claudeConfigDir!, ".claude.json")).mode & 0o777).toBe(0o600);
 
     // Relaunch in the same home trusts again.
     managedAuthLaunch(registration, directory, [], "/wt/feature");

@@ -23042,6 +23042,39 @@ describe("SessionService", () => {
         provider: "claude",
         accountId: "backup",
       });
+      const backgroundWorktree = sessions.get("api-1")?.worktreePath ?? "";
+      expect(backgroundWorktree).not.toBe("");
+      const backgroundHome = join(TEST_DATA_DIR, "session-tools", "api-1", "managed-claude-home");
+      expect(
+        JSON.parse(readFileSync(join(backgroundHome, ".claude.json"), "utf8")).projects,
+      ).toEqual({ [backgroundWorktree]: { hasTrustDialogAccepted: true } });
+      service.dispose();
+    });
+
+    it("trusts the session folder when a send relaunches a stopped managed session in place", async () => {
+      seedManagedAccounts("claude");
+      const { endpoint: _endpoint, token: _token, ...auth } = registration("claude", "backup");
+      const sessions = createSessionStore(
+        runningSession({ status: "stopped", auth, agentSessionId: "native-session-uuid" }),
+      );
+      authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+      mockClaudeJsonlState("waiting");
+      listSessionsMock.mockReturnValue([]);
+      let relaunched = false;
+      tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+      createTmuxSessionMock.mockImplementation(async () => {
+        relaunched = true;
+      });
+      isProcessRunningInTmuxMock.mockImplementation(async () => relaunched);
+      const service = await createDisposedSessionService();
+      await service.send("api-1", { message: "continue", queue: false });
+      expect(createTmuxSessionMock).toHaveBeenCalled();
+      const worktree = sessions.get("api-1")?.worktreePath ?? "";
+      expect(worktree).not.toBe("");
+      const home = join(TEST_DATA_DIR, "session-tools", "api-1", "managed-claude-home");
+      expect(JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")).projects).toEqual({
+        [worktree]: { hasTrustDialogAccepted: true },
+      });
       service.dispose();
     });
 
