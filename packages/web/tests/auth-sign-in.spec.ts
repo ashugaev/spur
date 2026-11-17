@@ -39,6 +39,7 @@ function terminalLogin(
     tmuxSession: TERMINAL_ID,
     status,
     ...(reason ? { reason } : {}),
+    command: "claude auth login",
   };
 }
 
@@ -125,6 +126,8 @@ test.describe("Sign-in alerts and dialogs", () => {
 
     await managed.getByRole("button", { name: "Continue in terminal" }).click();
     await expect(page.getByRole("dialog", { name: "alek@x.com" })).toBeVisible();
+    // The command bar shows the command the daemon reports.
+    await expect(page.getByTestId("auth-terminal-command")).toHaveText("claude auth login");
     expect(terminalPosts.at(-1)).toEqual({ accountId: "claude-work" });
   });
 
@@ -177,6 +180,23 @@ test.describe("Sign-in alerts and dialogs", () => {
     await expect(dialog.getByRole("alert")).toContainText("Sign-in not confirmed");
     await expect(dialog.getByRole("button", { name: "Try again" })).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Continue in terminal" })).toHaveCount(2);
+    await expect(dialog.getByText("Signed in")).toHaveCount(0);
+  });
+
+  test("S7b a duplicate account reads Account already added, never success", async ({ page }) => {
+    await mockAlerts(page, [MANAGED_ALERT]);
+    await mockClaudeLogin(page, () => ({
+      accountId: "claude-work",
+      status: "failed",
+      errorCode: "duplicate",
+    }));
+    const dialog = await openManagedDialog(page);
+    await toLinkStep(dialog);
+
+    await dialog.getByLabel("Returned URL or code").fill("code#state");
+    await dialog.getByRole("button", { name: "Submit" }).click();
+
+    await expect(dialog.getByRole("alert")).toContainText("Account already added");
     await expect(dialog.getByText("Signed in")).toHaveCount(0);
   });
 

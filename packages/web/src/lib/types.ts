@@ -329,6 +329,7 @@ export type AuthLoginErrorCode =
   | "provider_blocked"
   | "not_confirmed"
   | "identity"
+  | "duplicate"
   | "failed";
 
 /** One broken managed account or host login from GET /auth-alerts. */
@@ -356,6 +357,7 @@ export type TerminalLoginReason =
   | "timed_out"
   | "stopped"
   | "identity"
+  | "duplicate"
   | "not_confirmed"
   | "failed"
   | "another_sign_in_pending"
@@ -368,6 +370,8 @@ export interface TerminalLogin {
   tmuxSession: string;
   status: "running" | "verifying" | "ready" | "not_signed_in";
   reason?: TerminalLoginReason;
+  /** Display string of the native login command, from the daemon. */
+  command: string;
 }
 
 /** Managed authorization binding of one session. */

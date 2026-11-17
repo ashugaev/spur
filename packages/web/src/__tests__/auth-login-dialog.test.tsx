@@ -401,6 +401,7 @@ describe("AuthLoginDialog errors", () => {
     ["key_rejected", "API key rejected"],
     ["not_confirmed", "Sign-in not confirmed"],
     ["identity", "Account not identified"],
+    ["duplicate", "Account already added"],
     ["failed", "Sign-in failed"],
   ] as const)(
     "%s shows an alert with Continue in terminal and Try again",

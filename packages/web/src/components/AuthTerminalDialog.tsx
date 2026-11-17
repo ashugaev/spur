@@ -30,6 +30,7 @@ const NOT_SIGNED_IN_NOTE: Partial<Record<TerminalLoginReason, string>> = {
   identity: "The signed-in account could not be identified. Account still signed out.",
   not_confirmed: "The test request failed. Account still signed out.",
   failed: "Sign-in failed. Account still signed out.",
+  duplicate: "This account is already in Spur. Account still signed out.",
 };
 
 const RUNNING_NOTE: Partial<Record<TerminalLoginReason, string>> = {
@@ -221,14 +222,23 @@ export function AuthTerminalDialog({
         ) : null}
 
         {running && login ? (
-          <div className="mb-2.5 h-[min(24rem,55dvh)] border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
-            <DirectTerminal
-              agent={provider}
-              agentInputEnabled={false}
-              hideHeader
-              keyBar
-              sessionId={login.tmuxSession}
-            />
+          <div className="mb-2.5 flex h-[min(24rem,55dvh)] flex-col border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
+            <div
+              className="truncate border-b border-[var(--color-border-subtle)] px-2.5 py-1 font-mono normal-case tracking-normal text-[var(--color-text-secondary)]"
+              data-testid="auth-terminal-command"
+              title={login.command}
+            >
+              {login.command}
+            </div>
+            <div className="min-h-0 flex-1">
+              <DirectTerminal
+                agent={provider}
+                agentInputEnabled={false}
+                hideHeader
+                keyBar
+                sessionId={login.tmuxSession}
+              />
+            </div>
           </div>
         ) : null}
 

@@ -122,6 +122,11 @@ export function loginErrorCopy(
         title: "Sign-in not confirmed",
         cause: "Credential accepted, but the test request failed. Account stays signed out.",
       };
+    case "duplicate":
+      return {
+        title: "Account already added",
+        cause: "This account is already in Spur. Use its existing row.",
+      };
     case "identity":
       return {
         title: "Account not identified",

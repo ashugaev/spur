@@ -53,6 +53,7 @@ function terminal(
     tmuxSession: ID,
     status,
     ...(reason ? { reason } : {}),
+    command: "claude auth login",
   };
 }
 
@@ -148,10 +149,11 @@ describe("AuthTerminalDialog", () => {
       "Waiting for sign-in…",
     );
     expect(screen.queryByText(/Signed in/)).toBeNull();
-    // Kicker, identity line and hint; no command bar from the daemon yet and no old "/login" text.
+    // Kicker, identity line, hint and the command bar the daemon reports; no old "/login" text.
     const dialog = screen.getByRole("dialog", { name: "alek@x.com · Intelas" });
     expect(dialog.textContent).toContain("Sign in · Claude · terminal");
     expect(screen.getByText(/Finish sign-in in the terminal/)).toBeTruthy();
+    expect(screen.getByTestId("auth-terminal-command").textContent).toBe("claude auth login");
     expect(dialog.textContent).not.toContain("claude /login");
     // No terminal icon inside the terminal dialog.
     expect(screen.queryByRole("button", { name: "Continue in terminal" })).toBeNull();
@@ -245,6 +247,27 @@ describe("AuthTerminalDialog", () => {
     expect(row?.className).toContain("justify-between");
     expect(row?.contains(screen.getByRole("button", { name: "Close" }))).toBe(true);
     expect(row?.contains(screen.getByRole("button", { name: "Restart terminal" }))).toBe(true);
+  });
+
+  it("renders the command the daemon sends verbatim, with no web constant", async () => {
+    responses["POST /api/auth-terminal-logins"] = () => ({
+      payload: { ...terminal("running"), command: "codex login --device-auth" },
+    });
+    render();
+
+    expect((await screen.findByTestId("auth-terminal-command")).textContent).toBe(
+      "codex login --device-auth",
+    );
+  });
+
+  it("says the account is already added when the terminal sign-in duplicates one", async () => {
+    reply("POST /api/auth-terminal-logins", "not_signed_in", "duplicate");
+    render();
+
+    expect(await screen.findByText("Not signed in")).toBeTruthy();
+    expect(
+      screen.getByText("This account is already in Spur. Account still signed out."),
+    ).toBeTruthy();
   });
 
   it("starts a host terminal for the provider", async () => {
