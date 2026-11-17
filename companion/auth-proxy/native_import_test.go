@@ -163,7 +163,7 @@ func TestImportNativeLoginDuplicateIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	final := f.await(t, "account-b")
-	if final.Status != "failed" || final.ErrorCode != errIdentity || final.Error != "This account is already saved; select its existing profile" {
+	if final.Status != "failed" || final.ErrorCode != errDuplicate || final.Error != "This account is already saved; select its existing profile" {
 		t.Fatalf("duplicate identity: %+v", final)
 	}
 	if verified, _ := f.marks("account-b"); verified {

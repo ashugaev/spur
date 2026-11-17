@@ -38,6 +38,7 @@ const (
 	errProviderBlocked = "provider_blocked"
 	errNotConfirmed    = "not_confirmed"
 	errIdentity        = "identity"
+	errDuplicate       = "duplicate"
 	errFailed          = "failed"
 
 	failedMessage = "Sign-in failed; retry authentication"
@@ -81,7 +82,11 @@ func failureOf(err error) (code, message string) {
 	}
 	var identityErr *identityError
 	if errors.As(err, &identityErr) {
-		return errIdentity, identityMessage(identityErr.marker, failedMessage)
+		code = errIdentity
+		if identityErr.marker == duplicateIdentity {
+			code = errDuplicate
+		}
+		return code, identityMessage(identityErr.marker, failedMessage)
 	}
 	return errFailed, failedMessage
 }

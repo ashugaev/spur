@@ -768,8 +768,11 @@ func TestHelperWorkerProcess(t *testing.T) {
 	case "expired":
 		fmt.Println("Codex device code: ABCD-1234")
 		os.Exit(1)
-	case "identity":
+	case "duplicate":
 		fmt.Println(duplicateIdentity)
+		os.Exit(1)
+	case "changed":
+		fmt.Println(changedIdentity)
 		os.Exit(1)
 	case "stage":
 		fmt.Println("Codex device URL: https://auth.openai.com/codex/device")
@@ -797,8 +800,9 @@ func helperCommand(mode string) func(context.Context, []string) *exec.Cmd {
 
 func TestLoginFailureCodes(t *testing.T) {
 	for mode, want := range map[string]struct{ code, message string }{
-		"expired":  {errExpired, "Sign-in timed out; retry authentication"},
-		"identity": {errIdentity, "This account is already saved; select its existing profile"},
+		"expired":   {errExpired, "Sign-in timed out; retry authentication"},
+		"duplicate": {errDuplicate, "This account is already saved; select its existing profile"},
+		"changed":   {errIdentity, "Different account selected; create a separate profile"},
 	} {
 		f := newLoginFixture(t)
 		f.l.command = helperCommand(mode)
@@ -1032,6 +1036,21 @@ func TestPKCEExchangeStatusCheckedBeforeBody(t *testing.T) {
 		code, msg := failureOf(err)
 		if code != errProviderBlocked || msg != "Provider blocked the sign-in request (HTTP 403)" {
 			t.Fatalf("%s: %q %q", p, code, msg)
+		}
+	}
+}
+
+// TestDuplicateIdentityCode: a profile that duplicates a saved account reports errorCode "duplicate"; a
+// different account behind an existing profile keeps "identity". Duplicates are told apart by marker, not message.
+func TestDuplicateIdentityCode(t *testing.T) {
+	for mode, want := range map[string]string{"duplicate": "duplicate", "changed": "identity"} {
+		f := newLoginFixture(t)
+		f.l.command = helperCommand(mode)
+		if _, err := f.l.start(context.Background(), "account-x", codex, methodDevice); err != nil {
+			t.Fatalf("%s start: %v", mode, err)
+		}
+		if final := f.await(t, "account-x"); final.Status != "failed" || final.ErrorCode != want {
+			t.Fatalf("%s: %+v, want errorCode %s", mode, final, want)
 		}
 	}
 }
