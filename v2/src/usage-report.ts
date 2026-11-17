@@ -54,6 +54,17 @@ export interface UsageReportDeps {
   dataDir: string;
   nowMs: number;
   todayStartMs: number;
+  /** Every managed-account-store account with its cached quota; see AuthAccountSummary. */
+  managedAccounts?: ManagedQuotaAccount[];
+}
+
+export interface ManagedQuotaAccount {
+  id: string;
+  provider: QuotaProvider;
+  displayName: string;
+  credential?: "oauth" | "api_key";
+  status: string;
+  quota?: { windows: QuotaWindow[]; fetchedAt: string };
 }
 
 const CLAUDE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -562,19 +573,40 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
   ) {
     accounts.unshift({ id: "default", label: "default", configDir: defaultDir, createdAt: "" });
   }
-  const [quotas, tokens] = await Promise.all([
+  const managed = deps.managedAccounts ?? [];
+  const managedProviders = new Set(managed.map((account) => account.provider));
+  const hostAccounts = managedProviders.has("claude")
+    ? accounts.filter((account) => account.configDir !== defaultDir)
+    : accounts;
+  const [hostQuotas, tokens] = await Promise.all([
     Promise.all([
-      ...accounts.map((account) =>
+      ...hostAccounts.map((account) =>
         claudeSource(
           deps,
           account,
           sessions.filter((s) => s.claudeAccountId === account.id).map((s) => s.id),
         ),
       ),
-      codexSource(deps),
+      ...(managedProviders.has("codex") ? [] : [codexSource(deps)]),
     ]),
     tokenActivity(deps, sessions),
   ]);
+  const managedQuotas = managed.flatMap((account): QuotaSourceResult[] =>
+    account.status === "ready" && account.credential === "oauth" && account.quota
+      ? [
+          {
+            provider: account.provider,
+            source: account.id,
+            label: account.displayName,
+            fetchedAt: account.quota.fetchedAt,
+            status: "ok",
+            plan: null,
+            windows: account.quota.windows,
+          },
+        ]
+      : [],
+  );
+  const quotas = [...hostQuotas, ...managedQuotas];
   return {
     generatedAt: new Date(deps.nowMs).toISOString(),
     quotas,

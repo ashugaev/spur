@@ -1262,6 +1262,8 @@ export async function startServer(
             dataDir: service.config.dataDir,
             nowMs,
             todayStartMs: todayStart.getTime(),
+            managedAccounts: (await service.listAuthorizationAccounts(undefined, { quota: true }))
+              .accounts,
           }),
         );
         return;

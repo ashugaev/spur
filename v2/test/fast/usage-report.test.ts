@@ -237,6 +237,49 @@ describe("buildUsageReport quotas", () => {
     expect(JSON.stringify(report)).not.toContain(s.home);
   });
 
+  it("lists one row per ready OAuth managed account and drops that provider's host source", async () => {
+    const s = await setup();
+    await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+    const windows = [{ label: "5h", usedPercent: 10, remainingPercent: 90, resetsAt: null }];
+    const quota = { windows, fetchedAt: "2026-11-06T11:59:00.000Z" };
+    const fetchMock = vi.fn(async () => json(CODEX_BODY));
+    const report = await buildUsageReport({
+      ...s.deps(fetchMock as unknown as typeof fetch),
+      managedAccounts: [
+        {
+          id: "acc-1",
+          provider: "claude",
+          displayName: "a@example.com",
+          credential: "oauth",
+          status: "ready",
+          quota,
+        },
+        {
+          id: "acc-2",
+          provider: "claude",
+          displayName: "b@example.com",
+          credential: "oauth",
+          status: "ready",
+          quota,
+        },
+        {
+          id: "acc-3",
+          provider: "claude",
+          displayName: "key",
+          credential: "api_key",
+          status: "ready",
+        },
+      ],
+    });
+    expect(report.quotas.map((q) => [q.provider, q.source, q.label, q.status])).toEqual([
+      ["codex", "codex", "codex", "error"],
+      ["claude", "acc-1", "a@example.com", "ok"],
+      ["claude", "acc-2", "b@example.com", "ok"],
+    ]);
+    expect(report.quotas[1]).toMatchObject({ windows, fetchedAt: quota.fetchedAt });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("no_credentials and expired send no request", async () => {
     const s = await setup();
     const fetchMock = vi.fn();
