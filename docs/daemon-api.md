@@ -2,7 +2,7 @@
 
 - `GET /info` — `lifecycleInstanceId`, runtime `buildId`: process/build identity; `v2/src/session-lifecycle.ts`, `v2/src/build-identity.ts`.
 - `GET /headroom`
-- `GET /usage` — quota windows per Claude account and Codex (one row per ready OAuth managed account from the cached quota, `pending` error row until cached; the host login row is hidden when a ready managed account of the provider has the same email and organization/account id, read from `~/.claude.json` `oauthAccount` and the `~/.codex/auth.json` id_token claims; companion failure falls back to host rows), per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
+- `GET /usage` — quota windows per Claude account and Codex (one row per ready OAuth managed account from the cached quota, `pending` error row until cached; the host login row is hidden when the provider has a ready managed account, or a managed account in any state has the same email and organization/account id, read from `~/.claude.json` `oauthAccount` and the `~/.codex/auth.json` id_token claims; companion failure falls back to host rows), per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
 - `GET /models` — model and default reasoning capabilities; discovery in `v2/src/agents/models.ts`.
 - `GET /api/pr-status` — web PR status, nullable reviewer names, native review requirement; `packages/web/src/app/api/pr-status/route.ts`, `packages/web/src/lib/pr-status-shape.ts`.
 - `POST /api/pr-status/batch` — web PR statuses, reviewer/native requirement metadata; `packages/web/src/app/api/pr-status/batch/route.ts`.

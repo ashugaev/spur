@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { listAccounts, sessionClaudeHome, type ClaudeAccount } from "./claude-accounts.js";
-import { hostDuplicatesManaged, readHostIdentity } from "./host-identity.js";
+import { hostDuplicatesManaged, readHostIdentity, type HostIdentity } from "./host-identity.js";
 import { listSessions, sessionFilePath } from "./metadata.js";
 import {
   summarizeTokenUsageWindows,
@@ -579,13 +579,18 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
     accounts.unshift({ id: "default", label: "default", configDir: defaultDir, createdAt: "" });
   }
   const managed = deps.managedAccounts ?? [];
-  const readyManaged = managed.filter((account) => account.status === "ready");
-  // A host login is dropped only when a ready managed account is the same user.
+  const managedProviders = new Set(
+    managed.filter((account) => account.status === "ready").map((account) => account.provider),
+  );
   const [claudeHostIdentity, codexHostIdentity] = await Promise.all([
     readHostIdentity("claude", deps.homeDir),
     readHostIdentity("codex", deps.homeDir),
   ]);
-  const hostAccounts = hostDuplicatesManaged(claudeHostIdentity, "claude", readyManaged)
+  // A host login is hidden when its provider has a ready managed account (new sessions no longer
+  // use it) or a managed account in any state is the same user.
+  const hostHidden = (provider: QuotaProvider, identity: HostIdentity | null): boolean =>
+    managedProviders.has(provider) || hostDuplicatesManaged(identity, provider, managed);
+  const hostAccounts = hostHidden("claude", claudeHostIdentity)
     ? accounts.filter((account) => account.configDir !== defaultDir)
     : accounts;
   const [hostQuotas, tokens] = await Promise.all([
@@ -597,9 +602,7 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
           sessions.filter((s) => s.claudeAccountId === account.id).map((s) => s.id),
         ),
       ),
-      ...(hostDuplicatesManaged(codexHostIdentity, "codex", readyManaged)
-        ? []
-        : [codexSource(deps)]),
+      ...(hostHidden("codex", codexHostIdentity) ? [] : [codexSource(deps)]),
     ]),
     tokenActivity(deps, sessions),
   ]);
