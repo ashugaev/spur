@@ -23288,7 +23288,7 @@ describe("SessionService", () => {
           const { endpoint: _endpoint, token: _token, ...auth } = registration("codex");
           const original = runningSession({
             agent: "codex",
-            agentSessionId: pinned ? "native-thread" : undefined,
+            ...(pinned ? { agentSessionId: "native-thread" } : {}),
             agentLaunchId: "old-native-launch",
             sidecarNames: ["dev"],
             sidecarPorts: { dev: { http: 12345 } },
@@ -23337,7 +23337,7 @@ describe("SessionService", () => {
         seedManagedAccounts("codex");
         nativeFixture("spur_managed");
         nativeFixture("openai", "newer-sibling");
-        createSessionStore(runningSession({ agent: "codex", agentSessionId: undefined }));
+        createSessionStore(runningSession({ agent: "codex" }));
         findAgentSessionIdMock
           .mockResolvedValueOnce("native-thread")
           .mockResolvedValue("newer-sibling");
@@ -23423,7 +23423,6 @@ describe("SessionService", () => {
           nativeFixture("spur_managed");
           const original = runningSession({
             agent: "codex",
-            agentSessionId: undefined,
             agentLaunchId: "old-launch",
           });
           const sessions = createSessionStore(original);
@@ -23494,7 +23493,7 @@ describe("SessionService", () => {
           const original = runningSession({
             status: "stopped",
             agent: "codex",
-            agentSessionId: pinned ? "native-thread" : undefined,
+            ...(pinned ? { agentSessionId: "native-thread" } : {}),
             ...(contaminated ? { auth } : {}),
           });
           const sessions = createSessionStore(original);
@@ -23554,9 +23553,7 @@ describe("SessionService", () => {
         seedManagedAccounts("codex");
         nativeFixture("spur_managed");
         nativeFixture("openai", "newer-sibling");
-        createSessionStore(
-          runningSession({ status: "stopped", agent: "codex", agentSessionId: undefined }),
-        );
+        createSessionStore(runningSession({ status: "stopped", agent: "codex" }));
         findAgentSessionIdMock
           .mockResolvedValueOnce("native-thread")
           .mockResolvedValue("newer-sibling");
@@ -23602,7 +23599,6 @@ describe("SessionService", () => {
             status: "stopped",
             stopReason: "manual_pause",
             agent: "codex",
-            agentSessionId: undefined,
           }),
         );
         findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("fresh-thread");
