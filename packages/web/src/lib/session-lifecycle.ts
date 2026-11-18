@@ -1,5 +1,8 @@
 import type { SessionLifecycleSnapshot, SessionTransition, SpurSessionView } from "./types";
 
+export const CLOSE_SESSION_TOOLTIP =
+  "Stop the agent and services, delete artifacts, remove the worktree";
+
 export function killConfirmText(sessionId: string): string {
   return `Kill session ${sessionId}? This forces cleanup even with local changes.`;
 }

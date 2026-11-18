@@ -87,6 +87,8 @@ const storeExpectedRev = field(
 const storeLimit = field("limit", "integer 1..500", "Page size.", false, 100);
 const pageSummaryResponse =
   'PageSummary {id,title,icon?,agent,path,url,source?:{path:string},sync?:{state:"pending"|"syncing"|"synced"|"error",root?:string,lastSyncedAt?:string,error?:string}}. Sync appears only for sourced Pages; lastSyncedAt is the last successful reconciliation ISO time and is retained on errors; error appears only in error state.';
+const taskStatusResponse =
+  'TaskStatusView {revision:number,state?:"completed"|"needs_input"}. Revision is a nonnegative safe integer (0 on legacy records); state is present only for a current running launch and revision. Clearing omits state; runtime and artifacts remain.';
 const storeTooLarge: ContractResponse = {
   status: 413,
   contentType: "application/json",
@@ -106,7 +108,7 @@ const subscriptionFields = [
   field("targetSessionId", "string", "Session whose state transitions trigger delivery.", true),
   field(
     "states",
-    '("working"|"waiting"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[]',
+    '("working"|"waiting"|"completed"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[]',
     "Nonempty target states.",
     true,
   ),
@@ -152,10 +154,16 @@ const spawn = body("SpawnSessionRequest", [
   field("selfDestruct", "{enabled:boolean,conditions?:string}", "Automatic cleanup conditions."),
   field("bootstrap", "boolean", "Bootstrap session workspace."),
   field("claudeAccountId", "string", "Claude account ID used for launch."),
+  field("authAccountId", "string|null", "Saved provider account; omitted/null uses Auto."),
   field(
     "subscriptions",
-    '{targetSessionId:string,states:("working"|"waiting"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[],message?:string}[]',
+    '{targetSessionId:string,states:("working"|"waiting"|"completed"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[],message?:string}[]',
     "At most 20 state subscriptions; referenced sessions must exist.",
+  ),
+  field(
+    "idempotencyKey",
+    "string",
+    "1-128 chars, no control characters. Same key and request returns the existing session with replayed:true (201); different request or project returns 409 idempotency_key_conflict {code,sessionId,error}. Global; kept until spur gc archives the session; a key whose spawn errored keeps returning that session.",
   ),
 ]);
 const send = body("SendMessageRequest", [
@@ -311,6 +319,26 @@ const requestBodies = {
       "resume:{action,itemId}",
     ],
   ),
+  taskStatus: body("TaskStatusRequest", [
+    field(
+      "state",
+      '"completed"|"needs_input"|"clear"',
+      "Declared outcome; clear removes it. Completed requires nonempty resolved ToDo; 409 todo_ledger_empty or todo_open_work otherwise.",
+      true,
+    ),
+    field(
+      "revision",
+      "integer 0..9007199254740991",
+      "Retained task-start revision; stale values return 409 stale_task_status.",
+      true,
+    ),
+    field(
+      "agentLaunchId",
+      "string",
+      "Nonblank current launch identity; mismatched launch or non-running lifecycle returns 409 stale_task_status. Does not supply caller identity.",
+      true,
+    ),
+  ]),
   snapshot: body("WriteSnapshotRequest", [
     field(
       "content",
@@ -357,6 +385,11 @@ const requestBodies = {
     model,
     nullableEffort,
     field("notes", "string", "Handoff context for new agent."),
+    field(
+      "idempotencyKey",
+      "string",
+      "1-128 chars, no control characters. Retry with the same key and request returns the existing successor with replayed:true (200); different request returns 409 idempotency_key_conflict with sessionId = successor. Scoped to the source session.",
+    ),
   ]),
   slots: body("UpdateSessionSlotsRequest", [
     field("title", "string", "Session title."),
@@ -432,7 +465,9 @@ function operation(
         contentType:
           operationId === "get_artifact"
             ? "application/octet-stream (stored MIME)"
-            : "application/json",
+            : operationId === "get_closeout_file"
+              ? "application/octet-stream"
+              : "application/json",
         description:
           options.response ?? "Daemon operation result; response is forwarded without projection.",
       },
@@ -497,6 +532,123 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     { response: "RuntimeInfo" },
   ),
   operation("get_headroom", "GET", "/headroom", "Host/session admission capacity."),
+  operation(
+    "list_auth_accounts",
+    "GET",
+    "/auth-accounts",
+    "Saved provider authorization accounts and pools; each account carries identity, displayName and cached quota.",
+    {
+      query: [field("agent", '"claude"|"codex"', "Optional provider filter.")],
+    },
+  ),
+  operation(
+    "add_auth_account",
+    "POST",
+    "/auth-accounts",
+    "Create a saved provider authorization account.",
+    {
+      body: body("AddAuthAccountRequest", [
+        field("provider", '"claude"|"codex"', "Provider.", true),
+      ]),
+      examples: [{ body: { provider: "codex" } }],
+    },
+  ),
+  operation(
+    "remove_auth_account",
+    "DELETE",
+    "/auth-accounts/{accountId}",
+    "Remove an unused authorization account.",
+  ),
+  operation(
+    "login_auth_account",
+    "POST",
+    "/auth-accounts/{accountId}/login",
+    "Start provider sign-in; Claude oauth, Codex device (default) or browser.",
+    {
+      body: body("StartAuthAccountLoginRequest", [
+        field(
+          "method",
+          '"oauth"|"device"|"browser"',
+          "Sign-in method; default oauth for Claude, device for Codex; other provider combinations: 400.",
+        ),
+      ]),
+      examples: [{ body: { method: "browser" } }],
+    },
+  ),
+  operation(
+    "set_auth_account_api_key",
+    "POST",
+    "/auth-accounts/{accountId}/api-key",
+    "Sign in with a provider API key; saved only after a test request succeeds.",
+    {
+      body: body("SetAuthAccountApiKeyRequest", [
+        field("apiKey", "string", "Provider API key; never returned or logged.", true),
+      ]),
+      examples: [{ body: { apiKey: "<api-key>" } }],
+    },
+  ),
+  operation(
+    "list_auth_alerts",
+    "GET",
+    "/auth-alerts",
+    "Broken managed-account and host sign-ins; one row per breakage.",
+  ),
+  operation(
+    "start_auth_terminal_login",
+    "POST",
+    "/auth-terminal-logins",
+    "Start a native CLI sign-in in a tmux terminal for an account or the host; a repeat for the same target restarts. The response carries command, the display string of the native login command.",
+    {
+      body: body("StartAuthTerminalLoginRequest", [
+        field("accountId", "string", "Managed account; excludes host."),
+        field("host", '"claude"|"codex"', "Host login; excludes accountId."),
+      ]),
+      examples: [{ body: { accountId: "example-accountId" } }, { body: { host: "codex" } }],
+    },
+  ),
+  operation(
+    "get_auth_terminal_login",
+    "GET",
+    "/auth-terminal-logins/{id}",
+    "Read terminal sign-in status, reason and login command; 404 unknown id.",
+  ),
+  operation(
+    "stop_auth_terminal_login",
+    "DELETE",
+    "/auth-terminal-logins/{id}",
+    "Stop a terminal sign-in and delete its throwaway home.",
+  ),
+  operation(
+    "get_auth_account_login",
+    "GET",
+    "/auth-accounts/{accountId}/login-status",
+    "Read OAuth readiness and sign-in instructions.",
+  ),
+  operation(
+    "submit_auth_account_login",
+    "POST",
+    "/auth-accounts/{accountId}/login-input",
+    "Submit a sign-in code or cancel login.",
+    {
+      body: body("AuthAccountLoginInput", [
+        field("input", "string", "Authorization code; excludes cancel."),
+        field("cancel", "boolean", "Cancel active login; excludes input."),
+      ]),
+      examples: [{ body: { input: "authorization-code" } }, { body: { cancel: true } }],
+    },
+  ),
+  operation(
+    "update_auth_pool",
+    "PATCH",
+    "/auth-pools/{provider}",
+    "Update provider-wide default and quota rotation; creates a missing pool.",
+    {
+      body: body("UpdateAuthPoolRequest", [
+        field("defaultAccountId", "string|null", "Ready default account."),
+        field("autoRotate", "boolean", "Rotate Auto sessions on quota."),
+      ]),
+    },
+  ),
   operation(
     "get_usage",
     "GET",
@@ -999,7 +1151,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
       ],
       status: 201,
       response:
-        "SessionView; under resource admission pressure, accepts a spawning identity before launch. Healthy foreground requests wait for launch.",
+        "SessionView; under resource admission pressure, accepts a spawning identity before launch. Healthy foreground requests wait for launch. replayed:true when answered from an existing idempotencyKey.",
     },
   ),
   operation(
@@ -1012,7 +1164,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
       examples: [{ body: { project: "example-project", prompt: "Inspect code", agent: "codex" } }],
       status: 201,
       response:
-        "SessionView with accepted spawning identity; durable launch intent retains that identity across daemon restart. Uncertain runtime ownership remains held.",
+        "SessionView with accepted spawning identity; durable launch intent retains that identity across daemon restart. Uncertain runtime ownership remains held. replayed:true when answered from an existing idempotencyKey.",
     },
   ),
   operation("spawn_shepherd", "POST", "/shepherd/spawn", "Spawn or reuse shepherd session.", {
@@ -1292,10 +1444,78 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     },
   ),
   operation(
+    "get_closeout",
+    "GET",
+    "/sessions/{sessionId}/closeout",
+    "Read a closeout archive manifest written by complete (latest unless version is given); works for live, completed and archived sessions.",
+    {
+      query: [
+        field("version", "integer", "Archive version, a positive integer; default latest.", false),
+      ],
+      examples: [{ pathParams: { sessionId: "example-sessionId" }, query: { version: "1" } }],
+      response:
+        "CloseoutManifest {version,sessionId,project,completedAt,links,snapshotVersion,headSha,files,skipped,missingRoots,error?,expiredAt?,versions}; versions lists every archive version ascending; 404 when none or unknown version; 400 invalid version; 500 closeout_corrupt.",
+      source: "v2/src/closeout-archive.ts",
+    },
+  ),
+  operation(
+    "get_closeout_file",
+    "GET",
+    "/sessions/{sessionId}/closeout/files/{path}",
+    "Download one archived file as an attachment.",
+    {
+      query: [
+        field("version", "integer", "Archive version, a positive integer; default latest.", false),
+      ],
+      catchAllPathParams: ["path"],
+      examples: [{ pathParams: { sessionId: "example-sessionId", path: "work/notes.md" } }],
+      response:
+        "Binary stream; path is <root>/<relative path> with root artifacts, work or workspace; 404 for unknown, expired or unsafe paths.",
+      source: "v2/src/closeout-archive.ts",
+    },
+  ),
+  operation(
+    "list_closeouts",
+    "GET",
+    "/closeouts",
+    "Latest closeout archive of every session whose links match, newest first, for live, completed and archived sessions.",
+    {
+      query: [
+        field("link", "string[]", "Repeatable S5 link label or label=URL; all must match.", true),
+      ],
+      examples: [{ query: { link: "pr=https://example.com/pull/42" } }],
+      response: "CloseoutEntry[] {sessionId,status,manifest incl. versions}; no link 400.",
+      source: "v2/src/closeout-archive.ts",
+    },
+  ),
+  operation(
+    "get_task_status",
+    "GET",
+    "/sessions/{sessionId}/task-status",
+    "Read the retained task revision and current declaration.",
+    { response: taskStatusResponse, source: "v2/src/task-status.ts" },
+  ),
+  operation(
+    "set_task_status",
+    "POST",
+    "/sessions/{sessionId}/task-status",
+    "Declare or clear task status. Agent-only: requires matching caller-session header; operator MCP has none and returns 403 task_status_forbidden.",
+    {
+      body: requestBodies.taskStatus,
+      response: taskStatusResponse,
+      source: "v2/src/task-status.ts",
+      examples: [
+        { body: { state: "completed", revision: 0, agentLaunchId: "current-launch-id" } },
+        { body: { state: "needs_input", revision: 0, agentLaunchId: "current-launch-id" } },
+        { body: { state: "clear", revision: 0, agentLaunchId: "current-launch-id" } },
+      ],
+    },
+  ),
+  operation(
     "get_todo",
     "GET",
     "/sessions/{sessionId}/todo",
-    "Read authoritative session task ledger.",
+    "Read authoritative session task ledger; works for archived sessions.",
   ),
   operation(
     "mutate_todo",
@@ -1377,6 +1597,8 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     {
       body: requestBodies.handoff,
       examples: [{ body: { agent: "codex", notes: "Continue task" } }],
+      response:
+        "Successor SessionView with movedTodoItems; replayed:true when answered from an existing idempotencyKey.",
     },
   ),
   operation(
@@ -1393,13 +1615,12 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "switch_session_auth",
     "POST",
     "/sessions/{sessionId}/switch-auth",
-    "Switch Claude account for session. Returns 404 unless authRotation.switchAuth is true.",
+    "Select managed authorization for the next request without restarting the agent.",
     {
       body: body("SwitchAuthRequest", [
-        field("accountId", "string", "Nonblank account ID.", true),
-        field("force", "boolean", "Force account switch.", false, false),
+        field("accountId", "string|null", "Saved account ID or null for Auto.", true),
       ]),
-      examples: [{ body: { accountId: "example-account", force: false } }],
+      examples: [{ body: { accountId: "example-account" } }],
     },
   ),
   operation(

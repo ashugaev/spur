@@ -62,6 +62,16 @@ async function fetchJson(
   return { response, payload };
 }
 
+async function fetchBytes(
+  baseUrl: string,
+  path: string,
+  init?: RequestInit,
+): Promise<{ response: Response; payload: unknown }> {
+  const response = await fetch(`${baseUrl}${path}`, init);
+  if (!response.ok) return { response, payload: parseJsonText(await response.text()) };
+  return { response, payload: Buffer.from(await response.arrayBuffer()) };
+}
+
 function deadlineController(ms: number): { controller: AbortController; clear: () => void } {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
@@ -76,6 +86,15 @@ function unresponsiveDaemonError(baseUrl: string): Error {
 }
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
+  return requestWith<T>(fetchJson, baseUrl, path, init);
+}
+
+async function requestWith<T>(
+  read: typeof fetchJson,
+  baseUrl: string,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
   const method = init?.method ?? "GET";
   const mutation = method !== "GET";
   const startedAt = Date.now();
@@ -102,7 +121,7 @@ async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit)
   };
   let result: { response: Response; payload: unknown };
   try {
-    result = await fetchJson(baseUrl, path, withOrigin);
+    result = await read(baseUrl, path, withOrigin);
   } catch (error) {
     if (!request.controller.signal.aborted) throw error;
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
@@ -613,6 +632,15 @@ export async function getJson<T>(
 ): Promise<T> {
   const baseUrl = await ensureServer(cliEntrypoint, configPath);
   return requestJson<T>(baseUrl, path);
+}
+
+export async function getBytes(
+  cliEntrypoint: string,
+  path: string,
+  configPath?: string,
+): Promise<Buffer> {
+  const baseUrl = await ensureServer(cliEntrypoint, configPath);
+  return requestWith<Buffer>(fetchBytes, baseUrl, path);
 }
 
 export async function postJson<T>(

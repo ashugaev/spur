@@ -19,6 +19,8 @@ export function resolveActivityStatus(
       return { colorVar: "var(--color-status-working)", pulse: true, title: "working" };
     case "waiting":
       return { colorVar: "var(--color-status-attention)", pulse: false, title: "waiting" };
+    case "completed":
+      return { colorVar: "var(--color-status-ready)", pulse: false, title: "completed" };
     case "needs_input":
       return { colorVar: "var(--color-status-error)", pulse: false, title: "needs input" };
     case "rate_limited":

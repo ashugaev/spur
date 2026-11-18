@@ -13,6 +13,9 @@ import {
 } from "../../src/metadata.js";
 import { SessionAdmissionDeniedError } from "../../src/session-service.js";
 import { startConfiguredTriggers } from "../../src/triggers.js";
+import { loadConfig } from "../../src/config.js";
+import { projectTaskStatus } from "../../src/task-status.js";
+import type { SessionRecord } from "../../src/types.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -54,6 +57,221 @@ function fixture(blocks = [{ prompt: "review" }]) {
     });
   return { dataDir, config, spawn, get, birth, deps, emit };
 }
+
+describe("parsed autoClose policy", () => {
+  it.each([
+    {
+      key: "autoComplete",
+      configured: true,
+      retained: true,
+      age: 300000,
+      native: "waiting",
+      sessionStatus: "running",
+      lifecycleState: "running",
+      closes: 1,
+    },
+    {
+      key: "autoClose",
+      configured: true,
+      retained: true,
+      age: 300000,
+      native: "waiting",
+      sessionStatus: "running",
+      lifecycleState: "running",
+      closes: 1,
+    },
+    {
+      key: "autoClose",
+      configured: true,
+      retained: true,
+      age: 299999,
+      native: "waiting",
+      sessionStatus: "running",
+      lifecycleState: "running",
+      closes: 0,
+    },
+    {
+      key: "autoComplete",
+      configured: false,
+      retained: true,
+      age: 300000,
+      native: "waiting",
+      sessionStatus: "running",
+      lifecycleState: "running",
+      closes: 0,
+    },
+    {
+      key: "autoClose",
+      configured: false,
+      retained: true,
+      age: 300000,
+      native: "waiting",
+      sessionStatus: "running",
+      lifecycleState: "running",
+      closes: 0,
+    },
+    {
+      key: "autoClose",
+      configured: undefined,
+      retained: true,
+      age: 300000,
+      native: "waiting",
+      sessionStatus: "running",
+      lifecycleState: "running",
+      closes: 0,
+    },
+    {
+      key: "autoClose",
+      configured: true,
+      retained: false,
+      age: 300000,
+      native: "waiting",
+      sessionStatus: "running",
+      lifecycleState: "running",
+      closes: 0,
+    },
+    {
+      key: "autoClose",
+      configured: true,
+      retained: true,
+      age: 300000,
+      native: "working",
+      sessionStatus: "running",
+      lifecycleState: "running",
+      closes: 0,
+    },
+    {
+      key: "autoClose",
+      configured: true,
+      retained: true,
+      age: 300000,
+      native: "needs_input",
+      sessionStatus: "running",
+      lifecycleState: "running",
+      closes: 0,
+    },
+    {
+      key: "autoClose",
+      configured: true,
+      retained: true,
+      age: 300000,
+      native: "rate_limited",
+      sessionStatus: "running",
+      lifecycleState: "running",
+      closes: 0,
+    },
+    {
+      key: "autoClose",
+      configured: true,
+      retained: true,
+      age: 300000,
+      native: "waiting",
+      sessionStatus: "stopped",
+      lifecycleState: "running",
+      closes: 0,
+    },
+    {
+      key: "autoClose",
+      configured: true,
+      retained: true,
+      age: 300000,
+      native: "waiting",
+      sessionStatus: "running",
+      lifecycleState: "pending",
+      closes: 0,
+    },
+  ] as const)(
+    "applies loaded $key=$configured retained=$retained age=$age native=$native session=$sessionStatus lifecycle=$lifecycleState",
+    async ({ key, configured, retained, age, native, sessionStatus, lifecycleState, closes }) => {
+      const f = fixture();
+      const path = join(f.dataDir, "config.yaml");
+      writeFileSync(
+        path,
+        `dataDir: ${JSON.stringify(f.dataDir)}
+projects:
+  test:
+    path: ${JSON.stringify(f.dataDir)}
+    sources:
+      issues:
+        type: github
+        query: "is:issue is:open"
+    triggers:
+      pickup:
+        source: issues
+        event: github:work_item.new
+        spawn:
+          prompt: "Handle {{url}}"
+${configured === undefined ? "" : `          ${key}: ${configured}`}
+`,
+      );
+      const config = loadConfig(path);
+      recordWorkItemLifecycle(f.dataDir, "test", "issues", {
+        externalId: "repo#1",
+        url: "https://example.com/1",
+        number: 1,
+        title: "Task",
+        repo: "repo",
+        createdAt: new Date(Date.now() - age).toISOString(),
+        autoClose: retained,
+        ...(lifecycleState === "running"
+          ? { state: "running", sessionId: "test-1" }
+          : { state: "pending", spawnWorkId: "owned" }),
+      });
+      let status: SessionRecord["status"] = sessionStatus;
+      const complete = vi.fn(async () => {
+        status = "completed";
+      });
+      const get = vi.fn(async () => ({
+        id: "test-1",
+        status,
+        state: projectTaskStatus(
+          {
+            status,
+            agentLaunchId: "launch",
+            taskStatusRevision: 0,
+            taskStatus: {
+              state: "completed",
+              revision: 0,
+              agentLaunchId: "launch",
+              updatedAt: new Date().toISOString(),
+            },
+          },
+          native,
+          native,
+          true,
+          true,
+        ),
+        runtimeAlive: true,
+        workspaceExists: true,
+      }));
+      const controller = startConfiguredTriggers({
+        config,
+        bus: f.deps.bus,
+        sessionService: { get, complete } as never,
+        autoPing: f.deps.autoPing,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(complete).toHaveBeenCalledTimes(closes);
+        expect(readWorkItemLifecycles(f.dataDir, "test", "issues").get("repo#1")?.autoClose).toBe(
+          retained,
+        );
+        if (closes) {
+          expect(complete).toHaveBeenCalledWith("test-1", { prAction: "leave_open" });
+          controller.nudgeSession("test-1");
+          await vi.advanceTimersByTimeAsync(60_000);
+          expect(complete).toHaveBeenCalledTimes(1);
+          expect(readWorkItemLifecycles(f.dataDir, "test", "issues").get("repo#1")?.state).toBe(
+            "completed",
+          );
+        }
+      } finally {
+        await controller.stop();
+      }
+    },
+  );
+});
 
 describe("durable spawn admission", () => {
   it("keeps equal-payload occurrences and routes distinct across disk reload", async () => {
@@ -239,7 +457,7 @@ describe("durable spawn admission", () => {
     const createdAt = new Date().toISOString();
     recordWorkItemLifecycle(f.dataDir, "test", "tick", {
       ...data,
-      autoComplete: false,
+      autoClose: false,
       createdAt,
       state: "pending",
       spawnWorkId: workId,

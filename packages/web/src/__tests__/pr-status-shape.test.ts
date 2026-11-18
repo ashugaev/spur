@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isCiFailingWhileRunning,
   isPrInfoShape,
   isPrReady,
   parseReviewDecision,
@@ -267,5 +268,22 @@ describe("pr-status-shape", () => {
     it("does not hide a failing optional CI check", () => {
       expect(isPrReady(makePrInfo({ ciStatus: "failure", canMerge: true }))).toBe(true);
     });
+  });
+
+  it("flags failed plus pending checks as failing while running", () => {
+    const failed = { name: "a", state: "failed" } as const;
+    const pending = { name: "b", state: "pending" } as const;
+    const passed = { name: "c", state: "passed" } as const;
+    const mk = (ciStatus: PrInfo["ciStatus"], checks?: PrInfo["checks"]) =>
+      makePrInfo({ ciStatus, checks });
+    expect(isCiFailingWhileRunning(mk("failure", [failed, pending, passed]))).toBe(true);
+    expect(isCiFailingWhileRunning(mk("pending", [failed, pending]))).toBe(true);
+    expect(isCiFailingWhileRunning(mk("failure", [failed, passed]))).toBe(false);
+    expect(isCiFailingWhileRunning(mk("pending", [pending, passed]))).toBe(false);
+    expect(isCiFailingWhileRunning(mk("failure", null))).toBe(false);
+    expect(isCiFailingWhileRunning(mk("failure", undefined))).toBe(false);
+    expect(isCiFailingWhileRunning(mk("failure", []))).toBe(false);
+    expect(isCiFailingWhileRunning(mk("success", [failed, pending]))).toBe(false);
+    expect(isCiFailingWhileRunning(mk(null, [failed, pending]))).toBe(false);
   });
 });

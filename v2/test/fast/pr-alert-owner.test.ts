@@ -4,6 +4,7 @@ import {
   assertPrAlertRoutes,
   allowsPrAlertBatch,
   allowsPrAlertIdentity,
+  isPrAlertEvent,
   PrAlertOwnerRequestError,
 } from "../../src/pr-alert-owner.js";
 import { writeSession } from "../../src/metadata.js";
@@ -66,6 +67,12 @@ describe("explicit PR alert policy", () => {
   it("accepts custom split-source routes while denied siblings remain unnecessary", () => {
     expect(() => assertPrAlertRoutes(project(), ["custom-checks", "custom-merges"])).not.toThrow();
     expect(() => assertPrAlertRoutes(project())).not.toThrow();
+  });
+
+  it("treats out_of_date as an alert event without requiring its route", () => {
+    expect(isPrAlertEvent("github:out_of_date")).toBe(true);
+    expect(isPrAlertEvent("github:comment")).toBe(false);
+    expect(() => assertPrAlertRoutes(project(), ["custom-checks", "custom-merges"])).not.toThrow();
   });
 
   it.each([{ allowed: [] }, { allowed: ["custom-checks"] }, { allowed: ["custom-merges"] }])(

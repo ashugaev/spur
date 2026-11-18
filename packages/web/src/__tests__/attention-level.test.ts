@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ATTENTION_ZONE_ORDER,
+  ATTENTION_LANE_META,
   getAttentionLevel,
   isRestorable,
   toDashboardSession,
@@ -29,6 +30,34 @@ function baseView(overrides: Partial<SpurSessionView> = {}): SpurSessionView {
 }
 
 describe("getAttentionLevel", () => {
+  it("separates completed live tasks from closed sessions", () => {
+    expect(getAttentionLevel(toDashboardSession(baseView({ state: "completed" })))).toBe(
+      "completed",
+    );
+    expect(
+      getAttentionLevel(
+        toDashboardSession(
+          baseView({ state: "completed", status: "completed", runtimeAlive: false }),
+        ),
+      ),
+    ).toBe("done");
+    expect(ATTENTION_LANE_META.completed.label).toBe("Completed");
+    expect(ATTENTION_LANE_META.done.label).toBe("Closed");
+    expect(ATTENTION_ZONE_ORDER.indexOf("completed")).toBe(
+      ATTENTION_ZONE_ORDER.indexOf("pending") + 1,
+    );
+  });
+
+  it("keeps error and stopped evidence ahead of declared completion", () => {
+    expect(
+      getAttentionLevel(
+        toDashboardSession(baseView({ state: "completed", error: "runtime error" })),
+      ),
+    ).toBe("error");
+    expect(
+      getAttentionLevel(toDashboardSession(baseView({ state: "completed", runtimeAlive: false }))),
+    ).toBe("stopped");
+  });
   it("puts a budget-limited session in the approval lane and allows restore", () => {
     const session = toDashboardSession(
       baseView({ status: "budget_limited", state: "budget_limited", runtimeAlive: false }),

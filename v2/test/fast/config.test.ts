@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { totalmem } from "node:os";
 import { join } from "node:path";
@@ -27,6 +27,7 @@ import {
 } from "../../src/event-log.js";
 import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
+import { writeCloseoutArchive } from "../../src/closeout-archive.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -119,9 +120,66 @@ ${trigger}`),
     );
     expect(config.projects["api"]?.triggers["handle"]).toMatchObject({
       event: "script:item.new",
-      spawn: { autoComplete: true },
+      spawn: { autoClose: true },
     });
   });
+  it.each([
+    ["", undefined],
+    ["autoClose: true", true],
+    ["autoClose: false", false],
+    ["autoComplete: true", true],
+    ["autoComplete: false", false],
+    ["autoClose: true, autoComplete: true", true],
+    ["autoClose: false, autoComplete: false", false],
+  ] as const)("normalizes autoClose aliases once: %s", async (policy, expected) => {
+    for (const fields of ['prompt: "{{id}}"', 'blocks: [{prompt: "{{id}}"}]']) {
+      const config = await scriptConfig(
+        "",
+        trigger("script:item.new", `spawn: {${fields}${policy ? `, ${policy}` : ""}}`),
+      );
+      const parsed = config.projects["api"]?.triggers["handle"];
+      if (!parsed || !("spawn" in parsed)) throw new Error("Missing spawn trigger");
+      expect(parsed.spawn.autoClose).toBe(expected);
+      expect(Object.hasOwn(parsed.spawn, "autoClose")).toBe(expected !== undefined);
+      expect(Object.hasOwn(parsed.spawn, "autoComplete")).toBe(false);
+    }
+  });
+  it.each(["autoClose: true, autoComplete: false", "autoClose: false, autoComplete: true"])(
+    "rejects opposite aliases in the same spawn object: %s",
+    async (policy) => {
+      await expect(
+        scriptConfig("", trigger("script:item.new", `spawn: {prompt: work, ${policy}}`)),
+      ).rejects.toThrow("autoClose and projects.api.triggers.handle.spawn.autoComplete must agree");
+    },
+  );
+  it.each(["autoClose", "autoComplete"])(
+    "validates each %s alias even beside a valid peer",
+    async (key) => {
+      const peer = key === "autoClose" ? "autoComplete" : "autoClose";
+      for (const invalid of ['"true"', "null", "1", "{}", "[]"]) {
+        await expect(
+          scriptConfig(
+            "",
+            trigger("script:item.new", `spawn: {prompt: work, ${key}: ${invalid}, ${peer}: true}`),
+          ),
+        ).rejects.toThrow(`${key} must be a boolean`);
+      }
+    },
+  );
+  it.each(["autoClose", "autoComplete"])(
+    "rejects present %s with multiple blocks even when false",
+    async (key) => {
+      await expect(
+        scriptConfig(
+          "",
+          trigger(
+            "script:item.new",
+            `spawn: {blocks: [{prompt: one}, {prompt: two}], ${key}: false}`,
+          ),
+        ),
+      ).rejects.toThrow("autoClose is not supported with multiple spawn blocks");
+    },
+  );
   it("rejects wrong events, send triggers and duplicate work-item triggers", async () => {
     await expect(scriptConfig("", trigger("cron:tick", "spawn: {prompt: fix}"))).rejects.toThrow(
       "script:item.new",
@@ -1109,7 +1167,7 @@ projects:
     const config = loadConfig(configPath);
     expect(config.projects["backend"]?.triggers["review"]).toMatchObject({
       spawn: {
-        autoComplete: true,
+        autoClose: true,
         blocks: [{ agent: "claude", model: "sonnet", prompt: "review it" }],
       },
     });
@@ -1140,7 +1198,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.review.spawn.autoComplete is not supported with multiple spawn blocks",
+      "projects.backend.triggers.review.spawn.autoClose is not supported with multiple spawn blocks",
     );
   });
 
@@ -1236,7 +1294,7 @@ projects:
     );
   });
 
-  it("rejects deskGroup with autoComplete", async () => {
+  it.each(["autoClose", "autoComplete"])("rejects deskGroup with enabled %s", async (key) => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -1251,12 +1309,12 @@ projects:
         event: github:work_item.new
         spawnDeskGroup: true
         spawn:
-          autoComplete: true
+          ${key}: true
           prompt: "ship it"
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.pickup.spawnDeskGroup is not supported with autoComplete: true",
+      "projects.backend.triggers.pickup.spawnDeskGroup is not supported with autoClose: true",
     );
   });
 
@@ -1495,6 +1553,26 @@ projects:
     });
   });
 
+  it("accepts github:out_of_date during config validation", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      notify:
+        source: pr-watch
+        event: github:out_of_date
+        send: {}
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.triggers["notify"]).toMatchObject({
+      event: "github:out_of_date",
+    });
+  });
+
   it("accepts github PR lifecycle events during config validation", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1553,6 +1631,7 @@ projects:
       "gitlab:approved",
       "gitlab:merged",
       "gitlab:closed",
+      "gitlab:out_of_date",
     ]) {
       const configPath = await writeConfig(`
 projects:
@@ -2720,7 +2799,7 @@ projects:
             prompt: "Take this work item.",
           },
         ],
-        autoComplete: true,
+        autoClose: true,
       },
     });
   });
@@ -3329,7 +3408,7 @@ projects:
             prompt: "Triage {{title}}",
           },
         ],
-        autoComplete: true,
+        autoClose: true,
       },
     });
   });
@@ -3359,8 +3438,10 @@ projects:
     );
   });
 
-  it("rejects autoComplete on non-work-item spawn triggers", async () => {
-    const configPath = await writeConfig(`
+  it.each(["autoClose", "autoComplete"])(
+    "rejects %s on non-work-item spawn triggers",
+    async (key) => {
+      const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
@@ -3374,15 +3455,16 @@ projects:
         event: cron:tick
         spawn:
           prompt: "Take this work item."
-          autoComplete: true
+          ${key}: true
 `);
 
-    expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new or sentry:issue.new or github-ci:run.completed or jira:work_item.new",
-    );
-  });
+      expect(() => loadConfig(configPath)).toThrow(
+        "projects.backend.triggers.kickoff.spawn.autoClose is only supported for github:work_item.new or sentry:issue.new or github-ci:run.completed or jira:work_item.new or script:item.new",
+      );
+    },
+  );
 
-  it("rejects autoComplete on send triggers", async () => {
+  it.each(["autoClose", "autoComplete"])("rejects %s on send triggers", async (key) => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -3395,15 +3477,15 @@ projects:
         source: pr-watch
         event: github:comment
         send:
-          autoComplete: true
+          ${key}: true
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.reply.send.autoComplete is only supported on spawn triggers",
+      `projects.backend.triggers.reply.send.${key} is only supported on spawn triggers`,
     );
   });
 
-  it("rejects legacy autoClose on spawn triggers", async () => {
+  it("rejects nonboolean autoClose on spawn triggers", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -3422,7 +3504,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.pick-up.spawn.autoClose is not supported; use autoComplete: true",
+      "projects.backend.triggers.pick-up.spawn.autoClose must be a boolean",
     );
   });
 
@@ -5111,6 +5193,90 @@ projects:
     );
   });
 
+  it("leaves closeout unset and parses projects.<id>.closeout", async () => {
+    const absent = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(absent).projects["api"]?.closeout).toBeUndefined();
+
+    const set = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    closeout:
+      enabled: true
+      include: ["work:**", "workspace:docs/**", "artifacts:agent-history-*"]
+      maxBytes: 1024
+      retentionDays: 30
+`);
+    expect(loadConfig(set).projects["api"]?.closeout).toEqual({
+      enabled: true,
+      include: ["work:**", "workspace:docs/**", "artifacts:agent-history-*"],
+      maxBytes: 1024,
+      retentionDays: 30,
+    });
+  });
+
+  it.each([
+    ["unknown key", "exclude: [a]", "projects.api.closeout only supports"],
+    ["bad root", 'include: ["home:x"]', "projects.api.closeout.include[0]"],
+    ["no root", 'include: ["x"]', "projects.api.closeout.include[0]"],
+    ["dotdot", 'include: ["work:a/../b"]', "projects.api.closeout.include[0]"],
+    ["absolute", 'include: ["work:/etc"]', "projects.api.closeout.include[0]"],
+    ["dot segment", 'include: ["work:./x"]', "projects.api.closeout.include[0]"],
+    ["empty segment", 'include: ["work:a//x"]', "projects.api.closeout.include[0]"],
+    ["blank glob", 'include: ["work: "]', "projects.api.closeout.include[0]"],
+    ["fractional maxBytes", "maxBytes: 1.5", "projects.api.closeout.maxBytes"],
+    ["zero retention", "retentionDays: 0", "projects.api.closeout.retentionDays"],
+  ])("rejects closeout %s", async (_name, line, message) => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    closeout:
+      ${line}
+`);
+    expect(() => loadConfig(configPath)).toThrow(message);
+  });
+
+  it.each([
+    ["@(report.md|notes.md)", ["report.md"]],
+    ["+(report).md", ["report.md"]],
+    ["!(private).md", ["report.md"]],
+  ])("accepts closeout include %s and the archive selects it", async (glob, expected) => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    closeout:
+      include: ["artifacts:${glob}"]
+`);
+    const include = loadConfig(configPath).projects["api"]?.closeout?.include ?? [];
+    expect(include).toEqual([`artifacts:${glob}`]);
+    const root = await createTempDir("spur-closeout-glob-");
+    const artifacts = join(root, "artifacts");
+    mkdirSync(artifacts, { recursive: true });
+    for (const name of ["report.md", "private.md"]) writeFileSync(join(artifacts, name), name);
+    const sessionDir = join(root, "sessions", "s1");
+    mkdirSync(sessionDir, { recursive: true });
+    const manifest = writeCloseoutArchive({
+      sessionDir,
+      sessionId: "s1",
+      project: "api",
+      completedAt: "2026-01-01T00:00:00.000Z",
+      links: [],
+      snapshotVersion: null,
+      headSha: null,
+      roots: { artifacts, work: null, workspace: null },
+      include,
+      maxBytes: 1000,
+    });
+    expect(manifest.files.map((file) => file.path)).toEqual(expected);
+    expect(manifest.error).toBeUndefined();
+  });
+
   it("leaves snapshots unset and parses projects.<id>.snapshots", async () => {
     const absent = await writeConfig(`
 projects:
@@ -5600,12 +5766,27 @@ projects:
     const config = loadConfig(configPath);
 
     expect(config.authRotation).toEqual({
-      autoRotateOnRateLimit: false,
+      autoRotateOnRateLimit: true,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
       switchAuth: false,
     });
   });
+
+  it.each(["cooldownMinutes: 1.5", "maxRotationsPerEpisode: 0.5"])(
+    "rejects fractional authRotation %s",
+    async (line) => {
+      const configPath = await writeConfig(`
+authRotation:
+  ${line}
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+      expect(() => loadConfig(configPath)).toThrow("must be a non-negative integer");
+    },
+  );
 
   it("ignores authRotation in project mode", async () => {
     const configPath = await writeConfig(`
@@ -5620,7 +5801,7 @@ projects:
     const config = loadProjectConfig(configPath);
 
     expect(config.authRotation).toEqual({
-      autoRotateOnRateLimit: false,
+      autoRotateOnRateLimit: true,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
       switchAuth: false,

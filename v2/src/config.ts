@@ -5,11 +5,13 @@ import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { Cron } from "croner";
 import { deriveMinimumIntervalMs } from "./event-sources/cron.js";
+import { CLOSEOUT_ROOTS } from "./closeout-archive.js";
 import { MAX_SNAPSHOT_BYTES_CEILING } from "./snapshots.js";
 import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
   GITHUB_PR_OCCURRENCE_KINDS,
+  GITHUB_PR_STATE_KINDS,
   JIRA_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   SCRIPT_ITEM_NEW_EVENT,
@@ -30,6 +32,7 @@ import {
   type GitLabSourceConfig,
   type JiraSourceConfig,
   type ProjectBranchNamingConfig,
+  type ProjectCloseoutConfig,
   type ProjectConfig,
   type ProjectMcpConfig,
   type ProjectPreflightConfig,
@@ -262,6 +265,14 @@ function asNonNegativeNumber(value: unknown, label: string): number | undefined 
   return value;
 }
 
+function asNonNegativeInteger(value: unknown, label: string): number | undefined {
+  const number = asNonNegativeNumber(value, label);
+  if (number !== undefined && !Number.isInteger(number)) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+  return number;
+}
+
 function asPortNumber(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > 65_535) {
     throw new Error(`${label} must be an integer between 1 and 65535`);
@@ -402,13 +413,19 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   }
 
   const raw = asObject(value, label);
-  if (raw["autoClose"] !== undefined) {
-    throw new Error(`${label}.autoClose is not supported; use autoComplete: true`);
-  }
   if (raw["deskGroup"] !== undefined) {
     throw new Error(`${label}.deskGroup is not supported; use trigger-level spawnDeskGroup`);
   }
+  const canonicalAutoClose = asOptionalBoolean(raw["autoClose"], `${label}.autoClose`);
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+  if (
+    canonicalAutoClose !== undefined &&
+    autoComplete !== undefined &&
+    canonicalAutoClose !== autoComplete
+  ) {
+    throw new Error(`${label}.autoClose and ${label}.autoComplete must agree`);
+  }
+  const autoClose = canonicalAutoClose ?? autoComplete;
   const restrictWrites = asOptionalBoolean(raw["restrictWrites"], `${label}.restrictWrites`);
   const allowedTriggers = asOptionalStringArray(raw["allowedTriggers"], `${label}.allowedTriggers`);
 
@@ -431,15 +448,15 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
     if (!Array.isArray(raw["blocks"]) || raw["blocks"].length === 0) {
       throw new Error(`${label}.blocks must be a non-empty array of spawn blocks`);
     }
-    if (autoComplete !== undefined && raw["blocks"].length > 1) {
-      throw new Error(`${label}.autoComplete is not supported with multiple spawn blocks`);
+    if (autoClose !== undefined && raw["blocks"].length > 1) {
+      throw new Error(`${label}.autoClose is not supported with multiple spawn blocks`);
     }
     return {
       blocks: raw["blocks"].map((entry, index) => {
         const block = asObject(entry, `${label}.blocks[${index}]`);
         return parseTriggerSpawnBlock(block, `${label}.blocks[${index}]`);
       }),
-      ...(autoComplete !== undefined ? { autoComplete } : {}),
+      ...(autoClose !== undefined ? { autoClose } : {}),
       ...(restrictWrites !== undefined ? { restrictWrites } : {}),
       ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
     };
@@ -447,7 +464,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
 
   return {
     blocks: [parseTriggerSpawnBlock(raw, label)],
-    ...(autoComplete !== undefined ? { autoComplete } : {}),
+    ...(autoClose !== undefined ? { autoClose } : {}),
     ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
   };
 }
@@ -703,6 +720,7 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "github") {
     for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
     for (const kind of GITHUB_PR_OCCURRENCE_KINDS) events.push(`github:${kind}`);
+    for (const kind of GITHUB_PR_STATE_KINDS) events.push(`github:${kind}`);
     if (source.query !== undefined) {
       events.push("github:work_item.new");
     }
@@ -1401,7 +1419,7 @@ function parseSendConfig(
   const label = `projects.${projectId}.triggers.${triggerId}.send`;
   const sendRaw = asObject(raw["send"], label);
   if (sendRaw["autoClose"] !== undefined) {
-    throw new Error(`${label}.autoClose is not supported; use spawn.autoComplete`);
+    throw new Error(`${label}.autoClose is only supported on spawn triggers`);
   }
   if (sendRaw["autoComplete"] !== undefined) {
     throw new Error(`${label}.autoComplete is only supported on spawn triggers`);
@@ -1499,6 +1517,50 @@ function parseProjectSnapshots(
     ...(maxBytes !== undefined ? { maxBytes } : {}),
     ...(requireFinal !== undefined ? { requireFinal } : {}),
     ...(freshnessMinutes !== undefined ? { freshnessMinutes } : {}),
+  };
+}
+
+function parseProjectCloseout(
+  projectId: string,
+  value: unknown,
+): ProjectCloseoutConfig | undefined {
+  if (value === undefined) return undefined;
+  const label = `projects.${projectId}.closeout`;
+  const raw = asObject(value, label);
+  const extraKeys = Object.keys(raw).filter(
+    (key) =>
+      key !== "enabled" && key !== "include" && key !== "maxBytes" && key !== "retentionDays",
+  );
+  if (extraKeys.length > 0) {
+    throw new Error(
+      `${label} only supports "enabled", "include", "maxBytes" and "retentionDays" (got: ${extraKeys.join(", ")})`,
+    );
+  }
+  const enabled = asOptionalBoolean(raw["enabled"], `${label}.enabled`);
+  const include = asOptionalStringArray(raw["include"], `${label}.include`);
+  include?.forEach((pattern, index) => {
+    const colon = pattern.indexOf(":");
+    const root = pattern.slice(0, colon);
+    const glob = pattern.slice(colon + 1);
+    if (
+      colon < 0 ||
+      !CLOSEOUT_ROOTS.some((known) => known === root) ||
+      glob.trim().length === 0 ||
+      glob.includes("\\") ||
+      glob.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+    ) {
+      throw new Error(
+        `${label}.include[${index}] must be "<root>:<glob>" with root ${CLOSEOUT_ROOTS.join(", ")}, a relative glob and no empty, "." or ".." segment`,
+      );
+    }
+  });
+  const maxBytes = asOptionalPositiveInteger(raw["maxBytes"], `${label}.maxBytes`);
+  const retentionDays = asOptionalPositiveInteger(raw["retentionDays"], `${label}.retentionDays`);
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(include !== undefined ? { include } : {}),
+    ...(maxBytes !== undefined ? { maxBytes } : {}),
+    ...(retentionDays !== undefined ? { retentionDays } : {}),
   };
 }
 
@@ -1823,13 +1885,13 @@ function parseTrigger(
   if (spawn.blocks.length > 1 && spawn.blocks.some((block) => block.branch !== undefined)) {
     throw new Error(`${label}.spawn.branch is not supported with multiple spawn blocks`);
   }
-  if (spawn.autoComplete !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
+  if (spawn.autoClose !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
     throw new Error(
-      `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
+      `${label}.spawn.autoClose is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
   }
-  if (spawnDeskGroup === true && spawn.autoComplete === true) {
-    throw new Error(`${label}.spawnDeskGroup is not supported with autoComplete: true`);
+  if (spawnDeskGroup === true && spawn.autoClose === true) {
+    throw new Error(`${label}.spawnDeskGroup is not supported with autoClose: true`);
   }
   if (spawnDeskGroup === true && spawn.blocks.length < 2) {
     throw new Error(`${label}.spawnDeskGroup requires at least two spawn blocks`);
@@ -1905,6 +1967,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const branchNaming = parseProjectBranchNaming(projectId, raw["branchNaming"]);
   const snapshots = parseProjectSnapshots(projectId, raw["snapshots"]);
+  const closeout = parseProjectCloseout(projectId, raw["closeout"]);
   const workspaceAccess = parseWorkspaceAccess(projectId, raw["workspaceAccess"], projectEnv);
   const devServer = parseDevServer(projectId, raw["devServer"]);
   const hasDevServerKey = raw["devServer"] !== undefined;
@@ -2037,6 +2100,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(preflight !== undefined ? { preflight } : {}),
     ...(branchNaming !== undefined ? { branchNaming } : {}),
     ...(snapshots !== undefined ? { snapshots } : {}),
+    ...(closeout !== undefined ? { closeout } : {}),
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(mcp !== undefined ? { mcp } : {}),
@@ -2092,7 +2156,7 @@ function parseTags(value: unknown): TagDefinition[] {
 }
 
 const DEFAULT_AUTH_ROTATION: AppConfig["authRotation"] = {
-  autoRotateOnRateLimit: false,
+  autoRotateOnRateLimit: true,
   cooldownMinutes: 60,
   maxRotationsPerEpisode: 2,
   switchAuth: false,
@@ -2120,10 +2184,10 @@ function parseAuthRotation(value: unknown): AppConfig["authRotation"] {
       asOptionalBoolean(root["autoRotateOnRateLimit"], "authRotation.autoRotateOnRateLimit") ??
       DEFAULT_AUTH_ROTATION.autoRotateOnRateLimit,
     cooldownMinutes:
-      asNonNegativeNumber(root["cooldownMinutes"], "authRotation.cooldownMinutes") ??
+      asNonNegativeInteger(root["cooldownMinutes"], "authRotation.cooldownMinutes") ??
       DEFAULT_AUTH_ROTATION.cooldownMinutes,
     maxRotationsPerEpisode:
-      asNonNegativeNumber(root["maxRotationsPerEpisode"], "authRotation.maxRotationsPerEpisode") ??
+      asNonNegativeInteger(root["maxRotationsPerEpisode"], "authRotation.maxRotationsPerEpisode") ??
       DEFAULT_AUTH_ROTATION.maxRotationsPerEpisode,
     switchAuth:
       asOptionalBoolean(root["switchAuth"], "authRotation.switchAuth") ??

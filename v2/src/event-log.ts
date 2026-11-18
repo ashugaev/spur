@@ -221,6 +221,15 @@ export function resetEventLogCollapse(): void {
   collapseState.clear();
 }
 
+/** Like logSpurEvent but never collapsed: for warn/error events the caller already dedupes. */
+export function logSpurEventUncollapsed(dataDir: string, entry: SpurLogEntryInput): void {
+  try {
+    appendEventLog(dataDir, redactAutoPingLogValue(entry) as SpurLogEntryInput);
+  } catch {
+    // Logging must never block Spur runtime behavior.
+  }
+}
+
 export function logSpurEvent(dataDir: string, entry: SpurLogEntryInput): void {
   try {
     const redacted = redactAutoPingLogValue(entry) as SpurLogEntryInput;

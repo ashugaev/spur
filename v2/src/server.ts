@@ -11,6 +11,9 @@ import {
   RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
+import { z } from "zod";
+import { AuthorizationError, authProviderSchema } from "./auth-accounts.js";
+import { authLoginMethodSchema } from "./auth-proxy.js";
 import { agentPaneChildFallbackEnabled } from "./agents/executable.js";
 import {
   AgentModelError,
@@ -105,6 +108,9 @@ import {
   SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
+  HandoffTargetNotStalledError,
+  IdempotencyKeyConflictError,
+  InvalidIdempotencyKeyError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
   SessionService,
@@ -164,6 +170,8 @@ import {
   TodoOpenWorkError,
   TodoTransitionConflictError,
 } from "./todo.js";
+import { CLOSEOUT_VERSION, CloseoutCorruptError } from "./closeout-archive.js";
+import { parseArtifactRelativePath } from "./session-artifacts.js";
 import {
   InvalidSnapshotRequestError,
   SnapshotConflictError,
@@ -173,6 +181,7 @@ import {
   parseSnapshotIncludeDone,
   parseSnapshotListQuery,
 } from "./snapshots.js";
+import { parseTaskStatusRequest, TaskStatusError } from "./task-status.js";
 
 interface JsonError {
   error: string;
@@ -337,13 +346,15 @@ export async function resolveTodoMutationActor(args: {
     sessionId: string,
   ) => { id: string; agent: AgentName } | Promise<{ id: string; agent: AgentName }>;
   invalid?: new (message: string) => Error;
+  /** The caller may act on a session other than its own (handoff of a stalled session). */
+  anyTarget?: boolean;
 }): Promise<TodoActor> {
   const { origin, callerHeader, targetSessionId, lookup } = args;
   const Invalid = args.invalid ?? InvalidTodoRequestError;
   if (Array.isArray(callerHeader)) throw new Invalid("Caller session header is invalid");
   if (callerHeader) {
     if (origin !== "cli") throw new Invalid("Caller session requires CLI origin");
-    if (callerHeader !== targetSessionId)
+    if (!args.anyTarget && callerHeader !== targetSessionId)
       throw new Invalid("Caller session does not match target session");
     const caller = await lookup(callerHeader);
     return { kind: "agent", agent: caller.agent, sessionId: caller.id };
@@ -514,6 +525,13 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
     "content-length": String(body.byteLength),
   });
   response.end(body);
+}
+
+/** undefined: absent (latest); null: not a positive integer. */
+function parseCloseoutVersion(params: URLSearchParams): number | undefined | null {
+  const raw = params.get("version");
+  if (raw === null) return undefined;
+  return CLOSEOUT_VERSION.test(raw) ? Number(raw) : null;
 }
 
 function sendError(response: ServerResponse, statusCode: number, message: string): void {
@@ -908,8 +926,15 @@ function parseSpawnStateSubscriptions(raw: unknown): SubscribeSessionStatesReque
 }
 
 function mergeSpawnStateSubscriptions(body: SpawnSessionRequest): SpawnSessionRequest {
+  const account = z.string().trim().min(1).nullable().optional().safeParse(body.authAccountId);
+  if (!account.success)
+    throw new AuthorizationError("authAccountId must be a nonblank string or null", 400);
   const subscriptions = parseSpawnStateSubscriptions(body.subscriptions);
-  return { ...body, ...(subscriptions ? { subscriptions } : {}) };
+  return {
+    ...body,
+    ...(account.data !== undefined ? { authAccountId: account.data } : {}),
+    ...(subscriptions ? { subscriptions } : {}),
+  };
 }
 
 export async function startServer(
@@ -1009,6 +1034,7 @@ export async function startServer(
     setGhEventSink(cfg.dataDir);
   };
   applyLogConfigs(service.config);
+  await service.recoverManagedAuthorization();
   service.startBackgroundLoops();
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
@@ -1038,6 +1064,8 @@ export async function startServer(
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
+  // GET /usage logs a managed-account read failure once per run of failures.
+  let managedUsageFailing = false;
   // Single owner of a failed request: the status sets the response code and the
   // log level from one argument, so the two can never drift.
   const failRequest = (
@@ -1304,6 +1332,23 @@ export async function startServer(
         const nowMs = Date.now();
         const todayStart = new Date(nowMs);
         todayStart.setHours(0, 0, 0, 0);
+        let managedAccounts: Awaited<
+          ReturnType<typeof service.listAuthorizationAccounts>
+        >["accounts"] = [];
+        try {
+          managedAccounts = (await service.listAuthorizationAccounts(undefined, { quota: true }))
+            .accounts;
+          managedUsageFailing = false;
+        } catch (error) {
+          if (!managedUsageFailing) {
+            logEvent("usage.managed_accounts.unavailable", {
+              level: "warn",
+              message: "Managed accounts unavailable; usage shows host logins",
+              details: { error: error instanceof Error ? error.message : String(error) },
+            });
+          }
+          managedUsageFailing = true;
+        }
         sendJson(
           response,
           200,
@@ -1313,6 +1358,7 @@ export async function startServer(
             dataDir: service.config.dataDir,
             nowMs,
             todayStartMs: todayStart.getTime(),
+            managedAccounts,
           }),
         );
         return;
@@ -1466,15 +1512,153 @@ export async function startServer(
         }
       }
 
+      if (method === "GET" && path === "/auth-accounts") {
+        const provider = authProviderSchema
+          .optional()
+          .safeParse(url.searchParams.get("agent") ?? undefined);
+        if (!provider.success) throw new AuthorizationError("agent must be claude or codex", 400);
+        sendJson(
+          response,
+          200,
+          await service.listAuthorizationAccounts(provider.data, { quota: true }),
+        );
+        return;
+      }
+
+      if (method === "POST" && path === "/auth-accounts") {
+        const body = z
+          .object({ provider: authProviderSchema })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("provider must be claude or codex", 400);
+        sendJson(response, 201, {
+          account: await service.addAuthorizationAccount(body.data.provider),
+        });
+        return;
+      }
+
+      const authPoolProvider = path.match(/^\/auth-pools\/([^/]+)$/)?.[1];
+      if (method === "PATCH" && authPoolProvider) {
+        const provider = authProviderSchema.safeParse(authPoolProvider);
+        if (!provider.success)
+          throw new AuthorizationError("provider must be claude or codex", 400);
+        const body = z
+          .object({
+            defaultAccountId: z.string().min(1).nullable().optional(),
+            autoRotate: z.boolean().optional(),
+          })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Invalid authorization pool update", 400);
+        sendJson(response, 200, {
+          pool: await service.updateAuthorizationPool(provider.data, {
+            ...(body.data.defaultAccountId !== undefined
+              ? { defaultAccountId: body.data.defaultAccountId }
+              : {}),
+            ...(body.data.autoRotate !== undefined ? { autoRotate: body.data.autoRotate } : {}),
+          }),
+        });
+        return;
+      }
+
+      const managedAccountId = path.match(/^\/auth-accounts\/([^/]+)$/)?.[1];
+      if (method === "DELETE" && managedAccountId) {
+        await service.removeAuthorizationAccount(managedAccountId);
+        sendJson(response, 200, { removed: managedAccountId });
+        return;
+      }
+
+      const managedLoginId = path.match(/^\/auth-accounts\/([^/]+)\/login$/)?.[1];
+      if (method === "POST" && managedLoginId) {
+        const body = z
+          .object({ method: authLoginMethodSchema.optional() })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) {
+          throw new AuthorizationError("method must be oauth, device or browser", 400);
+        }
+        sendJson(
+          response,
+          200,
+          await service.startAuthorizationLogin(managedLoginId, body.data.method),
+        );
+        return;
+      }
+      const managedApiKeyId = path.match(/^\/auth-accounts\/([^/]+)\/api-key$/)?.[1];
+      if (method === "POST" && managedApiKeyId) {
+        const body = z
+          .object({ apiKey: z.string() })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Supply an apiKey string", 400);
+        sendJson(
+          response,
+          200,
+          await service.setAuthorizationApiKey(managedApiKeyId, body.data.apiKey),
+        );
+        return;
+      }
+      if (method === "GET" && path === "/auth-alerts") {
+        sendJson(response, 200, await service.listAuthAlerts());
+        return;
+      }
+      if (method === "POST" && path === "/auth-terminal-logins") {
+        const body = z
+          .union([
+            z.object({ accountId: z.string().min(1) }).strict(),
+            z.object({ host: authProviderSchema }).strict(),
+          ])
+          .safeParse(await readJsonBody(request));
+        if (!body.success) {
+          throw new AuthorizationError("Supply accountId or host (claude or codex)", 400);
+        }
+        sendJson(response, 200, await service.startTerminalLogin(body.data));
+        return;
+      }
+      const terminalLoginId = path.match(/^\/auth-terminal-logins\/([^/]+)$/)?.[1];
+      if (method === "GET" && terminalLoginId) {
+        sendJson(response, 200, service.getTerminalLogin(terminalLoginId));
+        return;
+      }
+      if (method === "DELETE" && terminalLoginId) {
+        await service.stopTerminalLogin(terminalLoginId);
+        sendJson(response, 200, { stopped: terminalLoginId });
+        return;
+      }
+      const managedLoginInputId = path.match(/^\/auth-accounts\/([^/]+)\/login-input$/)?.[1];
+      if (method === "POST" && managedLoginInputId) {
+        const body = z
+          .union([
+            z.object({ input: z.string().trim().min(1) }).strict(),
+            z.object({ cancel: z.literal(true) }).strict(),
+          ])
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Supply input or cancel:true", 400);
+        sendJson(
+          response,
+          200,
+          await service.authorizationLoginInput(
+            managedLoginInputId,
+            "input" in body.data ? body.data.input : null,
+          ),
+        );
+        return;
+      }
+      const managedLoginStatusId = path.match(/^\/auth-accounts\/([^/]+)\/login-status$/)?.[1];
+      if (method === "GET" && managedLoginStatusId) {
+        sendJson(response, 200, await service.authorizationLoginStatus(managedLoginStatusId));
+        return;
+      }
+
       if (method === "GET" && path === "/claude-accounts") {
-        sendJson(response, 200, { accounts: service.listClaudeAccounts() });
+        sendJson(response, 200, { accounts: await service.listClaudeAccounts() });
         return;
       }
 
       if (method === "POST" && path === "/claude-accounts/add") {
-        const body = await readJsonBody<{ label?: unknown }>(request);
-        const label = typeof body.label === "string" ? body.label.trim() : "";
-        const account = service.addClaudeAccount(label ? { label } : {});
+        // A label in the body is ignored: accounts are named from provider identity.
+        await readJsonBody(request);
+        const account = await service.addClaudeAccount();
         const { loginTmuxSession } = await service.startAccountLogin(account.id);
         // Return the summary shape (no absolute configDir) to match GET /claude-accounts.
         sendJson(response, 201, {
@@ -1482,7 +1666,6 @@ export async function startServer(
             id: account.id,
             label: account.label,
             authenticated: false,
-            lastUsedAt: account.lastUsedAt,
           },
           loginTmuxSession,
         });
@@ -1497,7 +1680,7 @@ export async function startServer(
           return;
         }
         try {
-          service.removeClaudeAccount(id);
+          await service.removeClaudeAccount(id);
         } catch (error) {
           // In-use guard rejection is a client-correctable conflict, not a 500.
           const message = error instanceof Error ? error.message : String(error);
@@ -2333,7 +2516,7 @@ export async function startServer(
         sendJson(
           response,
           201,
-          await service.spawn(mergeSpawnStateSubscriptions(body), { acceptQueued: true }),
+          await service.spawnFromRequest(mergeSpawnStateSubscriptions(body), "foreground"),
         );
         return;
       }
@@ -2343,7 +2526,7 @@ export async function startServer(
         sendJson(
           response,
           201,
-          await service.spawnInBackground(mergeSpawnStateSubscriptions(body)),
+          await service.spawnFromRequest(mergeSpawnStateSubscriptions(body), "background"),
         );
         return;
       }
@@ -2553,6 +2736,105 @@ export async function startServer(
         return;
       }
 
+      const taskStatusSessionId = path.match(/^\/sessions\/([^/]+)\/task-status$/)?.[1];
+      if ((method === "GET" || method === "POST") && taskStatusSessionId) {
+        const target = decodeURIComponent(taskStatusSessionId);
+        if (method === "GET") {
+          sendJson(response, 200, await service.readTaskStatus(target));
+        } else {
+          if (request.headers["x-spur-caller-session"] !== target) {
+            throw new TaskStatusError(
+              "Task status requires the target agent caller",
+              403,
+              "task_status_forbidden",
+            );
+          }
+          const body = parseTaskStatusRequest(await readJsonBody<unknown>(request));
+          sendJson(response, 200, await service.writeTaskStatus(target, body));
+        }
+        return;
+      }
+
+      const closeoutMatch = path.match(/^\/sessions\/([^/]+)\/closeout$/);
+      if (method === "GET" && closeoutMatch?.[1]) {
+        const version = parseCloseoutVersion(url.searchParams);
+        if (version === null) {
+          sendError(response, 400, "version must be a positive integer");
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          service.readCloseout(decodeURIComponent(closeoutMatch[1]), version),
+        );
+        return;
+      }
+
+      const closeoutFileMatch = path.match(/^\/sessions\/([^/]+)\/closeout\/files\/(.+)$/);
+      if (method === "GET" && closeoutFileMatch?.[1] && closeoutFileMatch[2]) {
+        const version = parseCloseoutVersion(url.searchParams);
+        if (version === null) {
+          sendError(response, 400, "version must be a positive integer");
+          return;
+        }
+        let sessionId: string;
+        let relativePath: string | null;
+        try {
+          sessionId = decodeURIComponent(closeoutFileMatch[1]);
+          relativePath = parseArtifactRelativePath(
+            closeoutFileMatch[2]
+              .split("/")
+              .map((segment) => decodeURIComponent(segment))
+              .join("/"),
+          );
+        } catch {
+          sendError(response, 404, `Closeout file not found: ${closeoutFileMatch[2]}`);
+          return;
+        }
+        if (relativePath === null) {
+          sendError(response, 404, `Closeout file not found: ${closeoutFileMatch[2]}`);
+          return;
+        }
+        const file = service.readCloseoutFile(sessionId, relativePath, version);
+        response.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": String(file.size),
+          "content-disposition": `attachment; filename="${encodeURIComponent(basename(file.name))}"`,
+          "x-content-type-options": "nosniff",
+          "cache-control": "no-store",
+        });
+        const stream = createReadStream(file.path);
+        stream.on("error", () => {
+          if (!response.headersSent) {
+            sendError(response, 500, "Failed to read closeout file");
+          } else {
+            response.destroy();
+          }
+        });
+        stream.pipe(response);
+        return;
+      }
+
+      if (method === "GET" && path === "/closeouts") {
+        let links: SessionLinkFilter[];
+        try {
+          links = parseSessionLinkFilters(url.searchParams.getAll("link"));
+        } catch (parseError) {
+          sendError(
+            response,
+            400,
+            parseError instanceof Error ? parseError.message : "Invalid link",
+          );
+          return;
+        }
+        if (links.length === 0) {
+          sendError(response, 400, "link is required");
+          return;
+        }
+        sendJson(response, 200, service.closeoutsByLink(links));
+        return;
+      }
+
       if (method === "GET" && path === "/snapshots/latest") {
         let links: SessionLinkFilter[];
         try {
@@ -2688,15 +2970,19 @@ export async function startServer(
       const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
       if (method === "POST" && handoffSessionId) {
         const body = await readJsonBody<HandoffSessionRequest>(request);
-        sendJson(
-          response,
-          200,
-          await service.handoff(
-            handoffSessionId,
-            body,
-            humanTodoOptions(origin, request.headers["x-spur-caller-session"]),
-          ),
-        );
+        const callerHeader = request.headers["x-spur-caller-session"];
+        const todoOptions = callerHeader
+          ? {
+              todoActor: await resolveTodoMutationActor({
+                origin,
+                callerHeader,
+                targetSessionId: handoffSessionId,
+                lookup: (callerSessionId) => service.getSessionIdentity(callerSessionId),
+                anyTarget: true,
+              }),
+            }
+          : humanTodoOptions(origin, callerHeader);
+        sendJson(response, 200, await service.handoff(handoffSessionId, body, todoOptions));
         return;
       }
 
@@ -2727,20 +3013,16 @@ export async function startServer(
 
       const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
       if (method === "POST" && switchAuthSessionId) {
-        if (!service.config.authRotation.switchAuth) {
-          sendError(response, 404, "switch-auth is disabled; set authRotation.switchAuth: true");
-          return;
-        }
         const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
-        const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
-        if (!accountId) {
-          sendJson(response, 400, { error: "accountId must be a non-empty string" });
+        const account = z.string().trim().min(1).nullable().safeParse(body.accountId);
+        if (!account.success) {
+          sendJson(response, 400, { error: "accountId must be a non-empty string or null" });
           return;
         }
         sendJson(
           response,
           200,
-          await service.switchAuth(switchAuthSessionId, accountId, {
+          await service.switchAuth(switchAuthSessionId, account.data, {
             reason: "manual",
             force: body.force === true,
           }),
@@ -3140,6 +3422,7 @@ export async function startServer(
         return;
       }
       if (
+        error instanceof AuthorizationError ||
         error instanceof AgentReasoningEffortError ||
         error instanceof AgentModelError ||
         error instanceof SessionResourceNotFoundError ||
@@ -3150,6 +3433,7 @@ export async function startServer(
         error instanceof InvalidSessionSubscriptionInputError ||
         error instanceof InvalidWakeRequestError ||
         error instanceof InvalidJsonBodyError ||
+        error instanceof InvalidIdempotencyKeyError ||
         error instanceof WakeTargetMissingError ||
         error instanceof WakeDispatchConflictError ||
         error instanceof SessionAdmissionDeniedError ||
@@ -3172,7 +3456,9 @@ export async function startServer(
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
         error instanceof SessionNotRestorableError ||
+        error instanceof HandoffTargetNotStalledError ||
         error instanceof SpawnBatchConflictError ||
+        error instanceof IdempotencyKeyConflictError ||
         error instanceof PrAlertOwnerRequestError
       ) {
         failRequest(response, error.statusCode, message, {
@@ -3236,6 +3522,14 @@ export async function startServer(
         });
         return;
       }
+      if (error instanceof CloseoutCorruptError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { code: error.code, sessionId: error.sessionId, error: error.message },
+        });
+        return;
+      }
       if (error instanceof SnapshotCorruptError) {
         failRequest(response, error.statusCode, message, {
           method,
@@ -3257,7 +3551,7 @@ export async function startServer(
         });
         return;
       }
-      if (error instanceof InvalidTodoRequestError) {
+      if (error instanceof TaskStatusError || error instanceof InvalidTodoRequestError) {
         failRequest(response, error.statusCode, message, {
           method,
           path,
@@ -3303,6 +3597,9 @@ export async function startServer(
             statusCode: response.statusCode,
             ...(errorMessage ? { error: errorMessage } : {}),
             latencyMs: Math.round(performance.now() - startedAt),
+            ...(typeof request.headers["x-spur-caller-session"] === "string"
+              ? { callerSession: request.headers["x-spur-caller-session"] }
+              : {}),
           });
           if (record) {
             appendUserAction(service.info().dataDir, record);

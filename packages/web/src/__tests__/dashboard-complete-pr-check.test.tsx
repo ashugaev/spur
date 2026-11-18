@@ -220,7 +220,7 @@ function mockFetchRateLimitedThenRetryOk(completeBodies: unknown[]) {
 }
 
 async function clickDone() {
-  const done = await screen.findByRole("button", { name: "Mark api-c9e9 as done" });
+  const done = await screen.findByRole("button", { name: "Close session api-c9e9" });
   fireEvent.click(done);
 }
 
@@ -327,7 +327,7 @@ describe("Dashboard complete with an unavailable PR check", () => {
     await clickDone();
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
 
-    const done = await screen.findByRole("button", { name: "Mark api-c9e9 as done" });
+    const done = await screen.findByRole("button", { name: "Close session api-c9e9" });
     await waitFor(() => expect(done).not.toBeDisabled());
 
     fireEvent.click(done);
@@ -512,7 +512,7 @@ describe("Dashboard lifecycle reconciliation", () => {
       await client.refetchQueries({ queryKey: ["sessions"] });
     });
   }
-  const doneButton = () => screen.queryByRole("button", { name: `Mark ${source.id} as done` });
+  const doneButton = () => screen.queryByRole("button", { name: `Close session ${source.id}` });
   const restoreButton = () =>
     screen.queryByRole("button", { name: `Restore session ${source.id}` });
 
@@ -526,7 +526,7 @@ describe("Dashboard lifecycle reconciliation", () => {
         await vi.advanceTimersByTimeAsync(1);
       });
       const button = screen.getByRole("button", {
-        name: action === "complete" ? `Mark ${source.id} as done` : `Restore session ${source.id}`,
+        name: action === "complete" ? `Close session ${source.id}` : `Restore session ${source.id}`,
       });
       fireEvent.click(button);
       for (let index = 0; index < 3; index += 1) {
@@ -612,7 +612,7 @@ describe("Dashboard lifecycle reconciliation", () => {
       if (action === "restore") useSessionLinkPrInfoMock.mockReturnValue({ state: null });
       const { client } = render(<Dashboard />);
       const button = await screen.findByRole("button", {
-        name: action === "complete" ? `Mark ${source.id} as done` : `Restore session ${source.id}`,
+        name: action === "complete" ? `Close session ${source.id}` : `Restore session ${source.id}`,
       });
       fireEvent.click(button);
       const stale = deferredResponse();
@@ -657,10 +657,10 @@ describe("Dashboard lifecycle reconciliation", () => {
     await clickDone();
     await waitFor(() => expect(screen.queryByText("Cross repo session")).not.toBeInTheDocument());
     expect(
-      screen.queryByRole("button", { name: `Mark ${child.id} as done` }),
+      screen.queryByRole("button", { name: `Close session ${child.id}` }),
     ).not.toBeInTheDocument();
     expect(window.confirm).toHaveBeenCalledWith(
-      "Complete this desk? 1 subagent on this checkout will be ended.",
+      "Close this desk? 1 subagent on this checkout will be ended.",
     );
     const addition: SpurSessionView = {
       ...source,
@@ -765,7 +765,7 @@ describe("Dashboard lifecycle reconciliation", () => {
       await clickDone();
       await waitFor(() => expect(posts).toHaveLength(2));
       expect(window.confirm).toHaveBeenLastCalledWith(
-        "Complete this desk? 1 subagent on this checkout will be ended.",
+        "Close this desk? 1 subagent on this checkout will be ended.",
       );
     },
   );
@@ -778,7 +778,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     current.set(child.id, child);
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const { client } = render(<Dashboard />);
-    const anchorButton = await screen.findByRole("button", { name: `Mark ${anchor.id} as done` });
+    const anchorButton = await screen.findByRole("button", { name: `Close session ${anchor.id}` });
     fireEvent.click(anchorButton);
     const added: SpurSessionView = {
       ...anchor,
@@ -787,7 +787,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     };
     list = { ...list, sessions: [anchor, child, added] };
     await refetch(client);
-    const intersecting = screen.getByRole("button", { name: `Mark ${added.id} as done` });
+    const intersecting = screen.getByRole("button", { name: `Close session ${added.id}` });
     fireEvent.click(intersecting);
     expect(posts).toHaveLength(1);
     const detail = deferredResponse();
@@ -801,7 +801,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     detail.resolve(new Response(JSON.stringify(anchor)));
     await waitFor(() => expect(screen.getByText("failed")).toBeInTheDocument());
     post = deferredResponse();
-    fireEvent.click(screen.getByRole("button", { name: `Mark ${added.id} as done` }));
+    fireEvent.click(screen.getByRole("button", { name: `Close session ${added.id}` }));
     await waitFor(() => expect(posts).toHaveLength(2));
   });
 
@@ -816,7 +816,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     current.set(other.id, other);
     const { client } = render(<Dashboard />);
     await clickDone();
-    fireEvent.click(screen.getByRole("button", { name: `Mark ${other.id} as done` }));
+    fireEvent.click(screen.getByRole("button", { name: `Close session ${other.id}` }));
     list = { ...list, sessions: [source, { ...other, status: "completed" }] };
     current.set(source.id, { ...source, status: "completed" });
     await act(async () => {
@@ -826,19 +826,19 @@ describe("Dashboard lifecycle reconciliation", () => {
     list = { ...list, sessions: [source, other] };
     await refetch(client);
     expect(
-      screen.queryByRole("button", { name: `Mark ${other.id} as done` }),
+      screen.queryByRole("button", { name: `Close session ${other.id}` }),
     ).not.toBeInTheDocument();
     await act(async () => {
       otherPost.resolve(new Response(JSON.stringify({ error: "other failed" }), { status: 500 }));
     });
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: `Mark ${other.id} as done` })).toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: `Close session ${other.id}` })).toBeInTheDocument(),
     );
   });
 
   it("rejects repeated attempts and releases failed reconciliation for retry", async () => {
     const { client } = render(<Dashboard />);
-    const button = await screen.findByRole("button", { name: `Mark ${source.id} as done` });
+    const button = await screen.findByRole("button", { name: `Close session ${source.id}` });
     fireEvent.click(button);
     fireEvent.click(button);
     await waitFor(() => expect(posts).toHaveLength(1));
@@ -867,7 +867,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     current.set(other.id, other);
     const { client } = render(<Dashboard />);
     await clickDone();
-    fireEvent.click(screen.getByRole("button", { name: `Mark ${other.id} as done` }));
+    fireEvent.click(screen.getByRole("button", { name: `Close session ${other.id}` }));
     const added: SpurSessionView = {
       ...source,
       id: "api-added",
@@ -882,11 +882,11 @@ describe("Dashboard lifecycle reconciliation", () => {
     await waitFor(() => expect(doneButton()).toBeInTheDocument());
     expect(screen.getByText("Added desk")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: `Mark ${other.id} as done` }),
+      screen.queryByRole("button", { name: `Close session ${other.id}` }),
     ).not.toBeInTheDocument();
     await refetch(client);
     expect(
-      screen.queryByRole("button", { name: `Mark ${other.id} as done` }),
+      screen.queryByRole("button", { name: `Close session ${other.id}` }),
     ).not.toBeInTheDocument();
   });
 

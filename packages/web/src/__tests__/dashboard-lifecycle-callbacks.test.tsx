@@ -148,12 +148,12 @@ describe("Dashboard lifecycle callback ownership", () => {
       });
       expect(client.getQueryData<SpurSessionsResponse>(["sessions"])?.sessions[0]).toEqual(current);
       expect(
-        screen.queryByRole("button", { name: `Mark ${source.id} as done` }),
+        screen.queryByRole("button", { name: `Close session ${source.id}` }),
       ).not.toBeInTheDocument();
       if (change === "newer receipt") {
         rows = [{ ...current, status: "running", state: "waiting", runtimeAlive: true }];
         await poll(client);
-        fireEvent.click(await screen.findByRole("button", { name: `Mark ${source.id} as done` }));
+        fireEvent.click(await screen.findByRole("button", { name: `Close session ${source.id}` }));
         await screen.findByRole("dialog", { name: "Open Pull Request" });
         expect(dispatched).toMatch(/^[0-9a-f-]{36}$/);
       }
@@ -210,7 +210,7 @@ describe("Dashboard lifecycle callback ownership", () => {
     });
     expect(client.getQueryData<SpurSessionsResponse>(["sessions"])?.sessions[0]).toEqual(rows[0]);
     expect(
-      screen.queryByRole("button", { name: `Mark ${source.id} as done` }),
+      screen.queryByRole("button", { name: `Close session ${source.id}` }),
     ).not.toBeInTheDocument();
   });
 
@@ -248,7 +248,7 @@ describe("Dashboard lifecycle callback ownership", () => {
       }
       return shell(url);
     });
-    fireEvent.click(await screen.findByRole("button", { name: `Mark ${source.id} as done` }));
+    fireEvent.click(await screen.findByRole("button", { name: `Close session ${source.id}` }));
     await waitFor(() => expect(entered).toBe(true));
     const next = {
       ...completed(3),

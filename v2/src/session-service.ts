@@ -9,6 +9,14 @@ import {
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { getBuildId } from "./build-identity.js";
 import {
+  closeoutDirAt,
+  closeoutSettings,
+  expireCloseout,
+  readCloseoutManifest,
+  resolveCloseoutFile,
+  writeCloseoutArchive,
+} from "./closeout-archive.js";
+import {
   consentPolicy,
   proposeConsent,
   presentConsent,
@@ -26,6 +34,26 @@ import {
   SessionLifecycleRegister,
 } from "./session-lifecycle.js";
 import { homedir, userInfo } from "node:os";
+import { fileURLToPath } from "node:url";
+import {
+  AuthorizationError,
+  AuthAccounts,
+  authDisplayNames,
+  withCompanionIdentity,
+  type AuthProvider,
+  type AuthAccountSummary,
+} from "./auth-accounts.js";
+import { AuthQuota } from "./auth-quota.js";
+import {
+  AuthProxy,
+  authProxyBinaryPath,
+  type AuthRegistration,
+  type AuthLogin,
+  type AuthLoginMethod,
+  type AuthProxyState,
+  type AuthRotation,
+} from "./auth-proxy.js";
+import { managedAuthLaunch, publicAuthSession, scrubManagedClaudeHome } from "./auth-launch.js";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
 import {
@@ -115,17 +143,21 @@ import {
 } from "./branch-name.js";
 import {
   findLatestSessionFile as findLatestClaudeSessionFile,
-  claudeCommand,
   DEFAULT_CLAUDE_MODEL,
+  claudeCommand,
 } from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
   CODEX_HOME_DIR,
+  codexArgsSelectProvider,
+  codexCommand,
   codexHookHomePath,
+  codexUsesCustomProvider,
   findLatestCodexSessionFile,
   readCodexConversationTail,
   readCodexRolloutState,
   readCodexTranscriptEntries,
+  readCodexUserConfig,
   type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
@@ -148,7 +180,21 @@ import {
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
-import { readFreshSessionQuota, type QuotaSourceResult } from "./usage-report.js";
+import {
+  readFreshSessionQuota,
+  readHostCredentialSources,
+  type QuotaSourceResult,
+  type UsageReportDeps,
+} from "./usage-report.js";
+import {
+  AuthAlerts,
+  logAuthFailed,
+  observeHostSource,
+  type AlertEvaluationInput,
+  type AuthAlert,
+  type ManagedBreakage,
+} from "./auth-alerts.js";
+import { AuthTerminalLogins, type TerminalLogin } from "./auth-terminal-login.js";
 import {
   ACTIVITY_WINDOW_MS,
   CONVERSATION_PAGE_ENTRIES,
@@ -169,20 +215,7 @@ import {
   historyStampKey,
   historyStampSessionId,
 } from "./agent-history-delta.js";
-import {
-  addAccount,
-  ensureDefaultAccount,
-  findAccount,
-  isAccountAuthenticated,
-  isAccountReady,
-  listAccounts,
-  removeAccount,
-  seedSessionHome,
-  sessionClaudeHome,
-  swapSessionCredentials,
-  touchAccountUsed,
-  type ClaudeAccount,
-} from "./claude-accounts.js";
+import { findAccount, seedSessionHome, sessionClaudeHome } from "./claude-accounts.js";
 import {
   buildSidecarLinkUrl,
   DEFAULT_PROJECT_CONFIG_FILES,
@@ -206,6 +239,7 @@ import {
   extractBareUserTask,
   renderHandoffPrompt,
   wrapShepherdSpawnPrompt,
+  type HandoffPromptSnapshot,
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import {
@@ -356,6 +390,7 @@ import {
   SLOT_TOOL_NAME,
   SNAPSHOT_TOOL_NAME,
   TODO_TOOL_NAME,
+  TASK_STATUS_TOOL_NAME,
   applyNormalizedSlotsUpdate,
   applySlotsUpdate,
   ensureSessionSlotTool,
@@ -377,6 +412,8 @@ import {
   isImageArtifactPath,
   listSessionArtifacts,
   readSessionArtifact,
+  SESSION_WORK_DIR,
+  sessionArtifactsDir,
   setSessionArtifactOrigin,
   setSessionArtifactUserAdded,
   type SessionArtifactFile,
@@ -527,7 +564,11 @@ import {
   type PreflightTokenUsageView,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
+  type HandoffIdempotencyReceipt,
   type HandoffSessionRequest,
+  type HandoffSessionResponse,
+  type IdempotencyKeyConflictPayload,
+  type SpawnSessionResponse,
   type RespawnSessionRequest,
   type RestoreSessionRequest,
   type RunServiceRequest,
@@ -609,20 +650,39 @@ import {
   type UpdateSessionSlotsRequest,
   type UpdateSessionSlotsResponse,
   type TodoActor,
+  AUTH_CHANGE_PING_MAX_ATTEMPTS,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
   type TodoProjection,
   type LatestSnapshotEntry,
+  type SessionLink,
   type SessionLinkFilter,
+  type CloseoutEntry,
+  type CloseoutManifestView,
+  type CloseoutReport,
+  type CompleteSessionResult,
   type TodoItemProjection,
   type WorkSnapshot,
   type WorkSnapshotFreshness,
   type WorkSnapshotMeta,
+  type TaskStatusRequest,
+  type TaskStatusView,
   type WorkSnapshotRead,
 } from "./types.js";
 import {
+  clearTaskStatus,
+  projectTaskStatus,
+  readTaskStatus as taskStatusView,
+  TaskStatusError,
+} from "./task-status.js";
+import {
+  closeTodoItems,
   ensureTodoLedger,
+  inheritTodo,
+  planHandoffReconcile,
+  planHandoffTodo,
   readTodoIfPresent,
+  type HandoffTodoItem,
   mutateTodo as applyTodoMutation,
   TodoEmptyLedgerError,
   TodoLedgerCorruptError,
@@ -738,6 +798,7 @@ const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
 const CLAUDE_SERVER_ERROR_REACTIVATION_MS = 30 * 60 * 1000;
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
+const AUTH_CHANGE_PING_MESSAGE = "Account changed. Continue.";
 const SIDECAR_REAPER_INTERVAL_MS = 60_000;
 const MEMORY_SHED_INTERVAL_MS = 1_000;
 // Consecutive 1s ticks above the restore floor plus margin required before
@@ -904,6 +965,7 @@ const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // this.config on every tick, so a config-only reload takes effect without a
 // daemon restart).
 const SESSION_GC_TICK_MS = 5 * 60_000;
+const CLOSEOUT_RETENTION_INTERVAL_MS = 60 * 60_000;
 const TELEGRAM_TOPIC_GC_INTERVAL_MS = 24 * 60 * 60_000;
 const TELEGRAM_TOPIC_GC_MAX_SESSIONS = 20;
 const TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS = 3;
@@ -1143,6 +1205,23 @@ export class GithubPrCheckUnavailableError extends Error {
   }
 }
 
+export class HandoffTargetNotStalledError extends Error {
+  readonly statusCode = 403;
+  readonly code = "handoff_target_not_stalled";
+  readonly payload: {
+    code: "handoff_target_not_stalled";
+    sessionId: string;
+    status: string;
+    error: string;
+  };
+
+  constructor(sessionId: string, status: string) {
+    const message = `Session ${sessionId} is ${status}, not stalled. An agent can hand off only its own session, or another session that is stopped, paused, errored, rate limited or erroring.`;
+    super(message);
+    this.payload = { code: this.code, sessionId, status, error: message };
+  }
+}
+
 export class SessionNotRestorableError extends Error {
   readonly statusCode = 409;
   readonly payload: SessionNotRestorablePayload;
@@ -1179,6 +1258,84 @@ export class SpawnBatchConflictError extends Error {
     super(message);
     this.payload = { code, sessionId, error: message };
   }
+}
+
+export class IdempotencyKeyConflictError extends Error {
+  readonly statusCode = 409;
+  readonly payload: IdempotencyKeyConflictPayload;
+
+  constructor(message: string, sessionId: string) {
+    super(message);
+    this.payload = { code: "idempotency_key_conflict", sessionId, error: message };
+  }
+}
+
+export class InvalidIdempotencyKeyError extends Error {
+  readonly statusCode = 400;
+}
+
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
+function parseIdempotencyKey(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > 128 ||
+    CONTROL_CHARACTERS.test(value)
+  ) {
+    throw new InvalidIdempotencyKeyError(
+      "idempotencyKey must be a 1-128 character string without control characters",
+    );
+  }
+  return value;
+}
+
+interface InFlightCall<T> {
+  request: unknown;
+  result: Promise<T>;
+}
+
+// Joins a pending call made with the same request and returns its result. A different request
+// waits for the pending call to settle and returns undefined: the caller re-enters and gets the
+// answer it would have had if sent after it.
+async function joinInFlight<T>(
+  pending: InFlightCall<T>,
+  request: unknown,
+): Promise<{ value: T } | undefined> {
+  if (isDeepStrictEqual(pending.request, request)) return { value: await pending.result };
+  await pending.result.catch(() => undefined);
+  return undefined;
+}
+
+// Runs a call registered under id so concurrent calls can join it; the entry leaves with it.
+async function runInFlight<T, E extends InFlightCall<T>>(
+  calls: Map<string, E>,
+  id: string,
+  entry: Omit<E, "result">,
+  run: () => Promise<T>,
+): Promise<T> {
+  // Defer execution until the identity is registered, before the first await.
+  const result = Promise.resolve().then(run);
+  calls.set(id, { ...entry, result } as E);
+  try {
+    return await result;
+  } finally {
+    if (calls.get(id)?.result === result) calls.delete(id);
+  }
+}
+
+// Stored copy of a spawn request: attachment bytes become a sha256 so records stay small
+// while a changed file still reads as a different request.
+function birthFingerprint(request: SpawnSessionRequest): SpawnSessionRequest {
+  const fingerprint = structuredClone(request);
+  if (fingerprint.attachments) {
+    fingerprint.attachments = fingerprint.attachments.map((attachment) => ({
+      ...attachment,
+      data: `sha256:${createHash("sha256").update(attachment.data).digest("hex")}`,
+    }));
+  }
+  return fingerprint;
 }
 
 export class SessionRateLimitedError extends Error {
@@ -1447,7 +1604,17 @@ type HandoffSourceStamp = Pick<
   "id" | "workspaceId" | "status" | "stopReason" | "updatedAt" | "tmuxSession"
 >;
 
+type HandoffEventDetails = {
+  actor: TodoActor | null;
+  callerSessionId?: string;
+  movedItems: Array<{ from: string; to: string }>;
+  snapshotVersion?: number;
+  snapshotGate?: "applied" | "skipped_source_cannot_write";
+};
+
 type PreparedHandoff = {
+  inheritedTodo: HandoffTodoItem[];
+  handoffDetails: HandoffEventDetails;
   token: symbol;
   lifecycleIds: string[];
   sourceStamp: HandoffSourceStamp;
@@ -1465,6 +1632,7 @@ type PreparedHandoff = {
     closeoutOwnerTransfer: boolean;
     validatedLaunchSelection: AgentLaunchSelection;
     receiptToken: symbol;
+    inheritedTodo?: HandoffTodoItem[];
   };
 };
 
@@ -2064,6 +2232,7 @@ async function setupSessionAgentHooks(args: {
   sessionToolDir: string;
   restrictWrites: boolean;
   modelsCacheHome: string;
+  managedAuth?: boolean;
   model?: string;
   reasoningEffort?: ProviderReasoningEffort;
   reasoningVariantNames?: string[];
@@ -2075,9 +2244,10 @@ async function setupSessionAgentHooks(args: {
   // servers below. Default (no bound account, or record not yet
   // written at spawn time) falls back to homedir() inside setup().
   const session = readSession(args.dataDir, args.sessionId);
-  const claudeConfigDir = session
-    ? resolveClaudeAuthPlanOptions(args.dataDir, session).claudeConfigDir
-    : undefined;
+  const claudeConfigDir =
+    session && !session.auth && !args.managedAuth
+      ? resolveClaudeAuthPlanOptions(args.dataDir, session).claudeConfigDir
+      : undefined;
   const hookArgs = {
     agent: args.agent,
     worktreePath: args.worktreePath,
@@ -2088,6 +2258,7 @@ async function setupSessionAgentHooks(args: {
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
     ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
+    ...(args.managedAuth || session?.auth ? { managedAuth: true } : {}),
     ...(args.mcpExclude?.length ? { mcpExclude: args.mcpExclude } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
@@ -2608,7 +2779,7 @@ function buildInitialMessage(
   if (branchNamingRegex) {
     base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
   }
-  const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty. You own every item; nothing is added for you.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
+  const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty unless a handoff moved items to you (listed under Inherited ToDo). You own every item.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, self-destruct, or hand off yourself with an empty ledger; cannot finish or self-destruct with open/held work. Handoff moves open/held items to the successor.`;
   const snapshotInstructions = `Spur snapshot:\n- Keep a backward-looking Markdown snapshot of your work: \`"$SPUR_SNAPSHOT_COMMAND" write --file <path>\` (\`--file -\` reads stdin). Each write stores a full new version.\n- Write one after each finished step and before you stop. Suggested sections: Now, Established, Tried, Next, Questions and risks, References.\n- When the project requires it, finishing or self-destruct needs a \`--final\` snapshot written after your last ToDo change; handoff needs any snapshot written after it.`;
   base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
   base = `${base}\n\n${snapshotInstructions}`;
@@ -2732,11 +2903,7 @@ function removeFirstOccurrence(list: string[], value: string): string[] {
   return [...list.slice(0, index), ...list.slice(index + 1)];
 }
 
-// Resolve the CLAUDE_CONFIG_DIR for a claude session from the runtime account
-// store. When an account is bound, seeds the per-session claude home under
-// session-tools/<id>/claude-home and returns it as claudeConfigDir. Session
-// homes isolate credential writeback from the source account directory.
-// Returns {} when no account is bound or the account no longer exists.
+// Retain native homes for legacy direct sessions; managed launches use auth-launch.ts.
 export function resolveClaudeAuthPlanOptions(
   dataDir: string,
   session: Pick<SessionRecord, "agent" | "claudeAccountId" | "id">,
@@ -2881,6 +3048,7 @@ function buildSessionEnv(args: {
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_TODO_COMMAND: join(args.sessionToolDir, TODO_TOOL_NAME),
     SPUR_SNAPSHOT_COMMAND: join(args.sessionToolDir, SNAPSHOT_TOOL_NAME),
+    SPUR_STATUS_COMMAND: join(args.sessionToolDir, TASK_STATUS_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
@@ -3427,6 +3595,8 @@ interface SessionSpawnOptions {
   closeoutOwnerTransfer?: boolean;
   prAlertOwnerTransfer?: PrAlertTransfer;
   receiptToken?: symbol;
+  /** Handoff only: source ToDo items written into the successor ledger before launch. */
+  inheritedTodo?: HandoffTodoItem[];
   /** HTTP accepts a spawning identity when admission must wait. */
   acceptQueued?: boolean;
   /** Set by source adapters, never from the HTTP body. */
@@ -3472,6 +3642,8 @@ interface SpawnAdmissionWaiter {
   reject: (error: SpawnAdmissionCancelledError) => void;
 }
 
+type HandoffIdempotency = Pick<HandoffIdempotencyReceipt, "key" | "request">;
+
 interface HandoffAdmission {
   token: symbol;
   session: SessionRecord;
@@ -3498,6 +3670,28 @@ function resolveCarriedSpawnModel(
   return explicitModel ?? (targetAgent === session.agent ? session.model : undefined);
 }
 
+function requestedAuthAccount(
+  request: Pick<SpawnSessionRequest, "authAccountId" | "claudeAccountId">,
+  agent: AgentName,
+): string | null | undefined {
+  if (
+    request.authAccountId === undefined &&
+    request.claudeAccountId !== undefined &&
+    agent !== "claude"
+  ) {
+    throw new AuthorizationError(
+      "claudeAccountId is only valid for Claude; use authAccountId",
+      400,
+    );
+  }
+  return request.authAccountId !== undefined ? request.authAccountId : request.claudeAccountId;
+}
+
+/** The predecessor's managed account (null = Auto) when the successor uses the same provider. */
+function carriedAuthAccountId(session: SessionRecord, agent: AgentName): string | null | undefined {
+  return session.auth && agent === session.agent ? session.auth.accountId : undefined;
+}
+
 export function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
@@ -3518,6 +3712,7 @@ export function resolveRespawnRequest(
       : agent === session.agent
         ? session.reasoningEffort
         : undefined;
+  const authAccountId = carriedAuthAccountId(session, agent);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -3526,7 +3721,10 @@ export function resolveRespawnRequest(
     agent,
     ...(model !== undefined ? { model } : {}),
     ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
-    ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
+    ...(session.claudeAccountId && !session.auth && agent === "claude"
+      ? { claudeAccountId: session.claudeAccountId }
+      : {}),
+    ...(authAccountId !== undefined ? { authAccountId } : {}),
     ...(session.mode !== undefined ? { mode: session.mode } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
@@ -3567,6 +3765,7 @@ function resolveHandoffSpawnRequest(
     originalTaskPrompt: string;
     attachments?: SendMessageAttachment[];
     pipelineSteps?: string[];
+    authAccountId?: string;
   },
 ): SpawnSessionRequest {
   const reasoningEffort =
@@ -3581,6 +3780,7 @@ function resolveHandoffSpawnRequest(
     agent: options.agent,
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    ...(options.authAccountId !== undefined ? { authAccountId: options.authAccountId } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
     ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
@@ -3796,6 +3996,12 @@ function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" |
 
 export class SessionService {
   private readonly preflightUsageStore: PreflightUsageStore;
+  private readonly authAccounts: AuthAccounts;
+  private readonly authProxy: AuthProxy;
+  private readonly authQuota: AuthQuota;
+  private readonly authAlerts: AuthAlerts;
+  private readonly authTerminals: AuthTerminalLogins;
+  private authSnapshot: { at: number; run: Promise<AuthProxyState> } | undefined;
   readonly bootstrapConfigPath: string;
   readonly startedAt: string;
   config: AppConfig;
@@ -3989,6 +4195,7 @@ export class SessionService {
   private lastDiskBudgetSweepAt = Date.now();
   // Same construction-time seed and same reason as lastSessionGcSweepAt.
   private lastArtifactRetentionSweepAt = Date.now();
+  private lastCloseoutRetentionSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private readonly scheduledWakeClaims = new Map<string, ScheduledWakeClaim>();
@@ -4086,6 +4293,15 @@ export class SessionService {
   private readonly pendingSpawnIds = new Set<string>();
   private admissionStopped = false;
   private readonly foregroundSpawnReceipts = new Map<symbol, ForegroundSpawnReceipt>();
+  // Source id -> the keyed handoff running for it, so a same-key retry waits for its result.
+  private readonly keyedHandoffsInFlight = new Map<
+    string,
+    {
+      key: string;
+      request: HandoffIdempotency["request"];
+      result: Promise<HandoffSessionResponse>;
+    }
+  >();
   private readonly handoffsInFlight = new Map<
     string,
     {
@@ -4093,6 +4309,9 @@ export class SessionService {
       phase: "waiting" | "activating";
     }
   >();
+  // Successor id -> source id while a handoff is in flight: the successor cannot be handed off
+  // itself until its own handoff settles (it would kill the pane the finalize still checks).
+  private readonly handoffSuccessors = new Map<string, string>();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
@@ -4153,10 +4372,6 @@ export class SessionService {
   private readonly prCheckRuns = new Set<Promise<void>>();
   /** Git wall clock spent by the current sweep resolving PR discovery targets. */
   private prCheckGitSpentMs = 0;
-  // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
-  // considered rate-limited; sessionId -> per-episode rotation count.
-  private readonly claudeAccountRateLimit = new Map<string, number>();
-  private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarEndpoints = new Map<string, SidecarEndpointEntry>();
   private readonly sidecarViewClaims = new WeakMap<
@@ -4303,6 +4518,54 @@ export class SessionService {
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);
     this.config = bootstrap.config;
+    this.authAccounts = new AuthAccounts(
+      this.config.dataDir,
+      () => this.config.authRotation.autoRotateOnRateLimit,
+    );
+    this.authProxy = new AuthProxy(
+      this.config.dataDir,
+      () => ({
+        state: this.authAccounts.read(),
+        policy: {
+          cooldownMinutes: this.config.authRotation.cooldownMinutes,
+          maxRotationsPerEpisode: this.config.authRotation.maxRotationsPerEpisode,
+        },
+      }),
+      authProxyBinaryPath,
+      (rotation) => void this.recordAuthRotation(rotation),
+    );
+    this.authQuota = new AuthQuota({
+      dataDir: this.config.dataDir,
+      fetchUsage: (accountIds) => this.authProxy.getUsage(accountIds),
+      now: () => Date.now(),
+      onSaveError: (error) =>
+        this.logEvent("auth.quota.cache_error", {
+          level: "warn",
+          message: `Account quota cache failed: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+    });
+    this.authAlerts = new AuthAlerts({
+      dataDir: this.config.dataDir,
+      onOpened: (entry) => logAuthFailed(this.config.dataDir, entry),
+    });
+    this.authTerminals = new AuthTerminalLogins({
+      dataDir: this.config.dataDir,
+      homeDir: homedir(),
+      createTmuxCommandSession,
+      killTmuxSession: (name) => killTmuxSession(name),
+      tmuxPaneDead: (name, options) => tmuxPaneDead(name, options),
+      accountProvider: (accountId) => this.requireAuthorizationAccount(accountId).provider,
+      cancelLogin: (accountId) => this.authProxy.cancelLogin(accountId),
+      importNativeLogin: (accountId, provider) =>
+        this.authProxy.importNativeLogin(accountId, provider),
+      loginStatus: (accountId) => this.authProxy.loginStatus(accountId),
+      hostProbe: async (provider) =>
+        (await readHostCredentialSources(this.usageReportDeps(), true)).find(
+          (source) => source.provider === provider,
+        ) ?? null,
+      agentCommand: (provider) => (provider === "claude" ? claudeCommand() : codexCommand()),
+      now: () => Date.now(),
+    });
     this.preflightUsageStore = new PreflightUsageStore(this.config.dataDir);
     void this.preflightUsageStore.prune();
     // Before any classification: a restart mid-command must already know
@@ -4383,6 +4646,8 @@ export class SessionService {
       completion.reject(new SpawnAdmissionCancelledError("disposed"));
     }
     this.spawnCompletions.clear();
+    this.authProxy.dispose();
+    this.authTerminals.dispose();
     // Settles every queued lookup as skipped:cancelled so a prCheckRuns drain
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
@@ -5926,35 +6191,8 @@ export class SessionService {
         }
 
         const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
-        // Auto-rotate a rate-limited claude session onto a fresh authenticated
-        // account PROMPTLY, independent of rateLimitReactivation.afterHours. The
-        // helper is fully self-gating (autoRotateOnRateLimit toggle, per-account
-        // cooldown, per-episode cap, and all-accounts-limited fall-through) and
-        // returns true only when a rotation happened. A successful rotation
-        // suppresses the afterHours nudge below.
-        // switchAuth (invoked inside tryAutoRotateClaudeAccount) can throw on a
-        // dirty-worktree kill-confirmation, a stale-liveState race, or a
-        // concurrently-removed account. Scope the catch to this session so one
-        // bad session does not propagate out of the loop and starve every later
-        // session of its wake this tick. On error treat rotated=false so the
-        // afterHours nudge fallback below still runs.
-        let rotated = false;
-        if (!this.memoryHold.engaged && liveState === "rate_limited") {
-          try {
-            rotated = await this.tryAutoRotateClaudeAccount(session);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.wake.failed", {
-              level: "warn",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to auto-rotate claude account for ${session.id}: ${message}`,
-            });
-          }
-        }
-
         const afterHours = this.config.rateLimitReactivation.afterHours;
-        if (!this.memoryHold.engaged && !rotated && afterHours > 0 && session.rateLimitedAt) {
+        if (!this.memoryHold.engaged && afterHours > 0 && session.rateLimitedAt) {
           const thresholdMs = afterHours * 60 * 60 * 1000;
           if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
             // Undefined liveState means classification has not populated stateHistory
@@ -6470,9 +6708,12 @@ export class SessionService {
         (entry) => !removeIds.has(entry.id),
       ),
     }));
-    this.protectDurableSpawns();
+    const sessions = listSessions(this.config.dataDir);
+    this.protectDurableSpawns(sessions);
+    this.rollbackUnlaunchedHandoffCopies(sessions);
     queueMicrotask(() => {
       if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverDurableSpawns());
+      if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverHandoffTodo(sessions));
     });
     this.resumeSessionDelivery();
   }
@@ -6763,6 +7004,13 @@ export class SessionService {
     return createRuntimeInfo(this.config, this.startedAt, this.lifecycle.instanceId);
   }
 
+  // Handoff: the spawned session is not a target, so the result passes through untouched.
+  private runLifecycle(
+    action: LifecycleAction,
+    targetIds: string[],
+    operationId: string | undefined,
+    work: () => Promise<HandoffSessionResponse>,
+  ): Promise<HandoffSessionResponse>;
   private runLifecycle(
     action: LifecycleAction,
     targetIds: string[],
@@ -7223,19 +7471,22 @@ export class SessionService {
   }
 
   private async freshQuotaForClear(session: SessionRecord): Promise<QuotaSourceResult | null> {
+    // Host credentials do not describe a managed session's proxy account; clear needs --force.
+    if (session.auth) return null;
+    return readFreshSessionQuota(this.usageReportDeps(), session);
+  }
+
+  private usageReportDeps(): UsageReportDeps {
     const nowMs = Date.now();
     const todayStart = new Date(nowMs);
     todayStart.setHours(0, 0, 0, 0);
-    return readFreshSessionQuota(
-      {
-        fetch: globalThis.fetch,
-        homeDir: homedir(),
-        dataDir: this.config.dataDir,
-        nowMs,
-        todayStartMs: todayStart.getTime(),
-      },
-      session,
-    );
+    return {
+      fetch: globalThis.fetch,
+      homeDir: homedir(),
+      dataDir: this.config.dataDir,
+      nowMs,
+      todayStartMs: todayStart.getTime(),
+    };
   }
 
   async clearRateLimit(
@@ -7274,7 +7525,9 @@ export class SessionService {
         current.agentLaunchId !== initial.agentLaunchId ||
         current.agentSessionId !== initial.agentSessionId ||
         (current.agent === "claude" &&
-          (current.claudeAccountId ?? "default") !== (initial.claudeAccountId ?? "default"))
+          (current.claudeAccountId ?? "default") !== (initial.claudeAccountId ?? "default")) ||
+        (current.auth?.accountId ?? null) !== (initial.auth?.accountId ?? null) ||
+        (current.auth?.effectiveAccountId ?? null) !== (initial.auth?.effectiveAccountId ?? null)
       )
         throw new RateLimitClearError(`Session/account changed; retry clear`);
       let release!: () => void;
@@ -7381,6 +7634,242 @@ export class SessionService {
       sessionId: session.id,
       restrictWrites: resolveRestrictWrites(session),
     });
+  }
+
+  async recoverManagedAuthorization(): Promise<void> {
+    await this.authTerminals.sweep(this.authAccounts.read().accounts.map((account) => account.id));
+    await this.authProxy.recover();
+  }
+
+  private readAuthorizationState(): Promise<AuthProxyState> {
+    if (!this.authSnapshot || Date.now() - this.authSnapshot.at >= 500) {
+      const snapshot = { at: Date.now(), run: this.authProxy.getState() };
+      this.authSnapshot = snapshot;
+      void snapshot.run.then(
+        (state) => {
+          // Best effort: a failed identity write must not fail the state read.
+          try {
+            this.authAccounts.recordIdentities(state.accounts);
+          } catch {
+            // The next snapshot retries.
+          }
+        },
+        () => {
+          if (this.authSnapshot === snapshot) this.authSnapshot = undefined;
+        },
+      );
+    }
+    return this.authSnapshot.run;
+  }
+
+  private async prepareSessionAuthorization(
+    sessionId: string,
+    agent: AgentName,
+    project: ProjectConfig,
+    accountId: string | null | undefined,
+    managedBinding: boolean,
+  ): Promise<AuthRegistration | undefined> {
+    if (agent !== "claude" && agent !== "codex") {
+      if (accountId !== undefined && accountId !== null) {
+        throw new AuthorizationError(`Saved authorization is not supported for ${agent}`, 400);
+      }
+      return undefined;
+    }
+    const state = this.authAccounts.read();
+    if (!state.pools[agent] && (accountId === null || accountId === undefined)) return undefined;
+    if (
+      agent === "codex" &&
+      (codexArgsSelectProvider(project.codexArgs ?? []) ||
+        codexUsesCustomProvider(await readCodexUserConfig()))
+    ) {
+      if (accountId !== null && accountId !== undefined) {
+        throw new AuthorizationError(
+          "Saved authorization conflicts with the explicit Codex provider",
+          400,
+        );
+      }
+      return undefined;
+    }
+    if (accountId !== null && accountId !== undefined) {
+      const account = state.accounts.find((entry) => entry.id === accountId);
+      if (!account || account.provider !== agent) {
+        throw new AuthorizationError(`Unknown ${agent} authorization account: ${accountId}`, 400);
+      }
+    } else if (!managedBinding && !(await this.hasReadyAuthorizationAccount(sessionId, agent))) {
+      // No ready managed account: launch with host authorization, as before managed pools.
+      return undefined;
+    }
+    return this.authProxy.registerSession({
+      sessionId,
+      provider: agent,
+      accountId: accountId ?? null,
+    });
+  }
+
+  /** Revokes the routing key and drops host config copies from the session's managed home. */
+  private async revokeManagedAuthorization(sessionId: string): Promise<void> {
+    await this.authProxy.revokeSession(sessionId);
+    scrubManagedClaudeHome(slotToolDir(this.config.dataDir, sessionId));
+  }
+
+  /**
+   * Claim for the one continue ping owed to a session that was rate limited when its effective
+   * account changed. Undefined: nothing owed (no change, not limited, or this key already claimed).
+   * Written with the auth change, so the claim exists before any send and survives a restart.
+   */
+  private authChangePingClaim(
+    current: SessionRecord,
+    next: NonNullable<SessionRecord["auth"]>,
+  ): SessionRecord["authChangePing"] | undefined {
+    if (
+      current.status !== "running" ||
+      !current.auth ||
+      current.auth.effectiveAccountId === next.effectiveAccountId ||
+      !this.isLiveStateRateLimited(current)
+    )
+      return undefined;
+    const key = `${next.generation}:${next.effectiveAccountId}`;
+    return current.authChangePing?.key === key ? undefined : { key, attempts: 0, pinged: false };
+  }
+
+  /**
+   * Under the lifecycle lock: applies `update` to the unsent claim for `key` on a running session.
+   * Returns false, writing nothing, when the claim is gone or sent, the session is not running,
+   * or `update` returns null.
+   */
+  private async updateAuthChangePing(
+    sessionId: string,
+    key: string,
+    update: (
+      claim: NonNullable<SessionRecord["authChangePing"]>,
+    ) => SessionRecord["authChangePing"] | null,
+  ): Promise<boolean> {
+    return this.withSessionLifecycleLock(sessionId, async () => {
+      const current = readSession(this.config.dataDir, sessionId);
+      const claim = current?.authChangePing;
+      if (!current || current.status !== "running" || claim?.key !== key || claim.pinged)
+        return false;
+      const next = update(claim);
+      if (!next) return false;
+      writeSession(this.config.dataDir, { ...current, authChangePing: next });
+      return true;
+    });
+  }
+
+  /**
+   * Sends the one continue ping for a claimed account change, at most AUTH_CHANGE_PING_MAX_ATTEMPTS
+   * tries. Sends only when the forced rate-limit clear succeeds and leaves the agent waiting at its
+   * prompt; any clear error or other state spends the claim without a send.
+   */
+  private async sendAuthChangePing(sessionId: string, key: string): Promise<void> {
+    const spend = () =>
+      this.updateAuthChangePing(sessionId, key, (claim) => ({
+        ...claim,
+        attempts: AUTH_CHANGE_PING_MAX_ATTEMPTS,
+      }));
+    for (let attempt = 0; attempt < AUTH_CHANGE_PING_MAX_ATTEMPTS; attempt += 1) {
+      const counted = await this.updateAuthChangePing(sessionId, key, (claim) =>
+        claim.attempts >= AUTH_CHANGE_PING_MAX_ATTEMPTS
+          ? null
+          : { ...claim, attempts: claim.attempts + 1 },
+      );
+      if (!counted) return;
+      try {
+        const cleared = await this.clearRateLimit(sessionId, true, "auth-change").catch(
+          (error: unknown) => {
+            if (error instanceof RateLimitClearError) return null;
+            throw error;
+          },
+        );
+        if (cleared?.state !== "waiting") {
+          await spend();
+          return;
+        }
+        // Re-checked under the lock: a session paused or stopped during the clear is never sent to.
+        if (!(await this.updateAuthChangePing(sessionId, key, (claim) => claim))) return;
+        await this.send(sessionId, { message: AUTH_CHANGE_PING_MESSAGE });
+        await this.updateAuthChangePing(sessionId, key, (claim) => ({ ...claim, pinged: true }));
+        return;
+      } catch (error) {
+        this.logEvent("session.auth.ping_failed", {
+          level: "warn",
+          sessionId,
+          message: "Could not send the continue ping after the account change",
+          details: { error: error instanceof Error ? error.message : String(error), attempt },
+        });
+      }
+    }
+  }
+
+  /** Persists a companion-reported effective-account change and logs it once. */
+  private async recordAuthRotation(rotation: AuthRotation): Promise<void> {
+    this.authSnapshot = undefined;
+    const matches = (
+      record: SessionRecord | null | undefined,
+    ): record is SessionRecord & { auth: NonNullable<SessionRecord["auth"]> } =>
+      record?.auth?.generation === rotation.generation &&
+      record.auth.effectiveAccountId !== rotation.toAccountId;
+    if (!matches(readSession(this.config.dataDir, rotation.sessionId))) return;
+    let pingKey: string | undefined;
+    try {
+      const project = await this.withSessionLifecycleLock(rotation.sessionId, async () => {
+        const current = readSession(this.config.dataDir, rotation.sessionId);
+        if (!matches(current)) return null;
+        const auth = { ...current.auth, effectiveAccountId: rotation.toAccountId };
+        const authChangePing = this.authChangePingClaim(current, auth);
+        writeSession(this.config.dataDir, {
+          ...current,
+          auth,
+          ...(authChangePing ? { authChangePing } : {}),
+          updatedAt: nowIso(),
+        });
+        this.stateCache.delete(rotation.sessionId);
+        if (authChangePing) pingKey = authChangePing.key;
+        return current.project;
+      });
+      if (project === null) return;
+      if (pingKey) void this.sendAuthChangePing(rotation.sessionId, pingKey);
+      this.logEvent("session.auth.rotated", {
+        level: "info",
+        sessionId: rotation.sessionId,
+        projectId: project,
+        message: `Switched ${rotation.provider} authorization to another account`,
+        details: {
+          fromAccountId: rotation.fromAccountId,
+          toAccountId: rotation.toAccountId,
+          generation: rotation.generation,
+        },
+      });
+    } catch (error) {
+      this.logEvent("session.auth.rotated", {
+        level: "warn",
+        sessionId: rotation.sessionId,
+        message: "Could not record authorization account change",
+        details: { error: error instanceof Error ? error.message : String(error) },
+      });
+    }
+  }
+
+  private async hasReadyAuthorizationAccount(
+    sessionId: string,
+    provider: AuthProvider,
+  ): Promise<boolean> {
+    if (!this.authAccounts.read().accounts.some((account) => account.provider === provider)) {
+      return false;
+    }
+    try {
+      return (await this.readAuthorizationState()).accounts.some(
+        (account) => account.provider === provider && account.status === "ready",
+      );
+    } catch (error) {
+      this.logEvent("session.auth.direct", {
+        level: "warn",
+        sessionId,
+        message: `Managed ${provider} authorization unavailable; launching with host authorization`,
+        details: { error: error instanceof Error ? error.message : String(error) },
+      });
+      return false;
+    }
   }
 
   private resolveClaudeAuthPlanOptions(
@@ -8037,7 +8526,7 @@ export class SessionService {
       // risk of being evicted on this same pass.
       const liveIds = new Set(liveSessions.map((session) => session.id));
       this.pruneSessionScopedState(liveIds);
-      const claudeAccounts = this.computeClaudeAccountsView();
+      const claudeAccounts = await this.computeClaudeAccountsView();
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         if (this.isDeliveryStopped()) return;
@@ -8063,7 +8552,7 @@ export class SessionService {
             }
             continue;
           }
-          await this.checkPrForSession(session, view.state);
+          await this.checkPrForSession(session, classified.state);
           if (this.isDeliveryStopped()) return;
           if (detectionOnlyError) {
             const previousAttention = this.attentionStates.get(view.id);
@@ -8095,7 +8584,7 @@ export class SessionService {
             shouldParkForStale(
               {
                 status: view.status,
-                state: view.state,
+                state: classified.state,
                 lastActivityAt: parkActivityAt.toISOString(),
               },
               this.resolveStaleAfterMs(session),
@@ -8307,11 +8796,6 @@ export class SessionService {
     for (const sessionId of this.usageMenuConfirmedAt.keys()) {
       if (!liveIds.has(sessionId)) {
         this.usageMenuConfirmedAt.delete(sessionId);
-      }
-    }
-    for (const sessionId of this.claudeRotationEpisode.keys()) {
-      if (!liveIds.has(sessionId)) {
-        this.claudeRotationEpisode.delete(sessionId);
       }
     }
     for (const sessionId of this.queuedMessageDeliveryLastFailure.keys()) {
@@ -8801,6 +9285,7 @@ export class SessionService {
       void this.runSessionGcSweep();
       void this.runDiskBudgetSweep();
       this.runArtifactRetentionSweep();
+      this.runCloseoutRetentionSweep();
       void this.runTelegramTopicGcSweep();
     }, SESSION_GC_TICK_MS);
     this.sessionGcTimer.unref();
@@ -12373,8 +12858,8 @@ export class SessionService {
     }
     const sessions = allSessions.filter(included);
     // Compute the claude accounts snapshot once for the whole batch instead of
-    // per-session inside enrich (N listAccounts reads + N×M existsSync).
-    const claudeAccounts = this.computeClaudeAccountsView();
+    // per-session inside enrich.
+    const claudeAccounts = await this.computeClaudeAccountsView();
     const rows = await Promise.all(
       sessions.map(async (session) => {
         const receipt = this.lifecycle.snapshot(session.id);
@@ -12438,7 +12923,7 @@ export class SessionService {
   ): Promise<void> {
     assertCurrent();
     binding.store.flushPending();
-    const accounts = this.computeClaudeAccountsView();
+    const accounts = await this.computeClaudeAccountsView();
     const seen = new Set<string>();
     const rows: {
       view: Omit<SessionListItemView, "lifecycle">;
@@ -14030,45 +14515,69 @@ export class SessionService {
     return carried;
   }
 
-  private assertSpawnAccountReady(accountId?: string): void {
-    if (!accountId) return;
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account || !isAccountReady(account)) {
-      throw new Error(
-        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
-      );
-    }
-  }
-
   async spawn(request: SpawnSessionRequest, options?: SessionSpawnOptions): Promise<SessionView> {
     if (options?.triggerBirthKey) {
       const key = options.triggerBirthKey;
-      const existing = this.getTriggerBirth(request.project, key, request);
-      if (existing) {
-        return this.get(existing.id);
-      }
-      const pending = this.triggerBirthsInFlight.get(key);
-      if (pending) {
-        if (!isDeepStrictEqual(pending.request, request)) {
-          throw new Error("Trigger birth key already belongs to a different spawn request");
-        }
-        return pending.result;
-      }
-      const original = structuredClone(request);
-      // Defer execution until the identity is registered, before the first await.
-      const result = Promise.resolve().then(() =>
-        this.spawnOnce(original, { ...options, triggerBirthKey: key }),
+      const { session } = await this.spawnWithBirthKey(key, request, () =>
+        this.spawnOnce(structuredClone(request), { ...options, triggerBirthKey: key }),
       );
-      this.triggerBirthsInFlight.set(key, { request: original, result });
-      try {
-        return await result;
-      } finally {
-        if (this.triggerBirthsInFlight.get(key)?.result === result) {
-          this.triggerBirthsInFlight.delete(key);
-        }
-      }
+      return session;
     }
     return this.spawnOnce(request, options);
+  }
+
+  // HTTP entry: an idempotencyKey makes the spawn replayable under the "api:" birth namespace.
+  async spawnFromRequest(
+    request: SpawnSessionRequest,
+    delivery: "foreground" | "background",
+  ): Promise<SpawnSessionResponse> {
+    const { idempotencyKey, ...rest } = request;
+    if (idempotencyKey === undefined) {
+      return delivery === "foreground"
+        ? this.spawn(rest, { acceptQueued: true })
+        : this.spawnInBackground(rest);
+    }
+    const triggerBirthKey = `api:${parseIdempotencyKey(idempotencyKey)}`;
+    const { session, replayed } = await this.spawnWithBirthKey(
+      triggerBirthKey,
+      rest,
+      (fingerprint) =>
+        delivery === "foreground"
+          ? this.spawnOnce(rest, { acceptQueued: true, triggerBirthKey })
+          : this.acceptBackgroundSpawn(rest, {
+              triggerBirthKey,
+              triggerBirthRequest: fingerprint,
+            }).then(({ session: accepted }) => accepted),
+    );
+    return replayed ? { ...session, replayed: true } : session;
+  }
+
+  // The only spawn dedup decision: in-flight join first (the keyed placeholder is written before
+  // launch, so a record alone does not mean the launch succeeded), then record lookup.
+  private async spawnWithBirthKey(
+    key: string,
+    request: SpawnSessionRequest,
+    run: (fingerprint: SpawnSessionRequest) => Promise<SessionView>,
+  ): Promise<{ session: SessionView; replayed: boolean }> {
+    const fingerprint = birthFingerprint(request);
+    const pending = this.triggerBirthsInFlight.get(key);
+    if (pending) {
+      const joined = await joinInFlight(pending, fingerprint);
+      return joined
+        ? { session: joined.value, replayed: true }
+        : this.spawnWithBirthKey(key, request, run);
+    }
+    const existing = this.getTriggerBirth(request.project, key, request);
+    if (existing) {
+      return { session: await this.get(existing.id), replayed: true };
+    }
+    const session = await runInFlight(
+      this.triggerBirthsInFlight,
+      key,
+      { request: fingerprint },
+      () => run(fingerprint),
+    );
+    return { session, replayed: false };
   }
 
   getTriggerBirth(
@@ -14080,10 +14589,20 @@ export class SessionService {
       (session) => session.triggerBirthKey === key,
     );
     if (existing && existing.project !== projectId) {
-      throw new Error("Trigger birth key already belongs to a different project");
+      throw new IdempotencyKeyConflictError(
+        "Trigger birth key already belongs to a different project",
+        existing.id,
+      );
     }
-    if (existing && request && !isDeepStrictEqual(existing.triggerBirthRequest, request)) {
-      throw new Error("Trigger birth key already belongs to a different spawn request");
+    if (
+      existing &&
+      request &&
+      !isDeepStrictEqual(existing.triggerBirthRequest, birthFingerprint(request))
+    ) {
+      throw new IdempotencyKeyConflictError(
+        "Trigger birth key already belongs to a different spawn request",
+        existing.id,
+      );
     }
     return existing;
   }
@@ -14092,7 +14611,7 @@ export class SessionService {
     request: SpawnSessionRequest,
     options?: SessionSpawnOptions,
   ): Promise<SessionView> {
-    const triggerBirthRequest = options?.triggerBirthKey ? structuredClone(request) : undefined;
+    const triggerBirthRequest = options?.triggerBirthKey ? birthFingerprint(request) : undefined;
     request = normalizeShepherdSpawnRequest(request);
     let admissionReservation = options?.admissionReservation;
     let admissionReserved = admissionReservation !== undefined;
@@ -14109,7 +14628,10 @@ export class SessionService {
     let prAlertReservation: string | undefined;
     let prAlertLaunchStarted = false;
     let prAlertBirthConfirmed = false;
+    let inheritedWritten = false;
     let launchedRecord: SessionRecord | undefined;
+    let authRegistration: AuthRegistration | undefined;
+    let authorizationRollbackWarning: string | undefined;
     let launchCandidate: SessionRecord | undefined;
     let resolvedModel: string | undefined;
     let launchSelection: AgentLaunchSelection;
@@ -14159,7 +14681,6 @@ export class SessionService {
           this.config.models.codexHome,
         ));
       resolvedModel = launchSelection.model;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       if (request.branch && !reuseCtx) {
         await resolveSpawnBranch({
           repoPath: project.path,
@@ -14240,10 +14761,20 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      authRegistration = await this.prepareSessionAuthorization(
+        sessionId,
+        agent,
+        project,
+        requestedAuthAccount(request, agent),
+        false,
+      );
       preflightTokenUsage = preflightBatchId
         ? await this.preflightUsageStore.claim(preflightBatchId, request.project, sessionId)
         : aggregatePreflightAttempts([]);
       this.spawnsInFlight.add(sessionId);
+      if (options?.replacingSessionId) {
+        this.handoffSuccessors.set(sessionId, options.replacingSessionId);
+      }
       if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -14346,6 +14877,7 @@ export class SessionService {
         ...(restrictWrites ? { restrictWrites: true } : {}),
         closeoutOwner,
         ...(options?.prAlertOwnerTransfer ? { prAlertTransfer: options.prAlertOwnerTransfer } : {}),
+        ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
@@ -14380,6 +14912,10 @@ export class SessionService {
       );
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
+      if (options?.inheritedTodo?.length) {
+        inheritedWritten = true;
+        inheritTodo(this.config.dataDir, placeholder, options.inheritedTodo);
+      }
       // Before the launch prompt exists: an agent that replies ahead of the
       // source's own bind step must answer the chat that asked for it.
       if (options?.telegramOrigin) {
@@ -14513,6 +15049,7 @@ export class SessionService {
         sessionToolDir,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
+        ...(authRegistration ? { managedAuth: true } : {}),
         ...launchSelection,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
@@ -14534,14 +15071,14 @@ export class SessionService {
       // sharing one worktree bind to their own transcript instead of guessing
       // by newest mtime.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchOptions = {
         ...planOptions,
-        ...this.resolveClaudeAuthPlanOptions({
-          id: sessionId,
-          agent,
-          ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
-        }),
+        ...managedAuthLaunch(
+          authRegistration,
+          sessionToolDir,
+          planOptions.codexArgs,
+          workspacePath,
+        ),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -14570,7 +15107,6 @@ export class SessionService {
         launchCommand: launchPlan.launchCommand,
         agentLaunchId,
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
-        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         status: "running",
         updatedAt: nowIso(),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -14594,7 +15130,10 @@ export class SessionService {
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
         agentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        extraEnv: {
+          ...sessionAgentConfig.env,
+          ...managedAuthLaunch(authRegistration, sessionToolDir).env,
+        },
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -14610,6 +15149,10 @@ export class SessionService {
         );
         launchCandidate = runningRecord;
         prAlertLaunchStarted = true;
+        // The prompt leaves with the process start when it rides the launch command, so the
+        // launch evidence (`agentLaunchId`, read by handoff recovery) must be durable first.
+        if (promptDeliveredOnLaunch)
+          this.writeSpawnRecord({ ...runningRecord, status: "spawning" });
         await createTmuxSession({
           sessionName: tmuxSession,
           cwd: workspacePath,
@@ -14626,6 +15169,8 @@ export class SessionService {
           runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
         }
         launchedRecord = runningRecord;
+        // This write persists `agentLaunchId` before the launch prompt is sent: handoff recovery
+        // reads it as the evidence that the successor began its launch and owns its ToDo copies.
         this.writeSpawnRecord({ ...runningRecord, status: "spawning" });
         this.logEvent("session.spawn.tmux_created", {
           level: "info",
@@ -14783,6 +15328,46 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
+      if (authRegistration && sessionId && agent && !placeholderState.written) {
+        authorizationRollbackWarning =
+          "Saved authorization retained: process exit or revocation could not be confirmed";
+        try {
+          const processes = await findForeignAgentProcessesForSession({
+            sessionId,
+            processMatchers: sessionProcessMatchers({ agent, launchCommand: "" }),
+            excludePanePids: [],
+          });
+          if (processes.status === "ok" && processes.pids.length === 0) {
+            await this.revokeManagedAuthorization(sessionId);
+            authorizationRollbackWarning = undefined;
+          }
+        } catch {
+          // Preserve the registration when cleanup cannot confirm ownership or revoke it.
+        }
+      }
+      // Handoff copies must not outlive a failed successor: the source keeps the open items.
+      const inheritedItems = options?.inheritedTodo;
+      const failedLifecycleIds = (failedId: string): string[] =>
+        this.lifecycleIdsFor({
+          id: failedId,
+          workspaceId: reuseCtx?.workspaceId ?? failedId,
+          ...(options?.prAlertOwnerTransfer
+            ? { prAlertTransfer: options.prAlertOwnerTransfer }
+            : {}),
+        });
+      let rolledBack = false;
+      const rollbackInherited = (failedId: string, failedProject: string): void => {
+        if (!inheritedWritten || rolledBack || !inheritedItems) return;
+        rolledBack = true;
+        this.rollbackInheritedTodoLocked({ id: failedId, project: failedProject }, inheritedItems);
+      };
+      const rollbackInheritedLocking = async (): Promise<void> => {
+        if (!inheritedWritten || !sessionId) return;
+        const failedId = sessionId;
+        await this.withSessionLifecycleLocks(failedLifecycleIds(failedId), async () =>
+          rollbackInherited(failedId, request.project),
+        );
+      };
       if (error instanceof SpawnAdmissionCancelledError) throw error;
       const failureReceipt = options?.receiptToken
         ? this.foregroundSpawnReceipts.get(options.receiptToken)
@@ -14801,7 +15386,10 @@ export class SessionService {
       }
       if (launchedRecord && !failureReceipt && !(sessionId && this.spawnWasKilled(sessionId))) {
         const retained = await this.retainLaunchedError(launchedRecord, error);
-        if (!isTerminalSessionStatus(retained.status)) throw error;
+        if (!isTerminalSessionStatus(retained.status)) {
+          await rollbackInheritedLocking();
+          throw error;
+        }
       }
       if (sessionId && project && placeholderState.written && agent) {
         const failedSessionId = sessionId;
@@ -14829,6 +15417,7 @@ export class SessionService {
             },
             { failOnSurvivors: false },
           );
+          rollbackInherited(sessionId, request.project);
           await this.terminateDetachedSessionProcesses({ id: sessionId });
           // Non-mcp project sidecars are desk-shared: a sibling can already be
           // attached to this still-spawning anchor (or, for a failing sibling,
@@ -14876,6 +15465,13 @@ export class SessionService {
           const erroredRecord: SessionRecord = {
             id: sessionId,
             project: request.project,
+            ...(authRegistration
+              ? {
+                  auth:
+                    readSession(this.config.dataDir, sessionId)?.auth ??
+                    publicAuthSession(authRegistration),
+                }
+              : {}),
             ...(closeoutTakenFrom ? { closeoutOwner: true } : {}),
             ...(options?.prAlertOwnerTransfer
               ? { prAlertTransfer: options.prAlertOwnerTransfer }
@@ -14952,6 +15548,7 @@ export class SessionService {
                   workspaceIdOf(latest) !== failureReceipt.workspaceId ||
                   !(await this.paneGenerationMatches(latest, failureReceipt.generation))
                 ) {
+                  rollbackInherited(failureReceipt.sessionId, request.project);
                   const message = error instanceof Error ? error.message : String(error);
                   throw new Error(
                     `Failed to spawn ${sessionId}: ${message}; successor generation changed before cleanup`,
@@ -14964,13 +15561,7 @@ export class SessionService {
           );
         }
         return await this.withSessionLifecycleLocks(
-          this.lifecycleIdsFor({
-            id: sessionId,
-            workspaceId: reuseCtx?.workspaceId ?? sessionId,
-            ...(options?.prAlertOwnerTransfer
-              ? { prAlertTransfer: options.prAlertOwnerTransfer }
-              : {}),
-          }),
+          failedLifecycleIds(sessionId),
           cleanupFailedSpawn,
         );
       }
@@ -14994,6 +15585,7 @@ export class SessionService {
         details: {
           stage,
           requestedAgent: request.agent ?? null,
+          ...(authorizationRollbackWarning ? { authorizationRollbackWarning } : {}),
         },
       });
       throw error;
@@ -15193,7 +15785,13 @@ export class SessionService {
         id: classified.session.id,
         agent: classified.session.agent,
         status: classified.session.status,
-        state: this.stabilizeState(classified.session.id, classified.state),
+        state: projectTaskStatus(
+          classified.session,
+          classified.state,
+          this.stabilizeState(classified.session.id, classified.state),
+          classified.runtime.runtimeAlive,
+          classified.workspacePresent,
+        ),
         runtimeAlive: classified.runtime.runtimeAlive,
       });
     }
@@ -15658,6 +16256,7 @@ export class SessionService {
     let selfDestruct: SelfDestructConfig | undefined;
     let resolvedModel: string | undefined;
     let launchSelection: AgentLaunchSelection;
+    let authRegistration: AuthRegistration | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -15691,7 +16290,6 @@ export class SessionService {
           this.config.models.codexHome,
         ));
       resolvedModel = launchSelection.model;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       if (worktree && request.branch && !reuseCtx) {
         await resolveSpawnBranch({
           repoPath: project.path,
@@ -15708,6 +16306,13 @@ export class SessionService {
         project.sessionPrefix,
       );
       this.spawnsPreparing.add(sessionId);
+      authRegistration = await this.prepareSessionAuthorization(
+        sessionId,
+        agent,
+        project,
+        requestedAuthAccount(request, agent),
+        false,
+      );
       const preflightBatchId = await this.preflightUsageStore.resolve(
         request.project,
         request.preflightBatchId,
@@ -15757,7 +16362,6 @@ export class SessionService {
           : {}),
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
-        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(request.reasoningEffort !== undefined
           ? { reasoningEffort: request.reasoningEffort }
@@ -15773,6 +16377,7 @@ export class SessionService {
         ...(placeholderBranchSource ? { branchSource: placeholderBranchSource } : {}),
         worktree,
         worktreePath: placeholderWorktreePath,
+        ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
         tmuxSession: sessionId,
         launchCommand: "",
         status: "spawning",
@@ -15926,6 +16531,9 @@ export class SessionService {
           project: request.project,
           ...(options.prAlertOwnerTransfer
             ? { prAlertTransfer: options.prAlertOwnerTransfer }
+            : {}),
+          ...(options.triggerBirthKey && triggerBirthRequest
+            ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
             : {}),
           workspaceId: erroredWorkspaceId,
           agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
@@ -16250,12 +16858,28 @@ export class SessionService {
         { ...spawnPlaceholder, worktreePath: workspacePath },
         project,
       );
+      const authRegistration = await this.prepareSessionAuthorization(
+        sessionId,
+        agent,
+        project,
+        prepared.placeholder.auth
+          ? prepared.placeholder.auth.accountId
+          : requestedAuthAccount(request, agent),
+        prepared.placeholder.auth !== undefined,
+      );
+      const managedLaunch = managedAuthLaunch(
+        authRegistration,
+        sessionToolDir,
+        project.codexArgs,
+        workspacePath,
+      );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
         sessionId,
         worktreePath: workspacePath,
         sessionToolDir,
+        ...(authRegistration ? { managedAuth: true } : {}),
         ...prepared.launchSelection,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
@@ -16269,7 +16893,6 @@ export class SessionService {
       });
       // Fresh native identity per attempt avoids reusing an existing transcript.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(
           withProjectAgentOptions(project, {
@@ -16279,7 +16902,7 @@ export class SessionService {
           }),
           { planMode, restrictWrites },
         ),
-        ...this.resolveClaudeAuthPlanOptions(prepared.placeholder),
+        ...managedLaunch,
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -16300,6 +16923,7 @@ export class SessionService {
       const agentLaunchId = newAgentLaunchId();
       let runningRecord: SessionRecord = {
         ...sessionForMcp,
+        ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
         planMode,
         restrictWrites,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -16328,7 +16952,9 @@ export class SessionService {
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
         agentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        ...(sessionAgentConfig.env || managedLaunch.env
+          ? { extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env } }
+          : {}),
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -16844,8 +17470,10 @@ export class SessionService {
     }
   }
 
-  private protectDurableSpawns(): void {
-    for (const record of listSessions(this.config.dataDir).sort((a, b) =>
+  private protectDurableSpawns(
+    sessions: readonly SessionRecord[] = listSessions(this.config.dataDir),
+  ): void {
+    for (const record of [...sessions].sort((a, b) =>
       (a.spawnReceipt?.acceptedAt ?? a.createdAt).localeCompare(
         b.spawnReceipt?.acceptedAt ?? b.createdAt,
       ),
@@ -16886,7 +17514,6 @@ export class SessionService {
         assertPrAlertRoutes(project, record.allowedTriggers);
       this.claimPrAlertsLocked(record, "resume");
     }
-    this.assertSpawnAccountReady(record.claudeAccountId);
     const startupAttachments = intent.startupAttachments.map(({ id, name }) => {
       const artifact = readSessionArtifact(this.config.dataDir, workspaceIdOf(record), id);
       if (!artifact) throw new Error(`Missing startup artifact ${id} for ${record.id}`);
@@ -18648,7 +19275,16 @@ export class SessionService {
       return record;
     }
     const record = withQueuedMessages(
-      { ...acceptedBase, updatedAt: nowIso() },
+      {
+        ...clearTaskStatus(
+          {
+            ...acceptedBase,
+            taskStatusRevision: latest.taskStatusRevision ?? 0,
+          },
+          true,
+        ),
+        updatedAt: nowIso(),
+      },
       [...latestQueued, message],
       awaitingPrompt,
     );
@@ -19400,6 +20036,13 @@ export class SessionService {
             (await this.paneGenerationMatches(current, prepared.generation)),
           );
         });
+      let taskRevisionRetired = false;
+      const retireTaskRevision = (current: SessionRecord): void => {
+        if (taskRevisionRetired) return;
+        writeSession(this.config.dataDir, clearTaskStatus(current, true));
+        this.dashboardCache.delete(sessionId);
+        taskRevisionRetired = true;
+      };
       const authorizeGenerationResend = (send: () => Promise<void>) =>
         this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           const current = readSession(this.config.dataDir, sessionId);
@@ -19411,6 +20054,7 @@ export class SessionService {
             return false;
           }
           if (options?.allowDelivery?.() === false) return false;
+          retireTaskRevision(current);
           options?.observeDelivery?.("input-started");
           await send();
           return true;
@@ -19475,6 +20119,7 @@ export class SessionService {
                 return false;
               }
               if (options?.allowDelivery?.() === false) return false;
+              retireTaskRevision(current);
               options?.observeDelivery?.("input-started");
               await send();
               return true;
@@ -19603,7 +20248,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const latest = readSession(this.config.dataDir, readySession.id) ?? readySession;
     const record = withQueuedMessages(
-      { ...readySession, status: "running", updatedAt: nowIso() },
+      { ...clearTaskStatus(latest, true), status: "running", updatedAt: nowIso() },
       [message, ...removeFirstOccurrence(queuedMessages(latest), message)],
       true,
     );
@@ -20474,19 +21119,278 @@ export class SessionService {
     sessionId: string,
     request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean; todoActor?: TodoActor },
-  ): Promise<SessionView> {
-    return this.runLifecycle("complete", [sessionId], request.operationId, () =>
-      this.withWorkspaceLifecycleLocks(sessionId, () =>
-        this.applyManualStatusLocked(sessionId, "completed", request, options),
+  ): Promise<CompleteSessionResult> {
+    const report: CloseoutReport = { unverified: 0 };
+    const view = await this.runLifecycle("complete", [sessionId], request.operationId, () =>
+      this.withCloseoutHeads([sessionId], (heads) =>
+        this.withWorkspaceLifecycleLocks(sessionId, () =>
+          this.applyManualStatusLocked(sessionId, "completed", request, {
+            ...options,
+            closeoutHeadSha: heads.get(sessionId) ?? null,
+            closeoutReport: report,
+          }),
+        ),
       ),
     );
+    return report.unverified > 0 ? { ...view, closeout: { unverified: report.unverified } } : view;
   }
 
   async readTodo(sessionId: string): Promise<TodoProjection> {
+    if (
+      !readSession(this.config.dataDir, sessionId) &&
+      readArchivedSession(this.config.dataDir, sessionId)
+    ) {
+      const archived = readTodoIfPresent(this.config.dataDir, sessionId);
+      if (!archived) {
+        throw new SessionResourceNotFoundError(`Session ${sessionId} has no ToDo ledger`);
+      }
+      return archived;
+    }
     return this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       return ensureTodoLedger(this.config.dataDir, session);
+    });
+  }
+
+  // Own worktree only: a worktree:false record points at the shared main checkout. Read outside
+  // the lifecycle lock, like writeSnapshot: git timeouts must not block complete. Runs `run`
+  // without a yield when no head needs reading, so callers keep their synchronous lock order.
+  private withCloseoutHeads<T>(
+    sessionIds: readonly string[],
+    run: (heads: ReadonlyMap<string, string | null>) => Promise<T>,
+  ): Promise<T> {
+    const heads = new Map<string, string | null>();
+    const reads: Promise<void>[] = [];
+    for (const id of sessionIds) {
+      heads.set(id, null);
+      const session = readSession(this.config.dataDir, id);
+      if (
+        session &&
+        this.closeoutOwnWorktree(session) &&
+        this.closeoutSettingsFor(session).enabled
+      ) {
+        reads.push(
+          readWorktreeHead(session.worktreePath).then((head) => {
+            heads.set(id, head.headSha);
+          }),
+        );
+      }
+    }
+    return reads.length === 0 ? run(heads) : Promise.all(reads).then(() => run(heads));
+  }
+
+  private closeoutSettingsFor(session: SessionRecord): ReturnType<typeof closeoutSettings> {
+    return closeoutSettings(this.resolveProjectForSession(session));
+  }
+
+  private closeoutOwnWorktree(session: SessionRecord): boolean {
+    return session.worktree && session.worktreePath.trim().length > 0;
+  }
+
+  // Never throws: complete must not fail or change result because the archive failed. Sync on
+  // purpose: one yield here delays complete's record write, so a queued durable spawn registers its
+  // admission waiter first and nothing drains it (only the 1s shed tick and spawns do).
+  private archiveCloseout(
+    session: SessionRecord,
+    links: SessionLink[],
+    headSha: string | null | undefined,
+  ): number {
+    try {
+      const settings = this.closeoutSettingsFor(session);
+      if (!settings.enabled) return 0;
+      const artifacts = sessionArtifactsDir(this.config.dataDir, workspaceIdOf(session));
+      const manifest = writeCloseoutArchive({
+        sessionDir: join(this.config.dataDir, "sessions", session.id),
+        sessionId: session.id,
+        project: session.project,
+        completedAt: nowIso(),
+        links,
+        snapshotVersion:
+          readSnapshotVersion(this.config.dataDir, session, "latest", "live")?.version ?? null,
+        headSha: headSha ?? null,
+        roots: {
+          artifacts,
+          work: join(artifacts, SESSION_WORK_DIR),
+          workspace: this.closeoutOwnWorktree(session) ? session.worktreePath : null,
+        },
+        include: settings.include,
+        maxBytes: settings.maxBytes,
+      });
+      if (manifest.error) this.logCloseoutArchiveFailure(session, manifest.error);
+      const unverified = manifest.skipped.filter((file) => file.reason === "unverified").length;
+      if (unverified > 0) {
+        this.logEvent("session.closeout_archive.unverified", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Closeout archive for ${session.id} listed ${unverified} unverified file(s)`,
+          details: { count: unverified },
+        });
+      }
+      return unverified;
+    } catch (error) {
+      this.logCloseoutArchiveFailure(
+        session,
+        error instanceof Error ? error.message : String(error),
+      );
+      return 0;
+    }
+  }
+
+  private logCloseoutArchiveFailure(session: SessionRecord, error: string): void {
+    this.logEvent("session.closeout_archive.failed", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Closeout archive failed for ${session.id}: ${error}`,
+      details: { error },
+    });
+  }
+
+  readCloseout(sessionId: string, version?: number): CloseoutManifestView {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    const manifest = readCloseoutManifest(
+      closeoutDirAt(this.config.dataDir, session, location),
+      sessionId,
+      version,
+    );
+    if (!manifest) {
+      throw new SessionResourceNotFoundError(
+        version === undefined
+          ? `Session ${sessionId} has no closeout archive`
+          : `Closeout version ${version} not found for session ${sessionId}`,
+      );
+    }
+    return manifest;
+  }
+
+  readCloseoutFile(
+    sessionId: string,
+    rootAndPath: string,
+    version?: number,
+  ): { path: string; size: number; name: string } {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    const file = resolveCloseoutFile(
+      closeoutDirAt(this.config.dataDir, session, location),
+      rootAndPath,
+      version,
+    );
+    if (!file) {
+      throw new SessionResourceNotFoundError(
+        `Closeout file not found for ${sessionId}: ${rootAndPath}`,
+      );
+    }
+    return file;
+  }
+
+  /** One entry per session matching every link that has an archive (latest version), newest first. */
+  closeoutsByLink(links: readonly SessionLinkFilter[]): CloseoutEntry[] {
+    const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
+      ...listSessions(this.config.dataDir).map((session) => ({
+        session,
+        location: "live" as const,
+      })),
+      ...listArchivedSessions(this.config.dataDir, (project, id) =>
+        existsSync(closeoutDirAt(this.config.dataDir, { id, project }, "archived")),
+      ).map((session) => ({ session, location: "archived" as const })),
+    ];
+    const entries: CloseoutEntry[] = [];
+    for (const { session, location } of candidates) {
+      if (!matchesSessionLinks(this.displaySlotsForSession(session)?.links ?? [], links)) continue;
+      const manifest = readCloseoutManifest(
+        closeoutDirAt(this.config.dataDir, session, location),
+        session.id,
+      );
+      if (manifest) entries.push({ sessionId: session.id, status: session.status, manifest });
+    }
+    return entries.sort(
+      (a, b) => Date.parse(b.manifest.completedAt) - Date.parse(a.manifest.completedAt),
+    );
+  }
+
+  // Rides the session-gc tick like the artifact retention sweep, throttled to hourly. Only
+  // projects with closeout.retentionDays set are touched.
+  private runCloseoutRetentionSweep(): void {
+    if (Date.now() - this.lastCloseoutRetentionSweepAt < CLOSEOUT_RETENTION_INTERVAL_MS) return;
+    this.lastCloseoutRetentionSweepAt = Date.now();
+    const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
+      ...listSessions(this.config.dataDir).map((session) => ({
+        session,
+        location: "live" as const,
+      })),
+      ...listArchivedSessions(this.config.dataDir, (project, id) =>
+        existsSync(closeoutDirAt(this.config.dataDir, { id, project }, "archived")),
+      ).map((session) => ({ session, location: "archived" as const })),
+    ];
+    let expired = 0;
+    let errors = 0;
+    for (const { session, location } of candidates) {
+      try {
+        const days = this.closeoutSettingsFor(session).retentionDays;
+        if (days === null) continue;
+        expired += expireCloseout(
+          closeoutDirAt(this.config.dataDir, session, location),
+          session.id,
+          days,
+          Date.now(),
+        );
+      } catch {
+        errors += 1;
+      }
+    }
+    if (expired > 0 || errors > 0) {
+      this.logEvent("session.closeout_archive.expired", {
+        level: "info",
+        message: `Closeout retention expired ${expired} archive version(s), ${errors} error(s)`,
+        details: { expired, errors },
+      });
+    }
+  }
+
+  async readTaskStatus(sessionId: string): Promise<TaskStatusView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      return taskStatusView(session);
+    });
+  }
+
+  async writeTaskStatus(sessionId: string, request: TaskStatusRequest): Promise<TaskStatusView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      let session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (
+        session.status !== "running" ||
+        session.agentLaunchId !== request.agentLaunchId ||
+        (session.taskStatusRevision ?? 0) !== request.revision
+      ) {
+        throw new TaskStatusError("Task or agent launch changed", 409, "stale_task_status");
+      }
+      if (request.state === "completed") {
+        const projection = ensureTodoLedger(this.config.dataDir, session);
+        const block = todoLedgerBlock(projection);
+        if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
+        if (block) throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
+        // ensureTodoLedger can install its version marker; retain that write.
+        session = readSession(this.config.dataDir, sessionId) ?? session;
+      }
+      const record =
+        request.state === "clear"
+          ? clearTaskStatus(session)
+          : {
+              ...session,
+              taskStatus: {
+                state: request.state,
+                revision: request.revision,
+                agentLaunchId: request.agentLaunchId,
+                updatedAt: nowIso(),
+              },
+            };
+      writeSession(this.config.dataDir, record);
+      this.dashboardCache.delete(sessionId);
+      await this.refreshDashboardCacheEntry(record);
+      return taskStatusView(record);
     });
   }
 
@@ -20505,7 +21409,13 @@ export class SessionService {
           "Session handoff is already in progress",
         );
       }
-      return applyTodoMutation(this.config.dataDir, session, request, actor);
+      const projection = applyTodoMutation(this.config.dataDir, session, request, actor);
+      if (request.action === "add" || request.action === "resume") {
+        const latest = readSession(this.config.dataDir, sessionId) ?? session;
+        writeSession(this.config.dataDir, clearTaskStatus(latest));
+        this.dashboardCache.delete(sessionId);
+      }
+      return projection;
     });
   }
 
@@ -20790,20 +21700,22 @@ export class SessionService {
 
   async selfDestruct(sessionId: string): Promise<SessionView> {
     return this.runLifecycle("complete", [sessionId], undefined, () =>
-      this.withWorkspaceLifecycleLocks(sessionId, () => {
-        const session = readSession(this.config.dataDir, sessionId);
-        if (!session) {
-          throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-        }
-        return this.applyManualStatusLocked(
-          sessionId,
-          "completed",
-          {
-            prAction: "leave_open",
-          },
-          { eventAction: "self_destruct" },
-        );
-      }),
+      this.withCloseoutHeads([sessionId], (heads) =>
+        this.withWorkspaceLifecycleLocks(sessionId, () => {
+          const session = readSession(this.config.dataDir, sessionId);
+          if (!session) {
+            throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+          }
+          return this.applyManualStatusLocked(
+            sessionId,
+            "completed",
+            {
+              prAction: "leave_open",
+            },
+            { eventAction: "self_destruct", closeoutHeadSha: heads.get(sessionId) ?? null },
+          );
+        }),
+      ),
     );
   }
 
@@ -20818,82 +21730,94 @@ export class SessionService {
     }
     const candidates = this.listDeskSessions(session);
 
+    const report: CloseoutReport = { unverified: 0 };
     const work = () =>
-      this.withSessionLifecycleLocks(
-        candidates.flatMap((candidate) => this.lifecycleIdsFor(candidate)),
-        async () => {
-          const emptySessionIds: string[] = [];
-          const unfinishedBlocked: Array<{
-            sessionId: string;
-            openItemIds: string[];
-            heldItemIds: string[];
-          }> = [];
-          const snapshotBlockedIds: string[] = [];
-          for (const candidate of candidates) {
-            const current = readSession(this.config.dataDir, candidate.id);
-            if (!current)
-              throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
-            if (isTerminalSessionStatus(current.status)) continue;
-            const projection = ensureTodoLedger(this.config.dataDir, current);
-            const block = todoLedgerBlock(projection);
-            if (block === "empty") emptySessionIds.push(candidate.id);
-            else if (block === "unfinished") {
-              unfinishedBlocked.push({ sessionId: candidate.id, ...unfinishedTodo(projection) });
-            } else if (
-              this.snapshotGateBlocks(current, projection.revision, "final", options?.todoActor)
-            ) {
-              snapshotBlockedIds.push(candidate.id);
-            }
-          }
-          if (options?.todoActor?.kind !== "human") {
-            if (emptySessionIds.length > 0) {
-              const error = new TodoEmptyLedgerError(emptySessionIds);
-              this.logManualStatusFailure(
-                "desk_complete",
-                "completed",
-                sessionId,
-                session.project,
-                error,
-              );
-              throw error;
-            }
-            if (unfinishedBlocked.length > 0) {
-              const error = new TodoOpenWorkError(unfinishedBlocked);
-              this.logManualStatusFailure(
-                "desk_complete",
-                "completed",
-                sessionId,
-                session.project,
-                error,
-              );
-              throw error;
-            }
-            if (snapshotBlockedIds.length > 0) {
-              const error = new WorkSnapshotRequiredError(snapshotBlockedIds, "final");
-              this.logManualStatusFailure(
-                "desk_complete",
-                "completed",
-                sessionId,
-                session.project,
-                error,
-              );
-              throw error;
-            }
-          }
-          const completedIds: string[] = [];
-          for (const candidate of candidates) {
-            const current = readSession(this.config.dataDir, candidate.id);
-            if (!current)
-              throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
-            if (isTerminalSessionStatus(current.status)) continue;
-            await this.applyManualStatusLocked(candidate.id, "completed", request, {
-              ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
-              eventAction: "desk_complete",
-            });
-            completedIds.push(candidate.id);
-          }
-          return { completedIds };
-        },
+      this.withCloseoutHeads(
+        candidates.map((candidate) => candidate.id),
+        (closeoutHeads) =>
+          this.withSessionLifecycleLocks(
+            candidates.flatMap((candidate) => this.lifecycleIdsFor(candidate)),
+            async () => {
+              const emptySessionIds: string[] = [];
+              const unfinishedBlocked: Array<{
+                sessionId: string;
+                openItemIds: string[];
+                heldItemIds: string[];
+              }> = [];
+              const snapshotBlockedIds: string[] = [];
+              for (const candidate of candidates) {
+                const current = readSession(this.config.dataDir, candidate.id);
+                if (!current)
+                  throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
+                if (isTerminalSessionStatus(current.status)) continue;
+                const projection = ensureTodoLedger(this.config.dataDir, current);
+                const block = todoLedgerBlock(projection);
+                if (block === "empty") emptySessionIds.push(candidate.id);
+                else if (block === "unfinished") {
+                  unfinishedBlocked.push({
+                    sessionId: candidate.id,
+                    ...unfinishedTodo(projection),
+                  });
+                } else if (
+                  this.snapshotGateBlocks(current, projection.revision, "final", options?.todoActor)
+                ) {
+                  snapshotBlockedIds.push(candidate.id);
+                }
+              }
+              if (options?.todoActor?.kind !== "human") {
+                if (emptySessionIds.length > 0) {
+                  const error = new TodoEmptyLedgerError(emptySessionIds);
+                  this.logManualStatusFailure(
+                    "desk_complete",
+                    "completed",
+                    sessionId,
+                    session.project,
+                    error,
+                  );
+                  throw error;
+                }
+                if (unfinishedBlocked.length > 0) {
+                  const error = new TodoOpenWorkError(unfinishedBlocked);
+                  this.logManualStatusFailure(
+                    "desk_complete",
+                    "completed",
+                    sessionId,
+                    session.project,
+                    error,
+                  );
+                  throw error;
+                }
+                if (snapshotBlockedIds.length > 0) {
+                  const error = new WorkSnapshotRequiredError(snapshotBlockedIds, "final");
+                  this.logManualStatusFailure(
+                    "desk_complete",
+                    "completed",
+                    sessionId,
+                    session.project,
+                    error,
+                  );
+                  throw error;
+                }
+              }
+              const completedIds: string[] = [];
+              for (const candidate of candidates) {
+                const current = readSession(this.config.dataDir, candidate.id);
+                if (!current)
+                  throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
+                if (isTerminalSessionStatus(current.status)) continue;
+                await this.applyManualStatusLocked(candidate.id, "completed", request, {
+                  ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
+                  eventAction: "desk_complete",
+                  closeoutHeadSha: closeoutHeads.get(candidate.id) ?? null,
+                  closeoutReport: report,
+                });
+                completedIds.push(candidate.id);
+              }
+              return report.unverified > 0
+                ? { completedIds, closeout: { unverified: report.unverified } }
+                : { completedIds };
+            },
+          ),
       );
     return this.runLifecycle(
       "complete",
@@ -21997,6 +22921,7 @@ export class SessionService {
     const gateError =
       error instanceof TodoEmptyLedgerError ||
       error instanceof TodoOpenWorkError ||
+      error instanceof HandoffTargetNotStalledError ||
       error instanceof WorkSnapshotRequiredError
         ? error
         : undefined;
@@ -22021,6 +22946,8 @@ export class SessionService {
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
+      closeoutHeadSha?: string | null;
+      closeoutReport?: CloseoutReport;
     },
   ): Promise<void>;
   private async applyManualStatusLocked(
@@ -22031,9 +22958,13 @@ export class SessionService {
       retainInList?: boolean;
       skipEnrichment?: false;
       todoActor?: TodoActor;
+      handoffDetails?: HandoffEventDetails;
+      handoffReceipt?: HandoffIdempotencyReceipt;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
+      closeoutHeadSha?: string | null;
+      closeoutReport?: CloseoutReport;
     },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
@@ -22044,9 +22975,13 @@ export class SessionService {
       retainInList?: boolean;
       skipEnrichment?: boolean;
       todoActor?: TodoActor;
+      handoffDetails?: HandoffEventDetails;
+      handoffReceipt?: HandoffIdempotencyReceipt;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
+      closeoutHeadSha?: string | null;
+      closeoutReport?: CloseoutReport;
     },
   ): Promise<SessionView | void> {
     const reopenClaim = this.reopensInFlight.get(sessionId);
@@ -22138,6 +23073,8 @@ export class SessionService {
               ...session,
               status: targetStatus,
               updatedAt: nowIso(),
+              // This write marks the source completed first; the receipt must land with it.
+              ...(options?.handoffReceipt ? { handoffIdempotency: options.handoffReceipt } : {}),
             },
             [],
             false,
@@ -22153,9 +23090,18 @@ export class SessionService {
           ...(options?.restoreOperation ? { operation: options.restoreOperation } : {}),
         });
         await this.cleanupSessionServices(session);
+        if (targetStatus === "completed" && session.auth) {
+          await this.revokeManagedAuthorization(session.id);
+        }
       }
       if (targetStatus === "completed") {
         terminalSlots = this.captureTerminalSlots(session);
+        const unverified = this.archiveCloseout(
+          session,
+          terminalSlots?.links ?? [],
+          options?.closeoutHeadSha,
+        );
+        if (options?.closeoutReport) options.closeoutReport.unverified += unverified;
         const { ranCleanup } = this.removeSessionArtifacts(session, {
           preserveAgentHistory: true,
         });
@@ -22200,6 +23146,7 @@ export class SessionService {
     if (startupAttachmentsCleaned) {
       delete record.startupAttachmentIds;
     }
+    if (options?.handoffReceipt) record.handoffIdempotency = options.handoffReceipt;
     writeSession(this.config.dataDir, record);
     if (targetStatus === "completed") await this.terminateDetachedSessionProcesses(record);
     if (targetStatus === "completed") await this.cleanupTerminalTelegram(record);
@@ -22216,6 +23163,7 @@ export class SessionService {
       message: `${targetStatus === "stopped" ? "Stopped" : "Completed"} ${sessionId}`,
       details: {
         worktree: session.worktree,
+        ...(eventAction === "handoff" && options?.handoffDetails ? options.handoffDetails : {}),
       },
     });
     return options?.skipEnrichment ? undefined : this.enrich(record);
@@ -22295,6 +23243,7 @@ export class SessionService {
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.terminateDetachedSessionProcesses(session);
       await this.cleanupSessionServices(session);
+      if (session.auth) await this.revokeManagedAuthorization(session.id);
       if (currentSession.status !== "killed") terminalSlots = this.captureTerminalSlots(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
       if (closeoutTakenFrom) {
@@ -22893,6 +23842,21 @@ export class SessionService {
     assertActive();
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
+    const authRegistration = session.auth
+      ? await this.prepareSessionAuthorization(
+          session.id,
+          session.agent,
+          project,
+          session.auth.accountId,
+          true,
+        )
+      : undefined;
+    const managedLaunch = managedAuthLaunch(
+      authRegistration,
+      sessionToolDir,
+      project.codexArgs,
+      session.worktreePath,
+    );
     const { session: mcpSidecarUpdate, mcpBindings } = await this.startMcpSidecars(
       session,
       project,
@@ -22952,7 +23916,7 @@ export class SessionService {
         }),
         { planMode, restrictWrites },
       ),
-      ...this.resolveClaudeAuthPlanOptions(session),
+      ...(authRegistration ? managedLaunch : this.resolveClaudeAuthPlanOptions(session)),
     };
     const baseLaunchPlan = buildAgentLaunchPlan(
       session.agent,
@@ -22999,7 +23963,7 @@ export class SessionService {
         symlinks: this.getProject(session.project).symlinks,
         closeoutOwner: session.closeoutOwner === true,
         agentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env },
       });
     let agentLaunchId = newAgentLaunchId();
     let env = buildLaunchEnv(agentLaunchId);
@@ -23702,6 +24666,19 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
+      const authRegistration = await this.prepareSessionAuthorization(
+        current.id,
+        current.agent,
+        restoreProjectConfig,
+        current.auth ? current.auth.accountId : current.claudeAccountId,
+        current.auth !== undefined,
+      );
+      const managedLaunch = managedAuthLaunch(
+        authRegistration,
+        sessionToolDir,
+        restoreProjectConfig.codexArgs,
+        current.worktreePath,
+      );
       operation?.assertActive();
       const mcpStart = await this.startMcpSidecars(current, restoreProjectConfig, operation);
       operation?.assertActive();
@@ -23714,6 +24691,7 @@ export class SessionService {
         sessionId: current.id,
         worktreePath: current.worktreePath,
         sessionToolDir,
+        ...(authRegistration ? { managedAuth: true } : {}),
         restrictWrites: resolveRestrictWrites(current),
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
@@ -23769,7 +24747,7 @@ export class SessionService {
           }),
           { planMode, restrictWrites },
         ),
-        ...this.resolveClaudeAuthPlanOptions(current),
+        ...(authRegistration ? managedLaunch : this.resolveClaudeAuthPlanOptions(current)),
       };
       const resolvedModel = launchSelection.model;
       const launchPlanOptions = {
@@ -23888,7 +24866,7 @@ export class SessionService {
         symlinks: this.getProject(current.project).symlinks,
         closeoutOwner: current.closeoutOwner === true,
         agentLaunchId: restoreAgentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env },
       });
 
       await createTmuxSession({
@@ -23919,6 +24897,7 @@ export class SessionService {
             ...latest,
             status: "running",
             launchCommand: restoredLaunchCommand,
+            ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
             ...(restoreAgentLaunchId ? { agentLaunchId: restoreAgentLaunchId } : {}),
             updatedAt: nowIso(),
           },
@@ -24505,7 +25484,7 @@ export class SessionService {
 
   async switchAuth(
     sessionId: string,
-    accountId: string,
+    accountId: string | null,
     opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
   ): Promise<SessionView> {
     const hint = readSession(this.config.dataDir, sessionId);
@@ -24524,7 +25503,7 @@ export class SessionService {
 
   private async switchAuthLocked(
     sessionId: string,
-    accountId: string,
+    accountId: string | null,
     opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
     claim: SessionLifecycleStamp,
   ): Promise<SessionView> {
@@ -24535,300 +25514,348 @@ export class SessionService {
     if (!this.lifecycleStampMatches(session, claim)) {
       throw new Error(`Session ${sessionId} changed before auth migration`);
     }
-    if (session.agent !== "claude") {
-      throw new Error(
-        `switch-auth is only supported for claude sessions (session ${sessionId} runs ${session.agent})`,
+    if (!session.auth) {
+      throw new AuthorizationError(
+        "Direct authorization cannot switch in place; restore or respawn with a managed account",
       );
     }
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
-    if (!isAccountReady(account)) {
-      throw new Error(
-        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
-      );
-    }
-
-    const force = opts.force === true;
-    let activeClaim = claim;
-    if (!force) {
-      const state = await this.classifySessionState(session);
-      if (state === "working") {
-        throw new Error(
-          `Session ${sessionId} is working; retry when idle or pass force to switch auth`,
+    if (accountId !== null) {
+      const account = this.authAccounts.read().accounts.find((entry) => entry.id === accountId);
+      if (!account || account.provider !== session.agent) {
+        throw new AuthorizationError(
+          `Unknown ${session.agent} authorization account: ${accountId}`,
+          400,
         );
       }
-      activeClaim = await this.withSessionLifecycleLocks(
-        this.lifecycleIdsFor(session),
-        async () => {
-          const latest = readSession(this.config.dataDir, sessionId);
-          if (!latest) {
-            throw new Error(`Session ${sessionId} changed during auth migration`);
-          }
-          const reconciledDeadRuntime =
-            (claim.status === "running" || claim.status === "spawning") &&
-            (latest.status === "stopped" || latest.status === "errored") &&
-            latest.stopReason === undefined;
-          if (!this.lifecycleStateMatches(latest, claim) && !reconciledDeadRuntime) {
-            throw new Error(`Session ${sessionId} changed during auth migration`);
-          }
-          return this.lifecycleStamp(latest);
-        },
-      );
     }
-    const sessionToolDir = join(this.config.dataDir, "session-tools", sessionId);
-    const sessionHome = sessionClaudeHome(sessionToolDir);
-    const usesSessionHome = session.launchCommand.startsWith(
-      `CLAUDE_CONFIG_DIR=${shellEscape(sessionHome)} `,
-    );
-
-    if (usesSessionHome) {
-      return this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
-        const latest = readSession(this.config.dataDir, sessionId);
-        if (!latest || !this.lifecycleStampMatches(latest, activeClaim)) {
-          throw new Error(`Session ${sessionId} changed during auth migration`);
-        }
-        const updated: SessionRecord = {
-          ...latest,
-          claudeAccountId: accountId,
-          updatedAt: nowIso(),
-        };
-        swapSessionCredentials(sessionHome, account);
-        writeSession(this.config.dataDir, updated);
-        touchAccountUsed(this.config.dataDir, accountId);
-        this.logEvent("session.auth.switched", {
-          level: "info",
-          sessionId,
-          projectId: latest.project,
-          message: `Switched claude account for ${sessionId} to ${accountId}`,
-          details: { accountId, reason: opts.reason, forced: force, method: "in_place" },
-        });
-        return this.enrich(updated);
-      });
-    }
-
-    await this.ensureKillDirtyWorktreeAllowed(session, force);
-    // Install target credentials before persisting the record or killing the pane.
-    // If the swap throws, the persisted account and running pane remain old.
-    const prepared = await this.withSessionLifecycleLocks(
+    let pingKey: string | undefined;
+    const updated = await this.withSessionLifecycleLocks(
       this.lifecycleIdsFor(session),
       async () => {
-        const latest = readSession(this.config.dataDir, sessionId);
-        if (!latest || !this.lifecycleStampMatches(latest, activeClaim)) {
-          throw new Error(`Session ${sessionId} changed during auth migration`);
+        const current = readSession(this.config.dataDir, sessionId);
+        if (!current || !this.lifecycleStampMatches(current, claim)) {
+          throw new Error(`Session ${sessionId} changed during auth selection`);
         }
-        const updated: SessionRecord = {
-          ...latest,
-          claudeAccountId: accountId,
+        const registration = await this.authProxy.switchSession(sessionId, accountId);
+        this.authSnapshot = undefined;
+        const { claudeAccountId: _legacyAccountId, ...base } = current;
+        const auth = publicAuthSession(registration);
+        const authChangePing = this.authChangePingClaim(current, auth);
+        pingKey = authChangePing?.key;
+        const next: SessionRecord = {
+          ...base,
+          auth,
+          ...(authChangePing ? { authChangePing } : {}),
           updatedAt: nowIso(),
         };
-        mkdirSync(sessionHome, { recursive: true });
-        swapSessionCredentials(sessionHome, account);
-        writeSession(this.config.dataDir, updated);
-        touchAccountUsed(this.config.dataDir, accountId);
-        await this.killAgentPaneAndConfirmExit(updated, { failOnSurvivors: true });
-        const relaunched = await this.ensureSessionReadyForSend(updated, {
-          paneAlreadyConfirmedGone: true,
-          paneAlreadyOwned: true,
-        });
-        const generation = await this.capturePaneGeneration(relaunched.session);
-        const persisted = readSession(this.config.dataDir, sessionId);
-        if (!persisted || !(await this.paneGenerationMatches(persisted, generation))) {
-          throw new Error(`Session ${sessionId} changed during auth migration`);
-        }
-        return {
-          relaunched,
-          generation,
-          stamp: this.lifecycleStamp(persisted),
-        };
+        writeSession(this.config.dataDir, next);
+        this.stateCache.delete(sessionId);
+        return next;
       },
     );
-    const { relaunched, generation } = prepared;
-    if (relaunched.recoveryMessage) {
-      const submission = await this.beginAgentMessage(
-        relaunched.recoveryMessage.session,
-        relaunched.recoveryMessage.message,
-        {
-          ...relaunched.recoveryMessage.options,
-          authorizeInput: (send) =>
-            this.withWorkspaceLifecycleLocks(sessionId, async () => {
-              const current = readSession(this.config.dataDir, sessionId);
-              if (
-                !current ||
-                !this.lifecycleStampMatches(current, prepared.stamp) ||
-                !(await this.paneGenerationMatches(current, generation))
-              ) {
-                return false;
-              }
-              await send();
-              return true;
-            }),
-        },
-      );
-      const outcome = await this.completeAgentMessage(submission, {
-        authorizeResend: (send) =>
-          this.withWorkspaceLifecycleLocks(sessionId, async () => {
-            const current = readSession(this.config.dataDir, sessionId);
-            if (
-              !current ||
-              !this.lifecycleStampMatches(current, prepared.stamp) ||
-              !(await this.paneGenerationMatches(current, generation))
-            ) {
-              return false;
-            }
-            await send();
-            return true;
-          }),
-        recoveryGenerationMatches: () =>
-          this.withWorkspaceLifecycleLocks(sessionId, async () => {
-            const current = readSession(this.config.dataDir, sessionId);
-            return Boolean(
-              current &&
-              this.lifecycleStampMatches(current, prepared.stamp) &&
-              (await this.paneGenerationMatches(current, generation)),
-            );
-          }),
-      });
-      if (outcome === "stale") {
-        throw new Error(`Session ${sessionId} changed during auth migration`);
-      }
-    }
-    const current = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
-      const latest = readSession(this.config.dataDir, sessionId);
-      if (
-        !latest ||
-        !this.lifecycleStampMatches(latest, prepared.stamp) ||
-        !(await this.paneGenerationMatches(latest, generation))
-      ) {
-        return null;
-      }
-      return latest;
-    });
-    if (!current) throw new Error(`Session ${sessionId} changed during auth migration`);
+    if (pingKey) void this.sendAuthChangePing(sessionId, pingKey);
     this.logEvent("session.auth.switched", {
       level: "info",
       sessionId,
       projectId: session.project,
-      message: `Switched claude account for ${sessionId} to ${accountId}`,
-      details: { accountId, reason: opts.reason, forced: force, method: "relaunch" },
+      message: `Selected ${session.agent} authorization for the next request`,
+      details: { accountId, reason: opts.reason, method: "proxy" },
     });
-    return this.enrich(current);
+    return this.enrich(updated);
   }
 
-  // Rotate a rate-limited claude session onto the next ready account.
-  // Returns true when a rotation happened; false when disabled, capped, or no
-  // fresh candidate exists (caller then falls through to the reactivation nudge).
-  private async tryAutoRotateClaudeAccount(session: SessionRecord): Promise<boolean> {
-    if (!this.config.authRotation.autoRotateOnRateLimit || session.agent !== "claude") {
-      return false;
-    }
-    const now = Date.now();
-    const cooldownMs = this.config.authRotation.cooldownMinutes * 60_000;
-    // Mark the current account rate-limited so later rotations skip it until it
-    // is likely reset. The usage-limit menu does not expose a reset time, so use
-    // the configured cooldown.
-    if (session.claudeAccountId) {
-      this.claudeAccountRateLimit.set(session.claudeAccountId, now + cooldownMs);
-    }
-    const episode = String(session.rateLimitedAt);
-    const tracker = this.claudeRotationEpisode.get(session.id);
-    const count = tracker?.episode === episode ? tracker.count : 0;
-    if (count >= this.config.authRotation.maxRotationsPerEpisode) {
-      return false;
-    }
-    const next = listAccounts(this.config.dataDir).find((account) => {
-      if (account.id === session.claudeAccountId) return false;
-      if (!isAccountReady(account)) return false;
-      const limitedUntil = this.claudeAccountRateLimit.get(account.id);
-      return limitedUntil === undefined || limitedUntil <= now;
+  /**
+   * Managed accounts with status, identity and display name. Quota rides only on opts.quota: it is
+   * read from the cache and never waits on a provider, and session list paths must not start usage reads.
+   */
+  async listAuthorizationAccounts(
+    provider?: AuthProvider,
+    opts?: { quota?: boolean },
+  ): Promise<{
+    accounts: AuthAccountSummary[];
+    pools: ReturnType<AuthAccounts["read"]>["pools"];
+  }> {
+    const state = this.authAccounts.read();
+    const statuses =
+      state.accounts.length > 0 ? (await this.readAuthorizationState()).accounts : [];
+    const identified = withCompanionIdentity(state.accounts, statuses);
+    const names = authDisplayNames(identified);
+    const all = identified.map((account): AuthAccountSummary => {
+      const entry = statuses.find((candidate) => candidate.id === account.id);
+      const status = entry?.status ?? "sign-in-required";
+      return {
+        ...account,
+        displayName: names.get(account.id) ?? account.id,
+        limited: entry?.cooldownUntil !== undefined,
+        ...(entry?.cooldownUntil ? { cooldownUntil: entry.cooldownUntil } : {}),
+        ...(entry?.credential ? { credential: entry.credential } : {}),
+        authenticated: status === "ready",
+        status:
+          status === "sign-in-required"
+            ? "sign_in_required"
+            : status === "failed"
+              ? "error"
+              : status,
+      };
     });
-    if (!next) {
-      return false;
+    // The cache sees every store account: pruning against a provider subset would drop the others.
+    const quotas = opts?.quota
+      ? this.authQuota.read(
+          all.map((account) => ({
+            id: account.id,
+            provider: account.provider,
+            status: account.status,
+            ...(account.credential ? { credential: account.credential } : {}),
+          })),
+        )
+      : undefined;
+    const quotaErrors = quotas ? this.authQuota.lastErrors() : undefined;
+    return {
+      accounts: all
+        .filter((account) => !provider || account.provider === provider)
+        .map((account) => {
+          const quota = quotas?.get(account.id);
+          if (quota) return { ...account, quota };
+          const quotaError = quotaErrors?.get(account.id);
+          return quotaError ? { ...account, quotaError } : account;
+        }),
+      pools: state.pools,
+    };
+  }
+
+  async addAuthorizationAccount(provider: AuthProvider) {
+    const account = this.authAccounts.add(provider);
+    await this.authProxy.configure();
+    this.authSnapshot = undefined;
+    return account;
+  }
+
+  async updateAuthorizationPool(
+    provider: AuthProvider,
+    update: { defaultAccountId?: string | null; autoRotate?: boolean },
+  ) {
+    if (update.defaultAccountId !== null && update.defaultAccountId !== undefined) {
+      const { accounts } = await this.listAuthorizationAccounts(provider);
+      if (
+        !accounts.some((account) => account.id === update.defaultAccountId && account.authenticated)
+      ) {
+        throw new AuthorizationError(
+          "Default authorization account must be ready and match the provider",
+          400,
+        );
+      }
     }
-    await this.switchAuth(session.id, next.id, { reason: "auto_rate_limit" });
-    this.claudeRotationEpisode.set(session.id, { episode, count: count + 1 });
-    this.logEvent("session.auth.auto_rotated", {
-      level: "info",
-      sessionId: session.id,
-      projectId: session.project,
-      message: `Auto-rotated ${session.id} to claude account ${next.id} after rate limit`,
-      details: {
-        ...(session.claudeAccountId ? { fromAccountId: session.claudeAccountId } : {}),
-        toAccountId: next.id,
-        episode,
+    const pool = this.authAccounts.updatePool(provider, update);
+    await this.authProxy.configure();
+    this.authSnapshot = undefined;
+    return pool;
+  }
+
+  async removeAuthorizationAccount(accountId: string): Promise<void> {
+    const proxyState = await this.authProxy.getState();
+    const bindings = proxyState.sessions;
+    const readyIds = new Set(
+      proxyState.accounts.filter((entry) => entry.status === "ready").map((entry) => entry.id),
+    );
+    const boundIds = new Set(
+      bindings
+        .filter(
+          (binding) => binding.accountId === accountId || binding.effectiveAccountId === accountId,
+        )
+        .map((binding) => binding.sessionId),
+    );
+    const hints = listSessions(this.config.dataDir).filter(
+      (session) =>
+        boundIds.has(session.id) ||
+        session.auth?.accountId === accountId ||
+        session.auth?.effectiveAccountId === accountId ||
+        session.claudeAccountId === accountId,
+    );
+    await this.withSessionLifecycleLocks(
+      hints.flatMap((session) => this.lifecycleIdsFor(session)),
+      async () => {
+        const sessions: SessionRecord[] = [];
+        for (const hint of hints) {
+          const session = readSession(this.config.dataDir, hint.id);
+          if (
+            session &&
+            !boundIds.has(session.id) &&
+            session.auth?.accountId !== accountId &&
+            session.auth?.effectiveAccountId !== accountId &&
+            session.claudeAccountId !== accountId
+          )
+            continue;
+          if (
+            !session ||
+            (!isTerminalSessionStatus(session.status) && session.status !== "errored")
+          ) {
+            throw new AuthorizationError(
+              `Cannot remove account ${accountId}: in use by a running session`,
+            );
+          }
+          const runtime = await this.readRuntimeSnapshot(session, { fresh: true });
+          if (runtime.processAlive || runtime.probeUnresponsive) {
+            throw new AuthorizationError(
+              `Cannot remove account ${accountId}: session runtime is live or unconfirmed`,
+            );
+          }
+          const processes = await findForeignAgentProcessesForSession({
+            sessionId: session.id,
+            processMatchers: sessionProcessMatchers(session),
+            excludePanePids: [],
+          });
+          if (processes.status !== "ok" || processes.pids.length > 0) {
+            throw new AuthorizationError(
+              `Cannot remove account ${accountId}: session process exit is unconfirmed`,
+            );
+          }
+          sessions.push(session);
+        }
+        for (const session of sessions) {
+          if (session.auth) await this.revokeManagedAuthorization(session.id);
+        }
+        await this.authProxy.removeAccount(accountId);
+        for (const session of sessions) {
+          const { auth: _auth, claudeAccountId: _legacyAccountId, ...base } = session;
+          writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+        }
+        this.authAccounts.remove(accountId, (id) => readyIds.has(id));
+        await this.authProxy.configure();
+        this.authSnapshot = undefined;
       },
-    });
-    return true;
+    );
   }
 
-  listClaudeAccounts(): {
-    id: string;
-    label?: string;
-    authenticated: boolean;
-    lastUsedAt?: string;
-  }[] {
-    ensureDefaultAccount(this.config.dataDir);
-    return listAccounts(this.config.dataDir).map((account) => ({
+  startAuthorizationLogin(accountId: string, method?: AuthLoginMethod): Promise<AuthLogin> {
+    this.authSnapshot = undefined;
+    const account = this.requireAuthorizationAccount(accountId);
+    const allowed: readonly [AuthLoginMethod, ...AuthLoginMethod[]] =
+      account.provider === "claude" ? ["oauth"] : ["device", "browser"];
+    const chosen = method ?? allowed[0];
+    if (!allowed.includes(chosen)) {
+      throw new AuthorizationError(
+        `Sign-in method ${chosen} is not available for ${account.provider}`,
+        400,
+      );
+    }
+    return this.authProxy.login(accountId, account.provider, chosen);
+  }
+
+  async setAuthorizationApiKey(accountId: string, apiKey: string): Promise<AuthLogin> {
+    this.authSnapshot = undefined;
+    const account = this.requireAuthorizationAccount(accountId);
+    return this.authProxy.setApiKey(accountId, account.provider, apiKey);
+  }
+
+  private requireAuthorizationAccount(accountId: string) {
+    const account = this.authAccounts.read().accounts.find((entry) => entry.id === accountId);
+    if (!account) throw new AuthorizationError(`Unknown authorization account: ${accountId}`, 404);
+    return account;
+  }
+
+  authorizationLoginInput(accountId: string, input: string | null): Promise<AuthLogin> {
+    this.authSnapshot = undefined;
+    return input === null
+      ? this.authProxy.cancelLogin(accountId)
+      : this.authProxy.loginInput(accountId, input);
+  }
+
+  authorizationLoginStatus(accountId: string): Promise<AuthLogin> {
+    return this.authProxy.loginStatus(accountId);
+  }
+
+  async listAuthAlerts(): Promise<{ alerts: AuthAlert[] }> {
+    const { alerts } = await this.authAlerts.evaluate(() => this.readAuthAlertInputs(), new Date());
+    return { alerts };
+  }
+
+  private async readAuthAlertInputs(): Promise<AlertEvaluationInput> {
+    const state = this.authAccounts.read();
+    let managed: ManagedBreakage[] | null = [];
+    if (state.accounts.length > 0) {
+      try {
+        const statuses = (await this.readAuthorizationState()).accounts;
+        const names = authDisplayNames(withCompanionIdentity(state.accounts, statuses));
+        managed = statuses.flatMap((entry) => {
+          const account = state.accounts.find((candidate) => candidate.id === entry.id);
+          return entry.brokenAt && account
+            ? [
+                {
+                  accountId: account.id,
+                  provider: account.provider,
+                  label: names.get(account.id) ?? account.id,
+                  brokenAt: entry.brokenAt,
+                },
+              ]
+            : [];
+        });
+      } catch {
+        managed = null;
+      }
+    }
+    const host = (await readHostCredentialSources(this.usageReportDeps())).map((source) => ({
+      provider: source.provider,
+      observation: observeHostSource(source),
+    }));
+    return { managed, host, sessions: listSessions(this.config.dataDir) };
+  }
+
+  startTerminalLogin(
+    target: { accountId: string } | { host: AuthProvider },
+  ): Promise<TerminalLogin> {
+    this.authSnapshot = undefined;
+    return this.authTerminals.start(target);
+  }
+
+  getTerminalLogin(id: string): TerminalLogin {
+    return this.authTerminals.get(id);
+  }
+
+  async stopTerminalLogin(id: string): Promise<void> {
+    this.authSnapshot = undefined;
+    await this.authTerminals.stop(id);
+  }
+
+  /** Legacy Claude shape: the display name rides as label; identity and quota stay out. */
+  async listClaudeAccounts() {
+    return (await this.listAuthorizationAccounts("claude")).accounts.map((account) => ({
       id: account.id,
-      ...(account.label ? { label: account.label } : {}),
-      authenticated: isAccountAuthenticated(account),
-      ...(account.lastUsedAt ? { lastUsedAt: account.lastUsedAt } : {}),
+      provider: account.provider,
+      label: account.displayName,
+      createdAt: account.createdAt,
+      authenticated: account.authenticated,
+      status: account.status,
+      limited: account.limited,
+      ...(account.cooldownUntil ? { cooldownUntil: account.cooldownUntil } : {}),
+      ...(account.credential ? { credential: account.credential } : {}),
     }));
   }
 
-  addClaudeAccount(opts: { label?: string }): ClaudeAccount {
-    return addAccount(this.config.dataDir, opts);
+  /** A new account has no identity yet, so its label is the placeholder display name. */
+  async addClaudeAccount() {
+    const account = await this.addAuthorizationAccount("claude");
+    return { id: account.id, label: authDisplayNames([account]).get(account.id) ?? account.id };
   }
 
-  removeClaudeAccount(accountId: string): void {
-    // removeAccount rmSync's the account's CLAUDE_CONFIG_DIR. Guard against
-    // deleting creds out from under a live claude process bound to it: a
-    // non-terminal session still has its claude process alive in tmux.
-    const bound = listSessions(this.config.dataDir).filter(
-      (session) => session.claudeAccountId === accountId,
-    );
-    const live = bound.filter((session) => !isTerminalSessionStatus(session.status));
-    if (live.length > 0) {
-      throw new Error(
-        `Cannot remove account ${accountId}: in use by ${live.length} running session(s)`,
-      );
-    }
-    // Terminal sessions keep no live process, but leaving the ref dangling would
-    // point at a deleted account; clear it before removing the store entry.
-    for (const session of bound) {
-      const { claudeAccountId: _claudeAccountId, ...base } = session;
-      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
-    }
-    removeAccount(this.config.dataDir, accountId);
+  removeClaudeAccount(accountId: string): Promise<void> {
+    return this.removeAuthorizationAccount(accountId);
   }
 
-  // Host an interactive OAuth login pane for an account in an isolated
-  // CLAUDE_CONFIG_DIR. The UI attaches to the returned tmux session and the
-  // operator completes the browser sign-in there; finishAccountLogin tears it
-  // down once .credentials.json lands.
   async startAccountLogin(accountId: string): Promise<{ loginTmuxSession: string }> {
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
+    await this.startAuthorizationLogin(accountId);
     const loginTmuxSession = `claude-login-${accountId}`;
     await killTmuxSession(loginTmuxSession);
     await createTmuxCommandSession({
       sessionName: loginTmuxSession,
       cwd: userInfo().homedir,
-      launchCommand: claudeCommand(),
-      env: { CLAUDE_CONFIG_DIR: account.configDir },
+      launchCommand: `${shellEscape(process.execPath)} ${shellEscape(fileURLToPath(new URL("./cli.js", import.meta.url)))} --config ${shellEscape(this.config.configPath)} auth login ${shellEscape(accountId)}`,
     });
     return { loginTmuxSession };
   }
 
   async finishAccountLogin(accountId: string): Promise<{ authenticated: boolean }> {
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
-    const authenticated = isAccountAuthenticated(account);
+    const authenticated = (await this.authorizationLoginStatus(accountId)).status === "ready";
+    if (!authenticated) await this.authProxy.cancelLogin(accountId);
     await killTmuxSession(`claude-login-${accountId}`);
     return { authenticated };
   }
@@ -24836,12 +25863,11 @@ export class SessionService {
   async getAccountLoginStatus(
     accountId: string,
   ): Promise<{ authenticated: boolean; loginActive: boolean }> {
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
     const loginActive = await tmuxSessionExists(`claude-login-${accountId}`);
-    return { authenticated: isAccountAuthenticated(account), loginActive };
+    return {
+      authenticated: (await this.authorizationLoginStatus(accountId)).status === "ready",
+      loginActive,
+    };
   }
 
   private clearCloseoutOwner(sessionId: string): void {
@@ -25116,18 +26142,63 @@ export class SessionService {
     sessionId: string,
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
-  ): Promise<SessionView> {
+  ): Promise<HandoffSessionResponse> {
+    const { idempotencyKey, ...base } = request;
+    if (idempotencyKey === undefined) return this.handoffOnce(sessionId, base, options);
+    const key = parseIdempotencyKey(idempotencyKey);
+    const fingerprint: HandoffIdempotency["request"] = {
+      agent: base.agent,
+      ...(base.model !== undefined ? { model: base.model } : {}),
+      ...(base.reasoningEffort !== undefined ? { reasoningEffort: base.reasoningEffort } : {}),
+      ...(base.notes !== undefined ? { notes: base.notes } : {}),
+    };
+    const receipt = readSession(this.config.dataDir, sessionId)?.handoffIdempotency;
+    if (receipt?.key === key) {
+      if (!isDeepStrictEqual(receipt.request, fingerprint)) {
+        throw new IdempotencyKeyConflictError(
+          "Idempotency key already belongs to a different handoff request",
+          receipt.successorId,
+        );
+      }
+      return {
+        ...(await this.get(receipt.successorId)),
+        movedTodoItems: receipt.movedTodoItems,
+        replayed: true,
+      };
+    }
+    const pending = this.keyedHandoffsInFlight.get(sessionId);
+    if (pending?.key === key) {
+      const joined = await joinInFlight(pending, fingerprint);
+      return joined
+        ? { ...joined.value, replayed: true }
+        : this.handoff(sessionId, request, options);
+    }
+    const idempotency = { key, request: fingerprint };
+    // Another key already in flight: handoffOnce refuses with "already in flight".
+    if (pending) return this.handoffOnce(sessionId, base, options, idempotency);
+    return runInFlight(this.keyedHandoffsInFlight, sessionId, idempotency, () =>
+      this.handoffOnce(sessionId, base, options, idempotency),
+    );
+  }
+
+  private async handoffOnce(
+    sessionId: string,
+    request: HandoffSessionRequest,
+    options?: { todoActor?: TodoActor },
+    idempotency?: HandoffIdempotency,
+  ): Promise<HandoffSessionResponse> {
     // Refuse before queueing for admission; handoffTransaction rechecks after the wait.
     this.assertNoHeldCloseoutTake(sessionId);
     const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
-      const session = this.validateHandoffSource(sessionId, options);
+      // Before validation: validation reconciles ToDo, which a handoff in flight must own.
+      if (this.handoffsInFlight.has(sessionId) || this.handoffSuccessors.has(sessionId)) {
+        throw new Error(`Handoff already in flight for ${sessionId}`);
+      }
+      const { session } = this.validateHandoffSource(sessionId, options);
       // A take may have landed while this call waited on the lock.
       this.assertNoHeldCloseoutTake(sessionId);
       if (this.prAlertTransferFrom(session, "handoff")?.kind === "owner")
         assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
-      if (this.handoffsInFlight.has(sessionId)) {
-        throw new Error(`Handoff already in flight for ${sessionId}`);
-      }
       const agent = parseAgentName(request.agent);
       const token = Symbol(`handoff:${sessionId}`);
       this.handoffsInFlight.set(sessionId, {
@@ -25172,15 +26243,21 @@ export class SessionService {
       claim.phase = "activating";
       const admissionReservation = reservation;
       return await this.runLifecycle("complete", [sessionId], undefined, () =>
-        this.handoffTransaction(sessionId, request, options, {
-          ...waiting,
-          admissionReservation,
-        }),
+        this.handoffTransaction(
+          sessionId,
+          request,
+          options,
+          { ...waiting, admissionReservation },
+          idempotency,
+        ),
       );
     } finally {
       if (reservation !== undefined) this.admissionReservations.delete(reservation);
       if (this.handoffsInFlight.get(sessionId)?.token === waiting.token) {
         this.handoffsInFlight.delete(sessionId);
+        for (const [successorId, sourceId] of this.handoffSuccessors) {
+          if (sourceId === sessionId) this.handoffSuccessors.delete(successorId);
+        }
       }
     }
   }
@@ -25199,7 +26276,8 @@ export class SessionService {
     request: HandoffSessionRequest,
     options: { todoActor?: TodoActor } | undefined,
     waiting: HandoffAdmission,
-  ): Promise<SessionView> {
+    idempotency?: HandoffIdempotency,
+  ): Promise<HandoffSessionResponse> {
     // Persisted background takes refuse now; only foreground takes wait.
     this.assertNoHeldCloseoutTake(sessionId);
     await this.waitForCloseoutTakeFrom(sessionId);
@@ -25214,8 +26292,24 @@ export class SessionService {
     const prepared = await this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.prepareHandoffLocked(sessionId, request, options, admitted),
     );
+    // spawnOnce rolls back its own failures. From here, the successor holds the copies until the
+    // source commit: any earlier failure cancels them, any later one keeps them (successor is live).
+    let successorId: string | undefined;
+    let sourceCommitted = false;
+    let rolledBack = false;
+    const rollbackCopies = (): void => {
+      if (!successorId || sourceCommitted || rolledBack || prepared.inheritedTodo.length === 0) {
+        return;
+      }
+      rolledBack = true;
+      this.rollbackInheritedTodoLocked(
+        { id: successorId, project: prepared.sourceProject },
+        prepared.inheritedTodo,
+      );
+    };
     try {
       const spawned = await this.spawn(prepared.spawnRequest, prepared.spawnOptions);
+      successorId = spawned.id;
       const receipt = this.foregroundSpawnReceipts.get(prepared.receiptToken);
       if (!receipt || receipt.sessionId !== spawned.id) {
         throw new Error(`Handoff successor receipt unavailable for ${spawned.id}`);
@@ -25227,66 +26321,115 @@ export class SessionService {
           this.displaySlotsForSession(source)?.links ?? [],
           spawned.id,
         );
+      const closeoutHeadSha = await this.withCloseoutHeads(
+        [sessionId],
+        async (heads) => heads.get(sessionId) ?? null,
+      );
       const finalized = await this.withPaneWriteLock(receipt.generation.tmuxSession, () =>
         this.withSessionLifecycleLocks(
           [...prepared.lifecycleIds, spawned.id],
           async (): Promise<SessionRecord> => {
-            const claim = this.handoffsInFlight.get(sessionId);
-            const source = readSession(this.config.dataDir, sessionId);
-            const successor = readSession(this.config.dataDir, spawned.id);
-            const sourceMatches =
-              source !== null &&
-              source.id === prepared.sourceStamp.id &&
-              workspaceIdOf(source) === prepared.sourceStamp.workspaceId &&
-              source.status === prepared.sourceStamp.status &&
-              source.stopReason === prepared.sourceStamp.stopReason &&
-              source.updatedAt === prepared.sourceStamp.updatedAt &&
-              source.tmuxSession === prepared.sourceStamp.tmuxSession;
-            const successorMatches =
-              successor !== null &&
-              successor.id === receipt.sessionId &&
-              workspaceIdOf(successor) === receipt.workspaceId &&
-              successor.tmuxSession === receipt.generation.tmuxSession &&
-              (await this.paneGenerationMatches(successor, receipt.generation));
-            if (claim?.token !== prepared.token || !sourceMatches || !successorMatches) {
-              throw new Error(`Handoff state changed before finalization for ${sessionId}`);
-            }
+            try {
+              const claim = this.handoffsInFlight.get(sessionId);
+              const source = readSession(this.config.dataDir, sessionId);
+              const successor = readSession(this.config.dataDir, spawned.id);
+              const sourceMatches =
+                source !== null &&
+                source.id === prepared.sourceStamp.id &&
+                workspaceIdOf(source) === prepared.sourceStamp.workspaceId &&
+                source.status === prepared.sourceStamp.status &&
+                source.stopReason === prepared.sourceStamp.stopReason &&
+                source.updatedAt === prepared.sourceStamp.updatedAt &&
+                source.tmuxSession === prepared.sourceStamp.tmuxSession;
+              const successorMatches =
+                successor !== null &&
+                successor.id === receipt.sessionId &&
+                workspaceIdOf(successor) === receipt.workspaceId &&
+                successor.tmuxSession === receipt.generation.tmuxSession &&
+                (await this.paneGenerationMatches(successor, receipt.generation));
+              if (claim?.token !== prepared.token || !sourceMatches || !successorMatches) {
+                throw new Error(`Handoff state changed before finalization for ${sessionId}`);
+              }
 
-            if (prepared.carryTags.length > 0) {
-              const workspaceState = resolveWorkspaceState(this.config.dataDir, successor);
-              const slots = applySlotsUpdate(workspaceState.slots, { tags: prepared.carryTags });
-              this.writeWorkspaceStateWithLegacyMirror(successor, {
-                ...(workspaceState.prAlertOwner
-                  ? { prAlertOwner: workspaceState.prAlertOwner }
-                  : {}),
-                ...(slots ? { slots } : {}),
-                ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
+              if (prepared.carryTags.length > 0) {
+                const workspaceState = resolveWorkspaceState(this.config.dataDir, successor);
+                const slots = applySlotsUpdate(workspaceState.slots, { tags: prepared.carryTags });
+                this.writeWorkspaceStateWithLegacyMirror(successor, {
+                  ...(workspaceState.prAlertOwner
+                    ? { prAlertOwner: workspaceState.prAlertOwner }
+                    : {}),
+                  ...(slots ? { slots } : {}),
+                  ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
+                });
+              }
+              const successorAfterTags = readSession(this.config.dataDir, spawned.id);
+              if (!successorAfterTags) {
+                throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
+              }
+              writeSession(this.config.dataDir, {
+                ...successorAfterTags,
+                ...(prepared.sourcePr ? { pr: prepared.sourcePr } : {}),
+                originalTaskPrompt: prepared.originalTask,
+                updatedAt: nowIso(),
               });
+              if (prepared.inheritedTodo.length > 0) {
+                sourceCommitted = true;
+                closeTodoItems(
+                  this.config.dataDir,
+                  { id: sessionId, project: prepared.sourceProject },
+                  prepared.inheritedTodo.map((item) => ({
+                    itemId: item.from.itemId,
+                    handoffTo: { sessionId: spawned.id, itemId: item.itemId },
+                  })),
+                  `handed off to ${spawned.id}`,
+                );
+              }
+              this.clearCloseoutOwner(sessionId);
+              await this.applyManualStatusLocked(
+                sessionId,
+                "completed",
+                { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+                {
+                  retainInList: true,
+                  eventAction: "handoff",
+                  handoffDetails: prepared.handoffDetails,
+                  closeoutHeadSha,
+                  ...(idempotency
+                    ? {
+                        handoffReceipt: {
+                          ...idempotency,
+                          successorId: spawned.id,
+                          movedTodoItems: prepared.inheritedTodo.length,
+                        },
+                      }
+                    : {}),
+                },
+              );
+              const latest = readSession(this.config.dataDir, spawned.id);
+              if (!latest)
+                throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
+              return latest;
+            } catch (error) {
+              rollbackCopies();
+              throw error;
             }
-            const successorAfterTags = readSession(this.config.dataDir, spawned.id);
-            if (!successorAfterTags) {
-              throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
-            }
-            writeSession(this.config.dataDir, {
-              ...successorAfterTags,
-              ...(prepared.sourcePr ? { pr: prepared.sourcePr } : {}),
-              originalTaskPrompt: prepared.originalTask,
-              updatedAt: nowIso(),
-            });
-            this.clearCloseoutOwner(sessionId);
-            await this.applyManualStatusLocked(
-              sessionId,
-              "completed",
-              { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-              { retainInList: true, eventAction: "handoff" },
-            );
-            const latest = readSession(this.config.dataDir, spawned.id);
-            if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
-            return latest;
           },
         ),
       );
-      return await this.enrich(finalized);
+      return {
+        ...(await this.enrich(finalized)),
+        movedTodoItems: prepared.inheritedTodo.length,
+      };
+    } catch (error) {
+      // rollbackCopies re-checks sourceCommitted and rolledBack; they are set inside closures.
+      if (successorId && prepared.inheritedTodo.length > 0) {
+        const failedSuccessorId = successorId;
+        await this.withSessionLifecycleLocks(
+          [...prepared.lifecycleIds, failedSuccessorId],
+          async () => rollbackCopies(),
+        );
+      }
+      throw error;
     } finally {
       this.foregroundSpawnReceipts.delete(prepared.receiptToken);
     }
@@ -25295,7 +26438,11 @@ export class SessionService {
   private validateHandoffSource(
     sessionId: string,
     options?: { todoActor?: TodoActor },
-  ): SessionRecord {
+  ): {
+    session: SessionRecord;
+    projection: TodoProjection;
+    snapshotGate?: HandoffEventDetails["snapshotGate"];
+  } {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -25304,7 +26451,8 @@ export class SessionService {
       session.status !== "running" &&
       session.status !== "spawning" &&
       session.status !== "paused" &&
-      session.status !== "stopped"
+      session.status !== "stopped" &&
+      session.status !== "errored"
     ) {
       throw new Error(
         `Session ${sessionId} is not eligible for handoff (status: ${session.status})`,
@@ -25313,22 +26461,235 @@ export class SessionService {
     if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
     }
-    const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
-    const handoffBlock = todoLedgerBlock(handoffProjection);
-    if (handoffBlock && options?.todoActor?.kind !== "human") {
-      const error =
-        handoffBlock === "empty"
-          ? new TodoEmptyLedgerError([sessionId])
-          : new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(handoffProjection) }]);
+    const actor = options?.todoActor;
+    const human = actor?.kind === "human";
+    // No actor is an unattributed caller: it keeps the agent gates of its own session.
+    const otherAgent = actor?.kind === "agent" && actor.sessionId !== sessionId;
+    const markerless = !session.rateLimitedAt && !session.serverErrorAt;
+    const stalled =
+      session.status === "stopped" ||
+      session.status === "paused" ||
+      session.status === "errored" ||
+      !markerless;
+    if (otherAgent && !stalled) {
+      const error = new HandoffTargetNotStalledError(sessionId, session.status);
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    if (this.snapshotGateBlocks(session, handoffProjection.revision, "any", options?.todoActor)) {
+    this.reconcileHandoffTodoLocked(session, () =>
+      listSessions(this.config.dataDir).filter(
+        (candidate) => workspaceIdOf(candidate) === workspaceIdOf(session),
+      ),
+    );
+    const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
+    if (!human && !otherAgent && todoLedgerBlock(handoffProjection) === "empty") {
+      const error = new TodoEmptyLedgerError([sessionId]);
+      this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
+      throw error;
+    }
+    if (human || !snapshotSettings(this.resolveProjectForSession(session)).requireFinal) {
+      return { session, projection: handoffProjection };
+    }
+    // Only a healthy running source can still write the snapshot the gate asks for.
+    const sourceCanWrite =
+      !otherAgent && (session.status === "running" || session.status === "spawning") && markerless;
+    if (
+      sourceCanWrite &&
+      this.snapshotGateBlocks(session, handoffProjection.revision, "any", actor)
+    ) {
       const error = new WorkSnapshotRequiredError([sessionId], "any");
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    return session;
+    return {
+      session,
+      projection: handoffProjection,
+      snapshotGate: sourceCanWrite ? "applied" : "skipped_source_cannot_write",
+    };
+  }
+
+  // A handoff that stopped after the successor went live but before the source cancel leaves open
+  // copies in both ledgers. The successor's `handoffFrom` refs say which source items it holds, so
+  // cancel those. The source session stays stopped: the successor owns the work, and a person or
+  // agent can complete the source. Caller holds the source's workspace lifecycle lock.
+  // A handoff in flight for the source owns its copies (they roll back on failure): never reconcile
+  // against them. `sameWorkspace` is read only when the source still has open or held items.
+  private reconcileHandoffTodoLocked(
+    source: SessionRecord,
+    sameWorkspace: () => readonly SessionRecord[],
+  ): void {
+    if (this.handoffsInFlight.has(source.id)) return;
+    const projection = readTodoIfPresent(this.config.dataDir, source.id);
+    if (!projection || projection.counts.open + projection.counts.held === 0) return;
+    const ledgers: Array<{ sessionId: string; projection: TodoProjection; live: boolean }> = [];
+    for (const candidate of sameWorkspace()) {
+      if (candidate.id === source.id) continue;
+      // Live: not terminal and, while `spawning`, past the start of its launch (`agentLaunchId`).
+      const live =
+        !isTerminalSessionStatus(candidate.status) &&
+        !(candidate.status === "spawning" && !candidate.agentLaunchId);
+      try {
+        const candidateProjection = readTodoIfPresent(this.config.dataDir, candidate.id);
+        if (candidateProjection) {
+          ledgers.push({ sessionId: candidate.id, projection: candidateProjection, live });
+        }
+      } catch (error) {
+        // One damaged sibling ledger must not block the source.
+        if (!(error instanceof TodoLedgerCorruptError)) throw error;
+      }
+    }
+    const planned = planHandoffReconcile(projection, source.id, ledgers);
+    for (const successorId of new Set(planned.map((entry) => entry.successorId))) {
+      const closes = planned.filter((entry) => entry.successorId === successorId);
+      const closed = closeTodoItems(
+        this.config.dataDir,
+        source,
+        closes.map(({ itemId, handoffTo }) => ({ itemId, handoffTo })),
+        `handed off to ${successorId}`,
+      );
+      this.logEvent("session.handoff.todo_reconciled", {
+        level: "info",
+        sessionId: source.id,
+        projectId: source.project,
+        message: `Cancelled ${closed.length} ${source.id} ToDo item(s) already held by ${successorId}`,
+        details: { successorId, itemIds: closed },
+      });
+    }
+  }
+
+  // A successor still `spawning` without `agentLaunchId` never began its launch, so its inherited
+  // copies belong to no agent: cancel them as the failure rollback does, leaving the source items
+  // open for the next handoff.
+  private neutralizeUnlaunchedHandoffCopies(successor: SessionRecord): void {
+    const projection = readTodoIfPresent(this.config.dataDir, successor.id);
+    if (!projection) return;
+    const bySource = new Map<string, string[]>();
+    for (const item of projection.items) {
+      if (!item.handoffFrom || (item.status !== "open" && item.status !== "held")) continue;
+      const ids = bySource.get(item.handoffFrom.sessionId);
+      if (ids) ids.push(item.id);
+      else bySource.set(item.handoffFrom.sessionId, [item.id]);
+    }
+    for (const [sourceId, itemIds] of bySource) {
+      const closed = closeTodoItems(
+        this.config.dataDir,
+        successor,
+        itemIds.map((itemId) => ({ itemId })),
+        `handoff to ${successor.id} failed; item stays open in ${sourceId}`,
+      );
+      this.logEvent("session.handoff.todo_reconciled", {
+        level: "info",
+        sessionId: successor.id,
+        projectId: successor.project,
+        message: `Cancelled ${closed.length} unlaunched handoff ToDo copies in ${successor.id}; ${sourceId} keeps its items`,
+        details: { sourceId, itemIds: closed, rolledBack: true },
+      });
+    }
+  }
+
+  // Runs from applyConfig: at start and on every config reload. Synchronous on purpose: it must
+  // finish before boot reconciliation can flip an unlaunched successor to `stopped`, where it would
+  // pass for a launched owner. `spawnsInFlight` keeps it off spawns this process is running, and
+  // nothing else writes a spawning record's ledger, so no lifecycle lock is needed.
+  private rollbackUnlaunchedHandoffCopies(sessions: readonly SessionRecord[]): void {
+    for (const successor of sessions) {
+      // `agentLaunchId` is persisted before the launch prompt can be delivered: a record carrying
+      // it may own live work, so it keeps its copies (a restorable stopped session after boot).
+      if (
+        successor.status !== "spawning" ||
+        successor.agentLaunchId ||
+        this.spawnsInFlight.has(successor.id)
+      ) {
+        continue;
+      }
+      try {
+        this.neutralizeUnlaunchedHandoffCopies(successor);
+      } catch (error) {
+        this.logEvent("session.handoff.todo_reconcile_failed", {
+          level: "warn",
+          sessionId: successor.id,
+          projectId: successor.project,
+          message: `Could not neutralize handoff ToDo copies of ${successor.id}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+  }
+
+  // `all` is the session list applyConfig already read; records are re-read under the lock.
+  private async recoverHandoffTodo(
+    all: readonly SessionRecord[] = listSessions(this.config.dataDir),
+  ): Promise<void> {
+    const byWorkspace = new Map<string, SessionRecord[]>();
+    // Only a session that some ledger names in `handoffFrom` can be an interrupted handoff's
+    // source: one ledger read per session, no lock or record read for the rest.
+    const referenced = new Set<string>();
+    for (const candidate of all) {
+      const key = workspaceIdOf(candidate);
+      const members = byWorkspace.get(key);
+      if (members) members.push(candidate);
+      else byWorkspace.set(key, [candidate]);
+      try {
+        for (const item of readTodoIfPresent(this.config.dataDir, candidate.id)?.items ?? []) {
+          if (item.handoffFrom) referenced.add(item.handoffFrom.sessionId);
+        }
+      } catch (error) {
+        if (!(error instanceof TodoLedgerCorruptError)) throw error;
+      }
+    }
+    for (const source of all) {
+      if (isTerminalSessionStatus(source.status) || !referenced.has(source.id)) continue;
+      try {
+        await this.withWorkspaceLifecycleLocks(source.id, async () => {
+          const current = readSession(this.config.dataDir, source.id);
+          if (current && !isTerminalSessionStatus(current.status)) {
+            // The grouped list only names candidates; status and workspace are re-read under the
+            // lock, since a successor may have been killed while this waited.
+            const workspaceId = workspaceIdOf(current);
+            this.reconcileHandoffTodoLocked(current, () =>
+              (byWorkspace.get(workspaceId) ?? []).flatMap((candidate) => {
+                const fresh = readSession(this.config.dataDir, candidate.id);
+                return fresh && workspaceIdOf(fresh) === workspaceId ? [fresh] : [];
+              }),
+            );
+          }
+        });
+      } catch (error) {
+        this.logEvent("session.handoff.todo_reconcile_failed", {
+          level: "warn",
+          sessionId: source.id,
+          projectId: source.project,
+          message: `Could not reconcile handoff ToDo for ${source.id}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+  }
+
+  private rollbackInheritedTodoLocked(
+    successor: Pick<SessionRecord, "id" | "project">,
+    items: readonly HandoffTodoItem[],
+  ): void {
+    // Callers pass a non-empty plan from one source ledger.
+    const sourceId = items[0]?.from.sessionId;
+    try {
+      closeTodoItems(
+        this.config.dataDir,
+        successor,
+        items.map((item) => ({ itemId: item.itemId })),
+        `handoff to ${successor.id} failed; item stays open in ${sourceId}`,
+      );
+    } catch (error) {
+      this.logEvent("session.handoff.todo_rollback_failed", {
+        level: "warn",
+        sessionId: successor.id,
+        projectId: successor.project,
+        message: `Could not cancel inherited ToDo copies in ${successor.id} after a failed handoff from ${sourceId}`,
+        details: {
+          successorId: successor.id,
+          sourceId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
   }
 
   private async prepareHandoffLocked(
@@ -25337,7 +26698,7 @@ export class SessionService {
     options: { todoActor?: TodoActor } | undefined,
     waiting: HandoffAdmission,
   ): Promise<PreparedHandoff> {
-    const session = this.validateHandoffSource(sessionId, options);
+    const { session, projection, snapshotGate } = this.validateHandoffSource(sessionId, options);
     const admissionReservation = waiting.admissionReservation;
     if (
       this.handoffsInFlight.get(sessionId)?.token !== waiting.token ||
@@ -25377,9 +26738,55 @@ export class SessionService {
         }
       }
       const model = resolveCarriedSpawnModel(session, agent, request.model);
+      const carriedAccountId = carriedAuthAccountId(session, agent);
+      let handoffAuthAccountId: string | undefined;
+      if (typeof carriedAccountId === "string") {
+        if (
+          this.authAccounts
+            .read()
+            .accounts.some((entry) => entry.id === carriedAccountId && entry.provider === agent)
+        ) {
+          handoffAuthAccountId = carriedAccountId;
+        } else {
+          this.logEvent("session.handoff.auth_account_missing", {
+            level: "warn",
+            sessionId,
+            projectId: session.project,
+            message: `Pinned ${agent} account is gone; handoff of ${sessionId} uses Auto`,
+            details: { accountId: carriedAccountId },
+          });
+        }
+      }
+
+      const inheritedTodo = planHandoffTodo(projection, sessionId);
+      let snapshot: HandoffPromptSnapshot | undefined;
+      let snapshotUnreadable: string | undefined;
+      try {
+        const latest = readSnapshotVersion(this.config.dataDir, session, "latest", "live");
+        if (latest) {
+          const { freshness } = await this.withFreshness(session, "live", latest);
+          snapshot = {
+            version: latest.version,
+            at: latest.at,
+            ageMinutes: Math.floor(freshness.ageSeconds / 60),
+            commitsSince: freshness.commitsSince,
+            stale: freshness.stale,
+            content: latest.content,
+            headSha: latest.headSha,
+          };
+        }
+      } catch (error) {
+        if (!(error instanceof SnapshotCorruptError)) throw error;
+        snapshotUnreadable = error.message;
+      }
 
       let sourceForSpawn = session;
-      if (session.status === "running" || session.status === "spawning") {
+      if (
+        session.status === "running" ||
+        session.status === "spawning" ||
+        session.status === "errored"
+      ) {
+        const observedState = this.stateCache.get(sessionId)?.state;
         const stopped: SessionRecord = {
           ...this.sessionWithReleasedSidecarPorts(session),
           status: "stopped",
@@ -25390,6 +26797,12 @@ export class SessionService {
         writeSession(this.config.dataDir, stopped);
         this.stateCache.delete(sessionId);
         await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+        // The forced stop skips the transition capture: take the tail since the last one.
+        await this.captureStateTransitionArtifact(session, {
+          at: nowIso(),
+          fromState: observedState ?? (session.status === "errored" ? "error" : "working"),
+          toState: "stopped",
+        });
         await this.cleanupSessionServices(stopped);
         sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
       }
@@ -25407,8 +26820,19 @@ export class SessionService {
         ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
         ...(notes ? { notes } : {}),
         ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+        inheritedTodo,
+        ...(snapshot ? { snapshot } : {}),
+        ...(snapshotUnreadable ? { snapshotUnreadable } : {}),
       });
 
+      const todoActor = options?.todoActor;
+      const handoffDetails: HandoffEventDetails = {
+        actor: todoActor ?? null,
+        ...(todoActor?.kind === "agent" ? { callerSessionId: todoActor.sessionId } : {}),
+        movedItems: inheritedTodo.map((item) => ({ from: item.from.itemId, to: item.itemId })),
+        ...(snapshot ? { snapshotVersion: snapshot.version } : {}),
+        ...(snapshotGate ? { snapshotGate } : {}),
+      };
       this.logEvent("session.handoff.started", {
         level: "info",
         sessionId,
@@ -25418,6 +26842,7 @@ export class SessionService {
           sourceAgent: session.agent,
           targetAgent: agent,
           ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+          ...handoffDetails,
         },
       });
 
@@ -25439,6 +26864,8 @@ export class SessionService {
       const continuation = this.prAlertTransferFrom(sourceForSpawn, "handoff");
       const prAlertOwnerTransfer = continuation?.kind === "owner" ? continuation : undefined;
       return {
+        inheritedTodo,
+        handoffDetails,
         token,
         lifecycleIds,
         sourceStamp,
@@ -25458,6 +26885,7 @@ export class SessionService {
           originalTaskPrompt: originalTask,
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
           ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
+          ...(handoffAuthAccountId !== undefined ? { authAccountId: handoffAuthAccountId } : {}),
         }),
         spawnOptions: {
           replacingSessionId: session.id,
@@ -25467,6 +26895,7 @@ export class SessionService {
           ...(prAlertOwnerTransfer ? { prAlertOwnerTransfer } : {}),
           validatedLaunchSelection: launchSelection,
           receiptToken,
+          ...(inheritedTodo.length > 0 ? { inheritedTodo } : {}),
         },
       };
     } catch (error) {
@@ -29031,8 +30460,11 @@ export class SessionService {
       agentSessionId: _agentSessionId,
       agentLaunchId: _agentLaunchId,
       claudeStatusOwner: _claudeStatusOwner,
+      taskStatus: _taskStatus,
+      taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      handoffIdempotency: _handoffIdempotency,
       blockedTriggerNotices: _blockedTriggerNotices,
       spawnIntent: _spawnIntent,
       sidecarLaunches: _sidecarLaunches,
@@ -29047,14 +30479,20 @@ export class SessionService {
       rateLimitResetAt: _oldReset,
       ...dashboardSession
     } = session;
-    const state = this.stabilizeState(
-      session.id,
-      hasRetainedSessionError(session) ? "error" : classified.state,
+    const rawState = hasRetainedSessionError(session) ? "error" : classified.state;
+    const state = projectTaskStatus(
+      session,
+      rawState,
+      this.stabilizeState(session.id, rawState),
+      classified.runtime.runtimeAlive,
+      workspacePresent,
     );
     await this.updateStateHistory(
       session,
       state,
-      classified.source,
+      state !== rawState && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
@@ -29304,16 +30742,29 @@ export class SessionService {
     return latest;
   }
 
-  // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
-  // Computed once per listSessions() batch and threaded into every enrich so a
-  // batch of N claude sessions does one listAccounts read instead of N.
-  // Empty when authRotation.switchAuth is off: the web hides Switch auth on it.
-  private computeClaudeAccountsView(): { id: string; label?: string; authenticated: boolean }[] {
+  // Compatibility projection for the legacy Claude session-switch menu.
+  private async computeClaudeAccountsView(): Promise<
+    { id: string; label?: string; authenticated: boolean }[]
+  > {
     if (!this.config.authRotation.switchAuth) return [];
-    return listAccounts(this.config.dataDir).map((account) => ({
+    let accounts: Pick<AuthAccountSummary, "id" | "displayName" | "authenticated">[];
+    try {
+      accounts = (await this.listAuthorizationAccounts("claude")).accounts;
+    } catch {
+      const stored = this.authAccounts.read().accounts;
+      const names = authDisplayNames(stored);
+      accounts = stored
+        .filter((account) => account.provider === "claude")
+        .map((account) => ({
+          id: account.id,
+          displayName: names.get(account.id) ?? account.id,
+          authenticated: false,
+        }));
+    }
+    return accounts.map((account) => ({
       id: account.id,
-      ...(account.label ? { label: account.label } : {}),
-      authenticated: isAccountAuthenticated(account),
+      label: account.displayName,
+      authenticated: account.authenticated,
     }));
   }
 
@@ -29453,11 +30904,19 @@ export class SessionService {
     session = reported;
     classified.session = session;
     if (hasRetainedSessionError(session)) classified.state = "error";
-    const state = this.stabilizeState(session.id, classified.state);
+    const state = projectTaskStatus(
+      session,
+      classified.state,
+      this.stabilizeState(session.id, classified.state),
+      classified.runtime.runtimeAlive,
+      workspacePresent,
+    );
     await this.updateStateHistory(
       session,
       state,
-      classified.source,
+      state !== classified.state && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
@@ -29488,15 +30947,32 @@ export class SessionService {
       sessionBatch,
     );
     const resolvedClaudeAccounts =
-      session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
+      session.agent === "claude"
+        ? (claudeAccounts ?? (await this.computeClaudeAccountsView()))
+        : [];
+    let effectiveAuth = session.auth;
+    let authError: string | undefined;
+    if (session.auth) {
+      try {
+        effectiveAuth =
+          (await this.readAuthorizationState()).sessions.find(
+            (entry) => entry.sessionId === session.id,
+          ) ?? session.auth;
+      } catch {
+        authError = "Managed authorization proxy unavailable";
+      }
+    }
     const {
       launchCommand: _launchCommand,
       prompt: _prompt,
       originalTaskPrompt: _originalTaskPrompt,
       agentLaunchId: _agentLaunchId,
       claudeStatusOwner: _claudeStatusOwner,
+      taskStatus: _taskStatus,
+      taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      handoffIdempotency: _handoffIdempotency,
       blockedTriggerNotices: _blockedTriggerNotices,
       spawnIntent: _spawnIntent,
       sidecarLaunches: _sidecarLaunches,
@@ -29517,6 +30993,8 @@ export class SessionService {
 
     const view: Omit<SessionListItemView, "lifecycle"> = {
       ...sessionWithoutDetailFields,
+      ...(effectiveAuth ? { auth: effectiveAuth } : {}),
+      ...(authError ? { authError } : {}),
       ...(session.spawnIntent ? { spawnIntent: publicSpawnIntent(session.spawnIntent) } : {}),
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
@@ -29537,7 +31015,11 @@ export class SessionService {
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
       ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
       ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
-      ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
+      ...(session.agent === "claude" && effectiveAuth
+        ? { activeClaudeAccountId: effectiveAuth.effectiveAccountId }
+        : session.claudeAccountId
+          ? { activeClaudeAccountId: session.claudeAccountId }
+          : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
       tokenUsageView,
       preflightTokenUsageView: this.derivePreflightTokenUsageView(session),

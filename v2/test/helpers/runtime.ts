@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { readGitHubSourceSnapshot } from "../../src/metadata.js";
+import { writeFileAtomic } from "../../src/session-memory.js";
 import type { RuntimeInfo, TodoProjection } from "../../src/types.js";
 import {
   createTempDir,
@@ -1621,7 +1622,7 @@ ${content}`,
   };
 
   const writeGhState = async (state: FakeGhState): Promise<void> => {
-    await writeFile(ghStateFile, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    writeFileAtomic(ghStateFile, `${JSON.stringify(state, null, 2)}\n`);
   };
 
   const cleanup = async (): Promise<void> => {

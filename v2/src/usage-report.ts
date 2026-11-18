@@ -24,7 +24,8 @@ export type QuotaErrorKind =
   | "rate_limited"
   | "http_error"
   | "network_error"
-  | "unparsable";
+  | "unparsable"
+  | "pending";
 
 interface QuotaSourceBase {
   provider: QuotaProvider;
@@ -54,12 +55,24 @@ export interface UsageReportDeps {
   dataDir: string;
   nowMs: number;
   todayStartMs: number;
+  /** Every managed-account-store account with its cached quota; see AuthAccountSummary. */
+  managedAccounts?: ManagedQuotaAccount[];
+}
+
+export interface ManagedQuotaAccount {
+  id: string;
+  provider: QuotaProvider;
+  displayName: string;
+  credential?: "oauth" | "api_key";
+  status: string;
+  quota?: { windows: QuotaWindow[]; fetchedAt: string };
+  quotaError?: QuotaErrorKind;
 }
 
 const CLAUDE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_URL = "https://chatgpt.com/backend-api/wham/usage";
-const CACHE_TTL_MS = 180_000;
-const MAX_RETRY_AFTER_S = 3600;
+export const CACHE_TTL_MS = 180_000;
+export const MAX_RETRY_AFTER_S = 3600;
 const FETCH_TIMEOUT_MS = 5_000;
 
 const ERROR_MESSAGES: Record<QuotaErrorKind, string> = {
@@ -70,6 +83,7 @@ const ERROR_MESSAGES: Record<QuotaErrorKind, string> = {
   http_error: "usage endpoint returned an error",
   network_error: "usage endpoint unreachable",
   unparsable: "usage response not recognized",
+  pending: "quota not fetched yet",
 };
 
 type Obj = Record<string, unknown>;
@@ -391,10 +405,11 @@ function cached(
   key: string,
   nowMs: number,
   run: () => Promise<FetchOutcome>,
+  fresh = false,
 ): Promise<QuotaSourceResult> {
   const entry = cache.get(key);
-  if (entry?.inflight) return entry.inflight;
-  if (entry?.settled && entry.settled.expiresAtMs > nowMs)
+  if (!fresh && entry?.inflight) return entry.inflight;
+  if (!fresh && entry?.settled && entry.settled.expiresAtMs > nowMs)
     return Promise.resolve(entry.settled.result);
   const next: CacheEntry = { inflight: null, settled: entry?.settled ?? null };
   next.inflight = run()
@@ -450,9 +465,7 @@ async function claudeSource(
       },
       best.plan,
     );
-  return fresh
-    ? (await fetchQuota()).result
-    : cached(`claude:${account.id}`, deps.nowMs, fetchQuota);
+  return cached(`claude:${account.id}`, deps.nowMs, fetchQuota, fresh);
 }
 
 async function codexSource(deps: UsageReportDeps, fresh = false): Promise<QuotaSourceResult> {
@@ -462,7 +475,26 @@ async function codexSource(deps: UsageReportDeps, fresh = false): Promise<QuotaS
   const headers: Record<string, string> = { Authorization: `Bearer ${credential.accessToken}` };
   if (credential.accountId !== null) headers["ChatGPT-Account-Id"] = credential.accountId;
   const fetchQuota = () => requestQuota(deps, base, CODEX_URL, headers, parseCodexUsage, null);
-  return fresh ? (await fetchQuota()).result : cached("codex:codex", deps.nowMs, fetchQuota);
+  return cached("codex:codex", deps.nowMs, fetchQuota, fresh);
+}
+
+/** Host logins the daemon user's CLIs own: Claude default (when its file exists) and Codex. */
+export async function readHostCredentialSources(
+  deps: UsageReportDeps,
+  fresh = false,
+): Promise<QuotaSourceResult[]> {
+  const defaultDir = join(deps.homeDir, ".claude");
+  const claude = (await fileExists(join(defaultDir, ".credentials.json")))
+    ? [
+        claudeSource(
+          deps,
+          { id: "default", label: "default", configDir: defaultDir, createdAt: "" },
+          [],
+          fresh,
+        ),
+      ]
+    : [];
+  return Promise.all([...claude, codexSource(deps, fresh)]);
 }
 
 export async function readFreshSessionQuota(
@@ -544,19 +576,53 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
   ) {
     accounts.unshift({ id: "default", label: "default", configDir: defaultDir, createdAt: "" });
   }
-  const [quotas, tokens] = await Promise.all([
+  const managed = deps.managedAccounts ?? [];
+  const managedProviders = new Set(
+    managed.filter((account) => account.status === "ready").map((account) => account.provider),
+  );
+  const hostAccounts = managedProviders.has("claude")
+    ? accounts.filter((account) => account.configDir !== defaultDir)
+    : accounts;
+  const [hostQuotas, tokens] = await Promise.all([
     Promise.all([
-      ...accounts.map((account) =>
+      ...hostAccounts.map((account) =>
         claudeSource(
           deps,
           account,
           sessions.filter((s) => s.claudeAccountId === account.id).map((s) => s.id),
         ),
       ),
-      codexSource(deps),
+      ...(managedProviders.has("codex") ? [] : [codexSource(deps)]),
     ]),
     tokenActivity(deps, sessions),
   ]);
+  const managedQuotas = managed.flatMap((account): QuotaSourceResult[] => {
+    if (account.status !== "ready" || account.credential !== "oauth") return [];
+    if (!account.quota) {
+      const row = errorResult(
+        { provider: account.provider, source: account.id, label: account.displayName },
+        deps.nowMs,
+        account.quotaError ?? "pending",
+      );
+      return [
+        row.status === "error" && row.error === "unauthorized"
+          ? { ...row, message: "sign-in rejected; sign in again from the accounts menu" }
+          : row,
+      ];
+    }
+    return [
+      {
+        provider: account.provider,
+        source: account.id,
+        label: account.displayName,
+        fetchedAt: account.quota.fetchedAt,
+        status: "ok",
+        plan: null,
+        windows: account.quota.windows,
+      },
+    ];
+  });
+  const quotas = [...hostQuotas, ...managedQuotas];
   return {
     generatedAt: new Date(deps.nowMs).toISOString(),
     quotas,

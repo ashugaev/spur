@@ -50,7 +50,7 @@ import {
 import { reviewSignalChanged } from "../review-providers/shared.js";
 import { readPrAlertOwnership, resolveWorkspaceState } from "../workspace-store.js";
 import { workspaceIdOf } from "../session-desk.js";
-import { allowsPrAlertIdentity, isPrAlertEvent } from "../pr-alert-owner.js";
+import { allowsPrAlertIdentity, isPrAlertEvent, PR_ALERT_KINDS } from "../pr-alert-owner.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -847,6 +847,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           if (collected.mergeableUnknown && !next.has("merge_conflict") && heldConflict) {
             next.set("merge_conflict", heldConflict);
           }
+          const heldOutOfDate = previous?.get("out_of_date");
+          if (collected.mergeableUnknown && !next.has("out_of_date") && heldOutOfDate) {
+            next.set("out_of_date", heldOutOfDate);
+          }
           const alertReady = allowsPrAlertIdentity(deps.dataDir, session, collected.data);
           const alertOwner = readPrAlertOwnership(deps.dataDir, workspaceIdOf(session));
           const rollbackId =
@@ -858,8 +862,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             rollbackId !== undefined && rollbackId !== priorSnapshot?.ownerRollbackId;
           const observedRollbackId = rollbackId ?? priorSnapshot?.ownerRollbackId;
           if (!alertReady) {
-            next.delete("ci_failed");
-            next.delete("merge_conflict");
+            for (const kind of PR_ALERT_KINDS) next.delete(kind);
           }
           const firstCi = next.get("ci_failed");
           if (
@@ -914,7 +917,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           }
           const candidates = previous ? changed : emitInitial ? [...next.values()] : [];
           if (recheckRollback) {
-            for (const key of ["merge_conflict", "ci_failed"]) {
+            for (const key of PR_ALERT_KINDS) {
               const active = next.get(key);
               if (key === "ci_failed" && !active?.ciRun) continue;
               if (active && !candidates.some((candidate) => candidate.kind === active.kind))
@@ -925,7 +928,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           // rebind, dropped snapshot) pings even when the source does not emit initial
           // state. Auto-ping dedupe bounds replays after restart.
           if (!previous) {
-            for (const key of ["merge_conflict", "ci_failed"]) {
+            for (const key of PR_ALERT_KINDS) {
               const first = next.get(key);
               // CI without a head commit has no dedupe key: never replay it unguarded.
               if (key === "ci_failed" && !first?.ciRun) continue;

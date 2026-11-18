@@ -18,9 +18,9 @@ INTERFACE
   Preserve screenshot approval gate per design skill; matching prior approval counts, changed scope invalidates affected approval.
   Require reviewer to classify final interface scope; record missing/stale interface approval without blocking inspection, verdict or publication. Never claim retroactive consent.
   When session has Telegram, request required interface consent before coding with `spur source reply --request-interface-approval`; otherwise ask in session chat only; schema: v2/src/review-interface.ts.
-  Manifest clause (before/after/constraints): one fact, max 80 chars, plain words; no file path or code identifier unless it is the user-facing surface, e.g. a flag name. Fewer clauses over longer ones; each still states full consented behavior, never drop scope to fit.
-  SUMMARY: Write in requester language and plain words; max 600 characters, 7 nonblank lines, 3 change bullets. Name PR and effect, ask one decision, state one restriction. Omit hashes, session IDs, paths, raw schema and check history; omit unused bullets. Use:
-  Approve <PR>: <effect>?
+  Manifest clause (before/after/constraints): one fact, max 80 chars, plain words; no file path or code identifier unless it is the user-facing surface, e.g. a flag name. Caps: per surface before max 3, after max 5, constraints max 2; whole manifest max 20 clauses. Merge related facts into one clause. Full consented scope stays; too many clauses means raise a surface split, never drop scope.
+  SUMMARY: Requester language, plain words; max 300 characters. Line 1: bold question. Then max 3 bullets, each max 60 chars, then one Restriction line. No preamble line, no repeat of clauses, no hashes, session IDs, paths, raw schema or check history; omit unused bullets. Use:
+  **Approve <PR>: <effect>?**
   - <change>
   - <change>
   - <change>

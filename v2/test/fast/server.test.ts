@@ -12,11 +12,14 @@ import { writeSession } from "../../src/metadata.js";
 import { sessionArtifactsDir } from "../../src/session-artifacts.js";
 import { startServer, type StartedServer } from "../../src/server.js";
 import { AgentModelError, AgentReasoningEffortError } from "../../src/agents/models.js";
+import { AuthProxy } from "../../src/auth-proxy.js";
 import { PrAlertOwnerRequestError } from "../../src/pr-alert-owner.js";
 import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
   buildForeignAgentProcessMessage,
   ForeignAgentProcessError,
+  IdempotencyKeyConflictError,
+  InvalidIdempotencyKeyError,
   LaunchPromptPendingError,
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
@@ -32,7 +35,12 @@ import {
   SpawnBatchConflictError,
   SessionService,
 } from "../../src/session-service.js";
-import type { SessionRecord, SessionView, SidecarStopView } from "../../src/types.js";
+import type {
+  SessionRecord,
+  SessionView,
+  SidecarStopView,
+  SpawnSessionResponse,
+} from "../../src/types.js";
 import {
   type ConfigRegistryFile,
   readConfigRegistryFile,
@@ -877,10 +885,10 @@ describe("startServer", () => {
   });
 
   it.each([
-    { enabled: false, status: 404 },
+    { enabled: false, status: 400 },
     { enabled: true, status: 400 },
   ])(
-    "POST /sessions/:id/switch-auth gate with authRotation.switchAuth=$enabled returns $status",
+    "POST /sessions/:id/switch-auth validates accounts with legacy menu=$enabled",
     async ({ enabled, status }) => {
       const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
       const repoDir = join(root, "repo");
@@ -2695,6 +2703,70 @@ describe("startServer", () => {
     }
   });
 
+  it.each([
+    ["/sessions", "foreground"],
+    ["/sessions/background", "background"],
+  ] as const)(
+    "idempotency HTTP at %s: 201 replayed, 409 idempotency_key_conflict, 400 invalid key",
+    async (route, delivery) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+      const repoDir = join(root, "repo");
+      const port = await findFreePort();
+      await mkdir(repoDir, { recursive: true });
+      const configPath = join(root, "spur.yaml");
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${join(root, "data")}`,
+          `worktreeDir: ${join(root, "worktrees")}`,
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+        "utf8",
+      );
+      const spawnFromRequest = vi
+        .spyOn(SessionService.prototype, "spawnFromRequest")
+        .mockResolvedValueOnce({ id: "demo-1", replayed: true } as SpawnSessionResponse)
+        .mockRejectedValueOnce(new IdempotencyKeyConflictError("different request", "demo-1"))
+        .mockRejectedValueOnce(new InvalidIdempotencyKeyError("bad key"));
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+      try {
+        const post = () =>
+          fetch(`http://127.0.0.1:${port}${route}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project: "demo", prompt: "ship it", idempotencyKey: "k" }),
+          });
+        const replayed = await post();
+        expect(replayed.status).toBe(201);
+        await expect(replayed.json()).resolves.toMatchObject({ id: "demo-1", replayed: true });
+        const conflict = await post();
+        expect(conflict.status).toBe(409);
+        await expect(conflict.json()).resolves.toEqual({
+          code: "idempotency_key_conflict",
+          sessionId: "demo-1",
+          error: "different request",
+        });
+        expect((await post()).status).toBe(400);
+        expect(spawnFromRequest).toHaveBeenCalledTimes(3);
+        expect(spawnFromRequest).toHaveBeenCalledWith(
+          expect.objectContaining({ project: "demo", idempotencyKey: "k" }),
+          delivery,
+        );
+      } finally {
+        spawnFromRequest.mockRestore();
+        await server.stop();
+      }
+    },
+  );
+
   it("routes backlog list through the session service", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -4173,6 +4245,9 @@ describe("startServer", () => {
       "utf8",
     );
 
+    const state = vi
+      .spyOn(AuthProxy.prototype, "getState")
+      .mockResolvedValue({ accounts: [], sessions: [] });
     const server = await startServer(configPath, {
       info: () => undefined,
       warn: () => undefined,
@@ -4203,9 +4278,10 @@ describe("startServer", () => {
       });
       expect(response.status).toBe(409);
       await expect(response.json()).resolves.toMatchObject({
-        error: expect.stringContaining("in use by 1 running session"),
+        error: expect.stringContaining("in use by a running session"),
       });
     } finally {
+      state.mockRestore();
       await server.stop();
     }
   });
@@ -4234,6 +4310,7 @@ describe("startServer", () => {
     );
 
     // Stub the login pane so the route mapping is tested without spawning tmux.
+    const configure = vi.spyOn(AuthProxy.prototype, "configure").mockResolvedValue();
     const startLoginSpy = vi
       .spyOn(SessionService.prototype, "startAccountLogin")
       .mockResolvedValue({ loginTmuxSession: "claude-login-test" });
@@ -4254,10 +4331,15 @@ describe("startServer", () => {
         loginTmuxSession: string;
       };
       expect(payload.loginTmuxSession).toBe("claude-login-test");
-      expect(payload.account).toMatchObject({ label: "work", authenticated: false });
+      expect(payload.account).toMatchObject({
+        label: "New Claude account",
+        authenticated: false,
+      });
       expect(payload.account.id).toEqual(expect.any(String));
       expect(payload.account).not.toHaveProperty("configDir");
+      expect(payload.account).not.toHaveProperty("identity");
     } finally {
+      configure.mockRestore();
       startLoginSpy.mockRestore();
       await server.stop();
     }

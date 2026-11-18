@@ -20,6 +20,20 @@ function reasonPreview(item: SpurTodoProjection["items"][number]): string {
   return transition?.reason ?? item.added.reason;
 }
 
+// An inherited item names its source before the reason.
+function secondaryLine(item: SpurTodoProjection["items"][number]): string {
+  if (!item.handoffFrom) return reasonPreview(item);
+  return `From ${item.handoffFrom.sessionId} · ${reasonPreview(item)}`;
+}
+
+function statusGlyph(item: SpurTodoProjection["items"][number]): { glyph: string; label: string } {
+  if (item.status === "cancelled" && item.handoffTo) return { glyph: "→", label: "handed off" };
+  if (item.status === "completed") return { glyph: "✓", label: item.status };
+  if (item.status === "cancelled") return { glyph: "×", label: item.status };
+  if (item.status === "held") return { glyph: "Ⅱ", label: item.status };
+  return { glyph: "○", label: item.status };
+}
+
 export function SessionTodo({ sessionId }: { sessionId: string }) {
   const [projection, setProjection] = useState<SpurTodoProjection | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -114,6 +128,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
             {projection.items.map((item) => {
               const isExpanded = expanded.has(item.id);
               const panelId = `todo-audit-${item.id}`;
+              const status = statusGlyph(item);
               const overrides = projection.finishOverrides.filter((event) =>
                 event.unfinishedItemIds.includes(item.id),
               );
@@ -134,16 +149,11 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
                     }
                   >
                     <span
-                      aria-label={item.status}
+                      role="img"
+                      aria-label={status.label}
                       className="uppercase text-[var(--color-text-tertiary)]"
                     >
-                      {item.status === "completed"
-                        ? "✓"
-                        : item.status === "cancelled"
-                          ? "×"
-                          : item.status === "held"
-                            ? "Ⅱ"
-                            : "○"}
+                      {status.glyph}
                     </span>
                     <span className="font-mono text-[var(--color-text-tertiary)]">
                       {item.id.slice(0, 8)}
@@ -157,7 +167,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
                         {item.text}
                       </span>
                       <span className="block truncate text-[var(--color-text-secondary)]">
-                        {reasonPreview(item)}
+                        {secondaryLine(item)}
                       </span>
                     </span>
                   </button>

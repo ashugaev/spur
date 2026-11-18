@@ -23,6 +23,7 @@ function composer(overrides: Partial<SpawnPayloadFields>): SpawnPayloadFields {
     steps: [],
     trackerUrl: null,
     workspaceMode: "worktree",
+    authAccountId: null,
     ...overrides,
   };
 }
@@ -65,6 +66,7 @@ describe("spawn composer payload builders", () => {
           ],
           trackerUrl: "https://example.com/issues/42",
           workspaceMode: "worktree",
+          authAccountId: "acc-work",
         }),
       ),
     ).toEqual({
@@ -73,6 +75,7 @@ describe("spawn composer payload builders", () => {
       agent: "claude",
       model: "opus",
       mode: "manager",
+      authAccountId: "acc-work",
       attachments: [{ name: "bad_name.png", data: "abc" }],
       branch: "feature-auth",
       planMode: true,

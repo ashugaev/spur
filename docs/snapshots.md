@@ -54,7 +54,7 @@ Per project, `projects.<id>.snapshots` ([configuration](configuration.md#field-r
 - `enabled` (`true`): `false` stops pane and Claude hook requests and the `requireFinal` gate. CLI and HTTP snapshot writes stay usable. `enabled: false` alone is valid.
 - `freshnessMinutes` (`30`): N.
 - `maxBytes` (`32768`, max `131072`): bytes per snapshot.
-- `requireFinal` (`false`): agent `complete`/`self-destruct` need a `--final` snapshot, `handoff` any, else `409 work_snapshot_required`. An explicit `requireFinal: true` with `enabled: false` fails config load, error names both keys.
+- `requireFinal` (`false`): agent `complete`/`self-destruct` need a `--final` snapshot, agent self-`handoff` of a running source any, else `409 work_snapshot_required`. `handoff` inlines the source's latest snapshot with freshness in the successor prompt up to 16384 bytes; a larger one is replaced by a `spur snapshot show` pointer (`v2/src/handoff-prompt.ts`). An explicit `requireFinal: true` with `enabled: false` fails config load, error names both keys.
 
 ```yaml
 projects:
