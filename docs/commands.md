@@ -3,8 +3,7 @@
 > Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md). CI scheduling: [ci-admission.md](ci-admission.md).
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance; fallback: [configuration.md](configuration.md). A failing `--json` command prints `{"error":"<message>"}` on stderr, exit 1.
-`review-app prepare|block|recover|status|publish`, `node <package>/dist/review-app-cli.js`: review feedback; digest-bound legacy recovery requires authenticated current PR and empty native review history; `v2/src/review-app.ts`, `v2/src/review-app-cli.ts`.
-`review-gate evaluate`: approval aggregation with `GITHUB_TOKEN` and `--policy`; `v2/src/review-gate.ts`.
+`review-app prepare|block|recover|status|reply|publish`, `node <package>/dist/review-app-cli.js`: review feedback; `publish` request takes optional `comments[]` as inline threads in the same review; `reply` answers and optionally resolves a thread the lane App opened; digest-bound legacy recovery requires authenticated current PR and empty native review history; `v2/src/review-app.ts`, `v2/src/review-app-cli.ts`.
 `scripts/verify-package-tarball.sh`: candidate closure check; `scripts/verify-review-app-package.mjs`.
 `mcp [--http]`, `mcp-tunnel`: daemon MCP, durable backend restart receipts, bounded daemon logs, cache-only attached PR status; `v2/src/mcp.ts`, `v2/src/mcp-tunnel.ts`; [contracts/setup](mcp.md).
 
