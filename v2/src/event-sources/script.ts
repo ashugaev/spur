@@ -73,9 +73,10 @@ function parseItem(value: unknown, sourceId: string): ScriptItem | null {
  * Spawn-only triggers; autoClose supported (autoComplete config alias). No thread target.
  * emitExisting defaults false: first nonempty run records baseline without spawning.
  * Conditional scripts set emitExisting:true to spawn on first positive result.
- * At most 10 emits/run; deferred IDs remain unseen. Replay bounded snapshots, never
- * advance a cursor on stdout: stdout is not acknowledgement. Seen IDs persist across
- * restarts. Admission failure/crash can consume IDs; no guaranteed agent work or retry.
+ * At most 10 new emits/run; deferred IDs remain unseen. Seen IDs persist across restarts.
+ * Eligible seen IDs with due lifecycle retries re-emit; bounds: work-item-retry.ts.
+ * Replay bounded snapshots, never advance a cursor on stdout: stdout is not acknowledgement.
+ * Emission does not guarantee agent work.
  * Use a new ID for each occurrence. State dir persists; scripts own producer replay.
  * Nonzero exit/signal/timeout/spawn/output_limit/invalid_json/not_array/too_many_items
  * fail without recording IDs. source.script.run.failed in events.jsonl includes stderr
@@ -169,7 +170,11 @@ async function startScriptSource(deps: SourceStartDeps<ScriptSourceConfig>): Pro
       deps,
       SCRIPT_ITEM_NEW_EVENT,
       seen,
-      selected.map((data) => ({ repo: data.repo, externalId: data.externalId, data })),
+      [...selected, ...output.items.filter((item) => seen.has(item.externalId))].map((data) => ({
+        repo: data.repo,
+        externalId: data.externalId,
+        data,
+      })),
     );
   };
   const tick = (): void => {

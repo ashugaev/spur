@@ -1,7 +1,17 @@
 import { clearInterval, setInterval as startInterval } from "node:timers";
 import { logSpurEvent } from "../event-log.js";
-import { readWorkItemRegistry, recordWorkItem } from "../metadata.js";
+import {
+  markWorkItemRetriesEmitted,
+  readWorkItemLifecycles,
+  readWorkItemRegistry,
+  recordWorkItem,
+} from "../metadata.js";
 import type { SourceConfig } from "../types.js";
+import {
+  compareWorkItemRetryOrder,
+  isWorkItemRecordEmitDue,
+  WORK_ITEM_RETRY_EMIT_CAP,
+} from "../work-item-retry.js";
 import type { SourceHandle, SourceStartDeps } from "./types.js";
 
 type WorkItemSourceConfig = Extract<SourceConfig, { emitExisting: boolean }>;
@@ -20,7 +30,10 @@ export interface WorkItemCandidate<TData> {
 // Records each unseen candidate and emits it as `eventName`, except for a
 // repo's first-poll backlog (a repo with no prior seen entries). Such backlog
 // items are recorded but suppressed unless `emitExisting` is set, in which case
-// they are emitted up to WORK_ITEM_FIRST_POLL_EMIT_CAP per repo.
+// they are emitted up to WORK_ITEM_FIRST_POLL_EMIT_CAP per repo. Seen
+// candidates whose lifecycle record has a due retry are re-emitted, at most
+// WORK_ITEM_RETRY_EMIT_CAP per poll: a candidate is in the current poll result,
+// so a closed or merged item never retries.
 export function emitWorkItemBacklog<TData>(
   deps: SourceStartDeps<WorkItemSourceConfig>,
   eventName: string,
@@ -29,8 +42,12 @@ export function emitWorkItemBacklog<TData>(
 ): void {
   const reposWithSeenEntries = new Set([...seen].map((id) => id.split("#")[0]));
   const firstPollEmitCounts = new Map<string, number>();
+  const seenCandidates = new Map<string, WorkItemCandidate<TData>>();
   for (const candidate of candidates) {
-    if (seen.has(candidate.externalId)) continue;
+    if (seen.has(candidate.externalId)) {
+      seenCandidates.set(candidate.externalId, candidate);
+      continue;
+    }
     recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, candidate.externalId);
     seen.add(candidate.externalId);
     if (!reposWithSeenEntries.has(candidate.repo)) {
@@ -40,6 +57,34 @@ export function emitWorkItemBacklog<TData>(
       firstPollEmitCounts.set(candidate.repo, emitted + 1);
     }
     deps.emit<TData>(eventName, candidate.data);
+  }
+  emitDueRetries(deps, eventName, seenCandidates);
+}
+
+function emitDueRetries<TData>(
+  deps: SourceStartDeps<WorkItemSourceConfig>,
+  eventName: string,
+  seenCandidates: ReadonlyMap<string, WorkItemCandidate<TData>>,
+): void {
+  if (seenCandidates.size === 0) return;
+  const nowMs = Date.now();
+  const due = [...readWorkItemLifecycles(deps.dataDir, deps.projectId, deps.sourceId).values()]
+    .filter(
+      (record) => seenCandidates.has(record.externalId) && isWorkItemRecordEmitDue(record, nowMs),
+    )
+    .sort(compareWorkItemRetryOrder)
+    .slice(0, WORK_ITEM_RETRY_EMIT_CAP);
+  if (due.length === 0) return;
+  markWorkItemRetriesEmitted(
+    deps.dataDir,
+    deps.projectId,
+    deps.sourceId,
+    due.map((record) => record.externalId),
+    new Date(nowMs).toISOString(),
+  );
+  for (const record of due) {
+    const candidate = seenCandidates.get(record.externalId);
+    if (candidate) deps.emit<TData>(eventName, candidate.data);
   }
 }
 
