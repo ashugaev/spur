@@ -1497,9 +1497,11 @@ type PaneGeneration = {
 type SwitchAuthOptions = {
   reason: "manual" | "auto_rate_limit";
   force?: boolean;
-  /** Skip, under the session lock, unless the session is still a live running Auto session of this provider. */
-  onlyLiveAutoOf?: AuthProvider;
 };
+
+type SwitchAuthOutcome =
+  | { switched: false }
+  | { switched: true; view: SessionView; effectiveAccountId: string | undefined };
 
 type SessionLifecycleStamp = {
   id: string;
@@ -25491,6 +25493,18 @@ export class SessionService {
     accountId: string | null,
     opts: SwitchAuthOptions,
   ): Promise<SessionView> {
+    const outcome = await this.switchAuthIf(sessionId, accountId, opts);
+    if (!outcome.switched) throw new Error(`Session ${sessionId} changed during auth selection`);
+    return outcome.view;
+  }
+
+  /** With onlyLiveAutoOf, skips (switched: false, no side effects) unless the session is still a live running Auto session of that provider, checked under the session lock. */
+  private async switchAuthIf(
+    sessionId: string,
+    accountId: string | null,
+    opts: SwitchAuthOptions,
+    onlyLiveAutoOf?: AuthProvider,
+  ): Promise<SwitchAuthOutcome> {
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     return this.withPaneWriteLock(hint.tmuxSession, async () => {
@@ -25501,7 +25515,7 @@ export class SessionService {
         }
         return this.lifecycleStamp(current);
       });
-      return this.switchAuthLocked(sessionId, accountId, opts, claim);
+      return this.switchAuthLocked(sessionId, accountId, opts, claim, onlyLiveAutoOf);
     });
   }
 
@@ -25525,7 +25539,8 @@ export class SessionService {
     accountId: string | null,
     opts: SwitchAuthOptions,
     claim: SessionLifecycleStamp,
-  ): Promise<SessionView> {
+    onlyLiveAutoOf?: AuthProvider,
+  ): Promise<SwitchAuthOutcome> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -25555,8 +25570,8 @@ export class SessionService {
         if (!current || !this.lifecycleStampMatches(current, claim)) {
           throw new Error(`Session ${sessionId} changed during auth selection`);
         }
-        if (opts.onlyLiveAutoOf && !(await this.isLiveAutoOf(current, opts.onlyLiveAutoOf))) {
-          return current;
+        if (onlyLiveAutoOf && !(await this.isLiveAutoOf(current, onlyLiveAutoOf))) {
+          return null;
         }
         const registration = await this.authProxy.switchSession(sessionId, accountId);
         this.authSnapshot = undefined;
@@ -25575,6 +25590,7 @@ export class SessionService {
         return next;
       },
     );
+    if (!updated) return { switched: false };
     if (pingKey) void this.sendAuthChangePing(sessionId, pingKey);
     this.logEvent("session.auth.switched", {
       level: "info",
@@ -25583,7 +25599,11 @@ export class SessionService {
       message: `Selected ${session.agent} authorization for the next request`,
       details: { accountId, reason: opts.reason, method: "proxy" },
     });
-    return this.enrich(updated);
+    return {
+      switched: true,
+      view: await this.enrich(updated),
+      effectiveAccountId: updated.auth?.effectiveAccountId,
+    };
   }
 
   /**
@@ -25691,12 +25711,13 @@ export class SessionService {
       for (const binding of targets) {
         try {
           // The snapshot above is stale by now: the switch re-checks eligibility under its lock.
-          await this.switchAuth(binding.sessionId, null, {
-            reason: "manual",
-            onlyLiveAutoOf: provider,
-          });
-          const after = readSession(this.config.dataDir, binding.sessionId)?.auth;
-          if (after?.mode === "auto" && after.effectiveAccountId !== binding.effectiveAccountId) {
+          const outcome = await this.switchAuthIf(
+            binding.sessionId,
+            null,
+            { reason: "manual" },
+            provider,
+          );
+          if (outcome.switched && outcome.effectiveAccountId !== binding.effectiveAccountId) {
             moved += 1;
           }
         } catch (error) {

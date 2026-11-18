@@ -23878,7 +23878,13 @@ describe("SessionService", () => {
         expect(failures[0]?.[1]).toMatchObject({ sessionId: "auto-also" });
       });
 
+      const switchedEvents = (sessionId: string) =>
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.auth.switched" && entry.sessionId === sessionId,
+        );
+
       it("keeps a pin that lands after the snapshot and does not count it", async () => {
+        logSpurEventMock.mockClear();
         const { result, sessions } = await changeDefault(true, undefined, undefined, (store) => {
           store.set("auto-also", managed("auto-also", "claude", "pinned", "primary"));
         });
@@ -23890,19 +23896,27 @@ describe("SessionService", () => {
           accountId: "primary",
           effectiveAccountId: "primary",
         });
+        expect(switchedEvents("auto-also")).toHaveLength(0);
+        expect(switchedEvents("auto-run")).toHaveLength(1);
       });
 
       it("does not move a session stopped after the snapshot", async () => {
+        logSpurEventMock.mockClear();
         const { result, sessions } = await changeDefault(true, undefined, undefined, (store) => {
           store.set(
             "auto-also",
-            managed("auto-also", "claude", "auto", "primary", { status: "stopped" }),
+            managed("auto-also", "claude", "auto", "primary", {
+              status: "stopped",
+              stopReason: "manual_pause",
+            }),
           );
         });
 
         expect(result.moved).toBe(1);
         expect(authProxySwitchSessionMock.mock.calls.map(([id]) => id)).toEqual(["auto-run"]);
         expect(sessions.get("auto-also")?.auth?.effectiveAccountId).toBe("primary");
+        expect(sessions.get("auto-also")?.status).toBe("stopped");
+        expect(switchedEvents("auto-also")).toHaveLength(0);
         expect(createTmuxSessionMock).not.toHaveBeenCalled();
       });
 
