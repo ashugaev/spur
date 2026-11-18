@@ -23850,6 +23850,37 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("refuses an unbound switch the token budget would refuse before killing the pane", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+      });
+      seedManagedAccounts("claude");
+      const original = runningSession({
+        agentSessionId: "native-session-uuid",
+        tokenUsage: {
+          provider: "claude",
+          inputTokens: 120,
+          outputTokens: 0,
+          totalTokens: 120,
+          generations: {},
+        },
+      });
+      const sessions = createSessionStore(original);
+      mockClaudeJsonlState("waiting");
+      authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+      const service = await createDisposedSessionService();
+
+      await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
+        /exhausted its token budget/,
+      );
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")).toEqual(original);
+      expect(sessions.get("api-1")).not.toHaveProperty("auth");
+      service.dispose();
+    });
+
     it("only persists the binding for an unbound session that is not running", async () => {
       seedManagedAccounts("claude");
       const sessions = createSessionStore(

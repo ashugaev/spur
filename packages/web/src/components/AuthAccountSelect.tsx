@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect } from "react";
+
 import { INPUT_CLASS } from "@/design/classes";
 import type { AgentName } from "@/lib/agents";
 import { autoAccount, isAuthProvider, useAuthAccounts } from "@/lib/auth-accounts";
@@ -20,6 +22,19 @@ const SELECT_CLASS = `min-w-24 flex-1 ${INPUT_CLASS}`;
 export function AuthAccountSelect({ agent, value, onChange }: AuthAccountSelectProps) {
   const managed = isAuthProvider(agent);
   const query = useAuthAccounts(managed);
+  const providerAccounts = query.data?.accounts.filter((account) => account.provider === agent);
+  const accounts = providerAccounts?.filter((account) => account.identity !== undefined);
+  const hidden =
+    accounts !== undefined &&
+    (accounts.length === 0 || accounts.filter((account) => account.authenticated).length === 1);
+  // A selection that is no longer a usable option must not reach the spawn payload.
+  const stale =
+    accounts !== undefined &&
+    value !== null &&
+    (hidden || !accounts.some((account) => account.id === value && account.authenticated));
+  useEffect(() => {
+    if (stale) onChange(null);
+  }, [stale, onChange]);
   if (!managed) return null;
   if (query.isPending || query.isError) {
     return (
@@ -34,11 +49,8 @@ export function AuthAccountSelect({ agent, value, onChange }: AuthAccountSelectP
       </select>
     );
   }
-  const providerAccounts = query.data.accounts.filter((account) => account.provider === agent);
-  const accounts = providerAccounts.filter((account) => account.identity !== undefined);
-  if (accounts.length === 0) return null;
-  // Auto lands on the only usable account, so choosing between them is meaningless.
-  if (accounts.filter((account) => account.authenticated).length === 1) return null;
+  // No identified accounts, or Auto lands on the only usable one: nothing to choose.
+  if (hidden || !providerAccounts || !accounts) return null;
   const auto = autoAccount(providerAccounts, query.data.pools[agent]);
 
   return (

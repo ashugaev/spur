@@ -796,6 +796,31 @@ describe("AuthAccountSelect", () => {
     await waitFor(() => expect(container.querySelector("select")).toBeNull());
   });
 
+  it("resets a stale selection to Auto when the choice is hidden", async () => {
+    routes["GET /api/auth-accounts"] = () => ({
+      payload: {
+        ...ACCOUNTS,
+        accounts: [WORK, { ...HOME, status: "sign_in_required", authenticated: false }],
+      },
+    });
+    const onChange = vi.fn();
+    render(<AuthAccountSelect agent="claude" onChange={onChange} value="claude-home" />);
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(null));
+  });
+
+  it("resets a selection that is signed out while the choice stays visible", async () => {
+    routes["GET /api/auth-accounts"] = () => ({
+      payload: {
+        ...ACCOUNTS,
+        accounts: [WORK, { ...HOME, status: "sign_in_required", authenticated: false }, KEY],
+      },
+    });
+    const onChange = vi.fn();
+    render(<AuthAccountSelect agent="claude" onChange={onChange} value="claude-home" />);
+    await loadedSelect();
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(null));
+  });
+
   it("shows the choice when two accounts are usable", async () => {
     routes["GET /api/auth-accounts"] = () => ({
       payload: { ...ACCOUNTS, accounts: [WORK, HOME] },

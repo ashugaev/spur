@@ -25592,6 +25592,8 @@ export class SessionService {
         409,
       );
     }
+    // Refuse before the pane is killed: the relaunch would be refused by the same guard.
+    if (relaunch) this.assertTokenBudgetAllowsActivation(session);
     const project = this.getProject(session.project);
     const registration = await this.prepareSessionAuthorization(
       sessionId,
