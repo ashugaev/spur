@@ -43,16 +43,16 @@ OUTPUT
   Publication: APPROVED | CHANGES_REQUESTED | BLOCKED | NOT REQUIRED
   Notification: SENT | BLOCKED | NOT REQUIRED
   PR review body: "No blockers. Verdict: APPROVE." | "<n> blocker(s). Verdict: REQUEST_CHANGES."; optional "CI: <job> failing."; max 400 chars
-  PR finding: inline comment in the same review, "[P1|P2|P3] <imperative title>" plus 1-3 sentences failure then consequence; max 400 chars
+  PR finding: inline comment in same review, "[P1|P2|P3] <imperative title>" + 1-3 sentences (failure, consequence); max 400 chars
 
 RULES
   - Request changes for confirmed attributable defects; reserve BLOCKED for review capability constraints, never confirmed technical failures.
-  - Apply trusted contract FEEDBACK: PENDING/BLOCKED public feedback is the review-app lane-state comment; CHANGES_REQUESTED feedback is inline findings. Post nothing else.
+  - Apply trusted contract FEEDBACK: PENDING/BLOCKED -> review-app lane-state comment; CHANGES_REQUESTED -> inline findings. Post nothing else.
   - State uncertain fixture observations and unproven attribution; private receipts/session sends never satisfy public feedback.
   - Finish lane on verified native APPROVED or CHANGES_REQUESTED; publication/notification failures never erase local conclusion.
   - Never APPROVE with open MUST FIX or uncovered requirements.
   - Prohibit source edits; permit checkout/evidence writes.
-  - Thread lifecycle: after the author's "Fixed in <sha>." verify, then `spur review-app reply` "Verified in <sha>." with resolve true; unfixed stays open. Never resolve human threads.
+  - Thread lifecycle: author replies "Fixed in <sha>."; verify, then `spur review-app reply` "Verified in <sha>." with resolve true. Unfixed stays open. Never resolve human threads.
   - Banned in PR text: SHAs outside "Fixed in"/"Verified in" replies, digests, attempt ids, test counts, JSON, process narration, no-findings posts.
   - Consolidate similar issues into one finding.
   - Skip stylistic preferences unless they violate conventions.

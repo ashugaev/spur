@@ -53,7 +53,7 @@ DELTA
 FEEDBACK
 
   Require public human-readable feedback for every non-APPROVED live status, including PENDING intended checks before final evidence exists.
-  PENDING/BLOCKED public feedback: the review-app lane-state comment built from the feedback field; agent posts nothing else.
+  PENDING/BLOCKED public feedback: review-app lane-state comment built from feedback field; agent posts nothing else.
   CHANGES_REQUESTED feedback: inline findings in the same review; private receipts/session sends never suffice.
   Use CHANGES_REQUESTED for confirmed attributable defects/failing supported behavior; request concrete fix with evidence.
   Reserve BLOCKED for access, credentials, environment or evidence constraints; state uncertain fixture observations and unproven attribution.
@@ -65,14 +65,14 @@ PUBLICATION
   Re-read H/B before publication; changed pair invalidates pass.
   Publish through `spur review-app publish --app-config <file> --request <file> --json`.
   Measure lane identity/access through `spur review-app status`; missing config/access blocks. No human-token or unpinned fallback.
-  Body: one verdict line, "No blockers. Verdict: APPROVE." or "<n> blocker(s). Verdict: REQUEST_CHANGES."; optional "CI: <job> failing." line; max 400 chars. The tool appends the hidden attempt trailer and footer.
-  Finding: request field `comments[]` of the same publish, each {path, line, side RIGHT|LEFT, body}; all findings in one review.
-  Finding body: "[P1|P2|P3] <imperative title>" plus 1-3 sentences, failure then consequence; max 400 chars.
+  Body: one verdict line, "No blockers. Verdict: APPROVE." or "<n> blocker(s). Verdict: REQUEST_CHANGES."; optional "CI: <job> failing." line; max 400 chars. Tool appends hidden attempt trailer and footer.
+  Finding: request field `comments[]`, each {path, line, side RIGHT|LEFT, body}; all findings in one review.
+  Finding body: "[P1|P2|P3] <imperative title>" + 1-3 sentences (failure, consequence); max 400 chars.
   Inline only on lines inside the PR diff. Unchanged-line finding goes in the review body as "<path>:<line> [P1|P2|P3] <title>"; body cap 400 chars plus 400 per such line.
   http-422 on comments: nothing published; fix anchors and rerun publish with the same attempt id.
   Banned in PR text: SHAs except in "Fixed in"/"Verified in" replies, digests, attempt ids, test counts, JSON, process narration, no-findings posts, PR restatement.
   Re-review posts only on verdict change, own blocker resolved, new blocker, or own APPROVE dismissed at a new head.
-  Thread lifecycle: author replies "Fixed in <sha>." in thread; reviewer verifies, then `spur review-app reply --app-config <file> --request <file> --json` with {repo, pr, lane, session, comment, body "Verified in <sha>.", resolve true}; unfixed thread stays open. Never resolve human threads; reply refuses non-own threads.
+  Thread lifecycle: author replies "Fixed in <sha>."; reviewer verifies, then `spur review-app reply --app-config <file> --request <file> --json` with {repo, pr, lane, session, comment, body "Verified in <sha>.", resolve true}; unfixed thread stays open. Never resolve human threads; reply refuses non-own threads.
   Verify returned review ID/state/commit_id; retrieve submitted review and compare. Re-read PR H/B afterward.
   Denial, self-author restriction, mismatch, missing evidence or observed race yields BLOCKED; never claim approval.
   Report local conclusion separately; self-author denial needs authorized non-author credentials, never COMMENT substituted for approval.

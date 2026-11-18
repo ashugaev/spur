@@ -47,7 +47,6 @@ WORKFLOW
 RULES
 
   - Never resolve a thread without replying, always explain what was done.
-  - Never resolve human or Spur-reviewer threads.
   - Never blindly apply suggestions, verify against codebase.
   - Bot/Copilot comments get extra scrutiny.
   - Suggestion breaks behavior -> reject it.
