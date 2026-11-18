@@ -29,6 +29,8 @@ const PREFLIGHT_TIMEOUT_MS = 60_000;
 const PREFLIGHT_MAX_BUFFER_BYTES = 1024 * 1024;
 const PREFLIGHT_RM_RETRIES = 5;
 const PREFLIGHT_RM_RETRY_DELAY_MS = 100;
+// Keep a terminal failure visible beside bounded helper diagnostics.
+const PREFLIGHT_DIAGNOSTIC_MAX_CHARS = 320;
 
 type ExecError = Error & {
   code?: number | string;
@@ -61,6 +63,56 @@ function describeExecFailure(e: ExecError, command: string): string {
   return "no exit code";
 }
 
+function codexTerminalFailure(stdout: string): string | undefined {
+  let turnFailure: string | undefined;
+  let errorFailure: string | undefined;
+  for (const line of stdout.split("\n")) {
+    let event: Record<string, unknown> | null;
+    try {
+      event = record(JSON.parse(line) as unknown);
+    } catch {
+      continue;
+    }
+    const type = event?.["type"];
+    if (type !== "turn.failed" && type !== "error") continue;
+    const failure = type === "turn.failed" ? record(event?.["error"]) : event;
+    const message = failure?.["message"];
+    if (typeof message !== "string" || !message.trim()) continue;
+    const code = failure?.["code"];
+    const summary = `${typeof code === "string" || typeof code === "number" ? `${code}: ` : ""}${message}`;
+    if (type === "turn.failed") turnFailure = summary;
+    else errorFailure = summary;
+  }
+  return turnFailure ?? errorFailure;
+}
+
+function boundedCodexDiagnostic(text: string, env: NodeJS.ProcessEnv): string {
+  let redacted = text;
+  const secrets = Object.entries(env)
+    .filter(
+      (entry): entry is [string, string] =>
+        /token|secret|password|api[_-]?key/i.test(entry[0]) &&
+        typeof entry[1] === "string" &&
+        entry[1].length >= 8,
+    )
+    .map(([, value]) => value)
+    .sort((left, right) => right.length - left.length);
+  for (const secret of secrets) redacted = redacted.split(secret).join("[REDACTED]");
+  return redacted
+    .replace(/\bBearer\s+[^\s,;"']+/gi, "Bearer [REDACTED]")
+    .replace(
+      /\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|AIza[0-9A-Za-z_-]{16,})\b/g,
+      "[REDACTED]",
+    )
+    .replace(
+      /([?&](?:access_token|api_key|apikey|token|key|secret|password|signature|sig)=)[^&#\s]+/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, PREFLIGHT_DIAGNOSTIC_MAX_CHARS);
+}
+
 async function runPreflightExec(
   label: string,
   command: string,
@@ -84,13 +136,17 @@ async function runPreflightExec(
       throw new Error(`${label} preflight failed: ${String(error)}`, { cause: error });
     }
     const e = error as ExecError;
-    const output = describeExecOutput(e.stderr) || describeExecOutput(e.stdout) || "no output";
+    const stderr = describeExecOutput(e.stderr);
+    const stdout = describeExecOutput(e.stdout);
+    const terminal = label === "codex" ? codexTerminalFailure(stdout) : undefined;
+    const env = options.env ?? process.env;
+    const output = terminal
+      ? `${boundedCodexDiagnostic(terminal, env)}${stderr ? `; stderr: ${boundedCodexDiagnostic(stderr, env)}` : ""}`
+      : stderr || stdout || "no output";
     const cause = describeExecFailure(e, command);
-    throw new PreflightExecError(
-      `${label} preflight failed (${cause}): ${output}`,
-      describeExecOutput(e.stdout),
-      { cause: error },
-    );
+    throw new PreflightExecError(`${label} preflight failed (${cause}): ${output}`, stdout, {
+      cause: error,
+    });
   }
 }
 

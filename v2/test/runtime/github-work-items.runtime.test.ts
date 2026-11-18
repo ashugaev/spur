@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { githubSourceModule } from "../../src/event-sources/github.js";
-import { readWorkItemLifecycles } from "../../src/metadata.js";
+import { readWorkItemLifecycles, readWorkItemRegistry } from "../../src/metadata.js";
 import { SessionService } from "../../src/session-service.js";
 import type { SessionView } from "../../src/types.js";
 import { findFreePort, pollUntil } from "../helpers/common.js";
@@ -89,6 +89,66 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
       }
       await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
       await current.context.cleanup();
+    }
+  });
+
+  it("reads the second search page through the actual CLI before recording PR101", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    activeContexts.push({ context, sessionPrefix: `rt-wi-pages-${port}` });
+    await context.writeGhState({
+      searchPrs: Array.from({ length: 101 }, (_, index) => ({
+        number: index + 1,
+        title: `Review ${index + 1}`,
+        url: `https://github.com/acme/api/pull/${index + 1}`,
+        repository: { nameWithOwner: "acme/api" },
+      })),
+    });
+    await seedWorkItemRegistry(
+      context.dataDir,
+      "api",
+      "pr-watch",
+      Array.from({ length: 100 }, (_, index) => `acme/api#${index + 1}`),
+    );
+    const env = runtimeEnv(context);
+    const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, env);
+    const events: Array<{ name: string; data?: unknown }> = [];
+    try {
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: context.dataDir,
+        config: {
+          type: "github",
+          intervalMs: 60_000,
+          runOnStart: false,
+          emitExisting: false,
+          query: 'repo:acme/api label:"review target"',
+        },
+        signal: new AbortController().signal,
+        emit(name, data) {
+          events.push({ name, data });
+        },
+        logger: { warn: () => undefined },
+        resolveWebBaseUrl: async () => null,
+      });
+      try {
+        expect(events).toEqual([
+          {
+            name: "github:work_item.new",
+            data: expect.objectContaining({ number: 101, externalId: "acme/api#101" }),
+          },
+        ]);
+        expect(readWorkItemRegistry(context.dataDir, "api", "pr-watch").size).toBe(101);
+      } finally {
+        await handle.stop();
+      }
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) Reflect.deleteProperty(process.env, key);
+        else process.env[key] = value;
+      }
     }
   });
 
