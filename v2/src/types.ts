@@ -1792,7 +1792,7 @@ export interface DurableSpawnReceipt {
 export interface DurableSpawnIntent {
   version: 1;
   phase: "queued" | "workspace_ready" | "launching" | "submitted";
-  request: Omit<SpawnSessionRequest, "attachments" | "configPath">;
+  request: Omit<SpawnSessionRequest, "attachments" | "configPath" | "idempotencyKey">;
   mode?: { name: string; skill: string };
   defaultBranch: string;
   preflightBatchId: string;
