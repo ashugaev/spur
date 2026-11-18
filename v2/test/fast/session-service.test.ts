@@ -23734,21 +23734,85 @@ describe("SessionService", () => {
 
     it("rolls the binding back when relaunching an unbound session fails", async () => {
       seedManagedAccounts("claude");
-      const original = runningSession({ agentSessionId: "native-session-uuid" });
+      const original = runningSession({
+        agentSessionId: "native-session-uuid",
+        claudeAccountId: "primary",
+      });
       const sessions = createSessionStore(original);
       mockClaudeJsonlState("waiting");
       authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
       isProcessRunningInTmuxMock.mockResolvedValue(false);
       createTmuxSessionMock.mockRejectedValue(new Error("tmux launch failed"));
       const service = await createDisposedSessionService();
+      // The pane exists when the launch fails: the relaunch stores a retained error.
+      vi.spyOn(
+        service as unknown as { launchResourcesMayRemain: () => Promise<boolean> },
+        "launchResourcesMayRemain",
+      ).mockResolvedValue(true);
 
       await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
         /tmux launch failed/,
       );
 
-      expect(sessions.get("api-1")).toEqual(original);
-      expect(sessions.get("api-1")).not.toHaveProperty("auth");
+      const after = sessions.get("api-1");
+      expect(after).not.toHaveProperty("auth");
+      expect(after).toMatchObject({
+        agentSessionId: "native-session-uuid",
+        claudeAccountId: "primary",
+      });
+      // Only the binding is removed: the error the relaunch stored survives the rollback.
+      expect(after?.error).toContain("tmux launch failed");
       expect(authProxyRevokeSessionMock).toHaveBeenCalledWith("api-1");
+      service.dispose();
+    });
+
+    it("fails the switch when the relaunch falls back to a fresh launch", async () => {
+      seedManagedAccounts("claude");
+      const original = runningSession({ agentSessionId: "native-session-uuid" });
+      const sessions = createSessionStore(original);
+      mockClaudeJsonlState("waiting");
+      authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+      let created = false;
+      tmuxSessionExistsMock.mockImplementation(async () => created);
+      isProcessRunningInTmuxMock.mockImplementation(async () => created);
+      createTmuxSessionMock
+        .mockRejectedValueOnce(new Error("resume failed"))
+        .mockImplementation(async () => {
+          created = true;
+        });
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService();
+
+      await expect(
+        service.switchAuth("api-1", "backup", { reason: "manual" }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        message: expect.stringMatching(/Could not resume/),
+      });
+
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(2);
+      expect(sessions.get("api-1")).not.toHaveProperty("auth");
+      expect(sessions.get("api-1")?.agentSessionId).toBe("native-session-uuid");
+      expect(authProxyRevokeSessionMock).toHaveBeenCalledWith("api-1");
+      service.dispose();
+    });
+
+    it("refuses a running unbound session with no conversation id to resume", async () => {
+      seedManagedAccounts("claude");
+      const original = runningSession();
+      const sessions = createSessionStore(original);
+      const service = await createDisposedSessionService();
+
+      await expect(
+        service.switchAuth("api-1", "backup", { reason: "manual" }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        message: expect.stringMatching(/no recorded conversation id/),
+      });
+
+      expect(sessions.get("api-1")).toEqual(original);
+      expect(authProxyRegisterSessionMock).not.toHaveBeenCalled();
       service.dispose();
     });
 

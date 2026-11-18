@@ -25563,7 +25563,9 @@ export class SessionService {
    * A session without a managed binding does not route through the companion proxy, so it cannot
    * swap in place: bind it to the chosen account (or Auto) and relaunch the agent with resume.
    * A session that is not running only gets the binding; its next restore launches managed.
-   * A failure restores the record and revokes the new registration.
+   * A relaunch that cannot resume the conversation (fresh launch fallback) is a failed switch.
+   * A failure removes only the binding it wrote, restores the legacy account id and revokes the
+   * new registration; errors, launch ids and sidecars the relaunch stored stay.
    */
   private async switchUnboundAuthLocked(
     session: SessionRecord,
@@ -25574,7 +25576,10 @@ export class SessionService {
     const sessionId = session.id;
     const relaunch = session.status === "running";
     if (relaunch && !session.agentSessionId) {
-      throw new Error(`Session ${sessionId} has no recorded conversation id to resume`);
+      throw new AuthorizationError(
+        `Session ${sessionId} has no recorded conversation id to resume`,
+        409,
+      );
     }
     if (
       relaunch &&
@@ -25602,6 +25607,8 @@ export class SessionService {
     }
     this.authSnapshot = undefined;
     let updated: SessionRecord;
+    let boundWritten = false;
+    let freshLaunch = false;
     try {
       updated = await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
         const current = readSession(this.config.dataDir, sessionId);
@@ -25615,6 +25622,7 @@ export class SessionService {
           updatedAt: nowIso(),
         };
         writeSession(this.config.dataDir, bound);
+        boundWritten = true;
         this.stateCache.delete(sessionId);
         if (!relaunch) return bound;
         await this.killAgentPaneAndConfirmExit(bound, { failOnSurvivors: true });
@@ -25622,11 +25630,35 @@ export class SessionService {
           paneAlreadyConfirmedGone: true,
           paneAlreadyOwned: true,
         });
+        if (relaunched.recoveryMessage) {
+          freshLaunch = true;
+          throw new AuthorizationError(
+            `Could not resume the conversation of ${sessionId} on the chosen account; the session keeps its previous account, restore it to continue`,
+            409,
+          );
+        }
         return relaunched.session;
       });
     } catch (error) {
       await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
-        writeSession(this.config.dataDir, session);
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!latest) return;
+        // A fresh launch is a blank conversation: stop it and point the record back at the original.
+        if (freshLaunch) {
+          await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false }).catch(
+            () => undefined,
+          );
+        }
+        const { auth: _boundAuth, ...unbound } = latest;
+        writeSession(this.config.dataDir, {
+          ...(boundWritten ? unbound : latest),
+          ...(boundWritten && session.claudeAccountId !== undefined
+            ? { claudeAccountId: session.claudeAccountId }
+            : {}),
+          ...(freshLaunch && session.agentSessionId
+            ? { agentSessionId: session.agentSessionId }
+            : {}),
+        });
         this.stateCache.delete(sessionId);
       });
       await this.authProxy.revokeSession(sessionId).catch(() => undefined);
