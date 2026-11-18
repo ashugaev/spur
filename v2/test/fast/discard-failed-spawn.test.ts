@@ -162,7 +162,7 @@ describe("discardFailedSpawn", () => {
       number: 7,
       title: "fixture",
       repo: "acme/api",
-      autoComplete: false,
+      autoClose: false,
       createdAt: new Date().toISOString(),
     };
     updateWorkItemMembers(f.dataDir, "api", "pr-watch", item, () => [
@@ -294,7 +294,7 @@ describe("discardFailedSpawn", () => {
       number: 7,
       title: "fixture",
       repo: "acme/api",
-      autoComplete: false,
+      autoClose: false,
       createdAt: new Date().toISOString(),
     };
     updateWorkItemMembers(f.dataDir, "api", "pr-watch", item, () => [
@@ -382,7 +382,7 @@ describe("discardFailedSpawn", () => {
       number: 7,
       title: "fixture",
       repo: "acme/api",
-      autoComplete: false,
+      autoClose: false,
       createdAt: new Date().toISOString(),
     };
     updateWorkItemMembers(f.dataDir, "api", "pr-watch", item, () => [
@@ -460,7 +460,7 @@ describe("discardFailedSpawn", () => {
       number: 7,
       title: "fixture",
       repo: "acme/api",
-      autoComplete: false,
+      autoClose: false,
       createdAt: new Date().toISOString(),
     };
     updateWorkItemMembers(f.dataDir, "api", "pr-watch", item, () => [
@@ -537,7 +537,7 @@ describe("discardFailedSpawn", () => {
       number: 7,
       title: "fixture",
       repo: "acme/api",
-      autoComplete: false,
+      autoClose: false,
       createdAt: new Date().toISOString(),
     };
     updateWorkItemMembers(f.dataDir, "api", "pr-watch", item, () => [
@@ -627,7 +627,7 @@ describe("discardFailedSpawn", () => {
       number: 7,
       title: "fixture",
       repo: "acme/api",
-      autoComplete: false,
+      autoClose: false,
       createdAt: new Date().toISOString(),
     };
     const failed = {
