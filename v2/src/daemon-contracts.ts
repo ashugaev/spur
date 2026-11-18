@@ -154,6 +154,7 @@ const spawn = body("SpawnSessionRequest", [
   field("selfDestruct", "{enabled:boolean,conditions?:string}", "Automatic cleanup conditions."),
   field("bootstrap", "boolean", "Bootstrap session workspace."),
   field("claudeAccountId", "string", "Claude account ID used for launch."),
+  field("authAccountId", "string|null", "Saved provider account; omitted/null uses Auto."),
   field(
     "subscriptions",
     '{targetSessionId:string,states:("working"|"waiting"|"completed"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[],message?:string}[]',
@@ -531,6 +532,123 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     { response: "RuntimeInfo" },
   ),
   operation("get_headroom", "GET", "/headroom", "Host/session admission capacity."),
+  operation(
+    "list_auth_accounts",
+    "GET",
+    "/auth-accounts",
+    "Saved provider authorization accounts and pools; each account carries identity, displayName and cached quota.",
+    {
+      query: [field("agent", '"claude"|"codex"', "Optional provider filter.")],
+    },
+  ),
+  operation(
+    "add_auth_account",
+    "POST",
+    "/auth-accounts",
+    "Create a saved provider authorization account.",
+    {
+      body: body("AddAuthAccountRequest", [
+        field("provider", '"claude"|"codex"', "Provider.", true),
+      ]),
+      examples: [{ body: { provider: "codex" } }],
+    },
+  ),
+  operation(
+    "remove_auth_account",
+    "DELETE",
+    "/auth-accounts/{accountId}",
+    "Remove an unused authorization account.",
+  ),
+  operation(
+    "login_auth_account",
+    "POST",
+    "/auth-accounts/{accountId}/login",
+    "Start provider sign-in; Claude oauth, Codex device (default) or browser.",
+    {
+      body: body("StartAuthAccountLoginRequest", [
+        field(
+          "method",
+          '"oauth"|"device"|"browser"',
+          "Sign-in method; default oauth for Claude, device for Codex; other provider combinations: 400.",
+        ),
+      ]),
+      examples: [{ body: { method: "browser" } }],
+    },
+  ),
+  operation(
+    "set_auth_account_api_key",
+    "POST",
+    "/auth-accounts/{accountId}/api-key",
+    "Sign in with a provider API key; saved only after a test request succeeds.",
+    {
+      body: body("SetAuthAccountApiKeyRequest", [
+        field("apiKey", "string", "Provider API key; never returned or logged.", true),
+      ]),
+      examples: [{ body: { apiKey: "<api-key>" } }],
+    },
+  ),
+  operation(
+    "list_auth_alerts",
+    "GET",
+    "/auth-alerts",
+    "Broken managed-account and host sign-ins; one row per breakage.",
+  ),
+  operation(
+    "start_auth_terminal_login",
+    "POST",
+    "/auth-terminal-logins",
+    "Start a native CLI sign-in in a tmux terminal for an account or the host; a repeat for the same target restarts. The response carries command, the display string of the native login command.",
+    {
+      body: body("StartAuthTerminalLoginRequest", [
+        field("accountId", "string", "Managed account; excludes host."),
+        field("host", '"claude"|"codex"', "Host login; excludes accountId."),
+      ]),
+      examples: [{ body: { accountId: "example-accountId" } }, { body: { host: "codex" } }],
+    },
+  ),
+  operation(
+    "get_auth_terminal_login",
+    "GET",
+    "/auth-terminal-logins/{id}",
+    "Read terminal sign-in status, reason and login command; 404 unknown id.",
+  ),
+  operation(
+    "stop_auth_terminal_login",
+    "DELETE",
+    "/auth-terminal-logins/{id}",
+    "Stop a terminal sign-in and delete its throwaway home.",
+  ),
+  operation(
+    "get_auth_account_login",
+    "GET",
+    "/auth-accounts/{accountId}/login-status",
+    "Read OAuth readiness and sign-in instructions.",
+  ),
+  operation(
+    "submit_auth_account_login",
+    "POST",
+    "/auth-accounts/{accountId}/login-input",
+    "Submit a sign-in code or cancel login.",
+    {
+      body: body("AuthAccountLoginInput", [
+        field("input", "string", "Authorization code; excludes cancel."),
+        field("cancel", "boolean", "Cancel active login; excludes input."),
+      ]),
+      examples: [{ body: { input: "authorization-code" } }, { body: { cancel: true } }],
+    },
+  ),
+  operation(
+    "update_auth_pool",
+    "PATCH",
+    "/auth-pools/{provider}",
+    "Update provider-wide default and quota rotation; creates a missing pool.",
+    {
+      body: body("UpdateAuthPoolRequest", [
+        field("defaultAccountId", "string|null", "Ready default account."),
+        field("autoRotate", "boolean", "Rotate Auto sessions on quota."),
+      ]),
+    },
+  ),
   operation(
     "get_usage",
     "GET",
@@ -1497,13 +1615,12 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "switch_session_auth",
     "POST",
     "/sessions/{sessionId}/switch-auth",
-    "Switch Claude account for session. Returns 404 unless authRotation.switchAuth is true.",
+    "Select managed authorization for the next request without restarting the agent.",
     {
       body: body("SwitchAuthRequest", [
-        field("accountId", "string", "Nonblank account ID.", true),
-        field("force", "boolean", "Force account switch.", false, false),
+        field("accountId", "string|null", "Saved account ID or null for Auto.", true),
       ]),
-      examples: [{ body: { accountId: "example-account", force: false } }],
+      examples: [{ body: { accountId: "example-account" } }],
     },
   ),
   operation(

@@ -2,7 +2,7 @@
 
 > Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md). CI scheduling: [ci-admission.md](ci-admission.md).
 
-Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance; fallback: [configuration.md](configuration.md).
+Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance; fallback: [configuration.md](configuration.md). A failing `--json` command prints `{"error":"<message>"}` on stderr, exit 1.
 `review-app prepare|block|recover|status|publish`, `node <package>/dist/review-app-cli.js`: review feedback; digest-bound legacy recovery requires authenticated current PR and empty native review history; `v2/src/review-app.ts`, `v2/src/review-app-cli.ts`.
 `review-gate evaluate`: approval aggregation with `GITHUB_TOKEN` and `--policy`; `v2/src/review-gate.ts`.
 `scripts/verify-package-tarball.sh`: candidate closure check; `scripts/verify-review-app-package.mjs`.
@@ -27,8 +27,8 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 
 ## usage
 
-`spur usage [--json]`: quota windows per Claude account and Codex, token totals today/7d/30d by provider and launch model; read-only, saved logins never refreshed; failing source prints an error row; quota cached 3 min per source; tokens from unarchived sessions dated by last activity — `v2/src/usage-report.ts`. Web: the footer Usage button shows the same report.
-`spur rate-limit clear <sessionId> [--force] [--json]`: clear a limited live session; unknown or exhausted same-account quota refuses unless `--force`; `v2/src/cli.ts`.
+`spur usage [--json]`: quota windows per Claude account and Codex (a provider with a ready managed account: one row per ready OAuth account, host login hidden; `pending` until its quota is cached), token totals today/7d/30d by provider and launch model; read-only, saved logins never refreshed; failing source prints an error row; quota cached 3 min per source; tokens from unarchived sessions dated by last activity — `v2/src/usage-report.ts`. Web: the footer Usage button shows the same report.
+`spur rate-limit clear <sessionId> [--force] [--json]`: clear a limited live session; unknown or exhausted same-account quota, or a managed-account session, refuses unless `--force`; `v2/src/cli.ts`.
 
 ## disk-gc, artifacts-gc, cache
 
@@ -50,10 +50,8 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 
 ## spawn
 
-`spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--reasoning-effort <level>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--link <label=url> ...] [--prompt-file <path|->] [--idempotency-key <key>] [--json]`
+`spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--auth-account <id>] [--model <id>] [--reasoning-effort <level>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--link <label=url> ...] [--prompt-file <path|->] [--idempotency-key <key>] [--json]`
 Empty `[prompt...]` skips default `spawn.steps`. `--link` sets initial links (label/url normalized as [slots](#spur-slots), repeated label refused). `--prompt-file -` reads stdin, conflicts with `[prompt...]`, empty file = no prompt. `--idempotency-key` skips the interactive branch prompt and prints `existing session <id> (same idempotency key)` on replay; semantics: [daemon-api.md](daemon-api.md). Preflight usage counts toward `projects.<id>.tokenBudget`. `--subscribe-state`/`--subscribe-message` require `--subscribe-to`. [Modes](configuration.md#modes); [resource queue](configuration.md#admission-control).
-
-## shepherd, wake
 
 `spur shepherd [prompt...]` opens Spur's manager session. `spur wake <sessionId> [--in <duration> | --at <iso> | --every <duration> --until <cond> | --daily-at HH:MM[,HH:MM...] --until <cond> | --cancel] [message...]`. Events: [configuration.md#events](configuration.md#events).
 
@@ -102,6 +100,8 @@ Telegram `/complete`, `/kill`: finish bound forum-topic session, delete owned to
 
 ## service, memory, agent-issue, comment-seen, subscribe
 
+`spur auth accounts [--agent claude|codex] [--json]` — saved authorization IDs, display name, status, quota LEFT. `spur auth login <accountId> [--json]` — OAuth sign-in; JSON starts without waiting; SIGINT/SIGTERM/SIGHUP cancels a waiting sign-in, an abandoned one expires after 16 minutes. `spur auth add --agent claude|codex [--json]` — create profile, then sign in like `login`; `v2/src/cli.ts`.
+`spur auth pool <claude|codex> [--auto-rotate on|off] [--default <accountId>] [--json]` — no flags shows the pool, flags update it (creates a missing pool). `spur auth switch <sessionId> <accountId|auto> [--json]` — managed session profile for its next request; `v2/src/cli.ts`.
 `spur service run <id> --port <n> -- <command>` / `status <id>` — session-bound tmux sidecar wrapper. `<id>` must match a `sources.<name>` entry with `type: service` and `service: <id>` ([configuration.md](configuration.md#field-reference)), else `Unknown service`. One-shot commands (tests, lint, type-check) run directly, no service. `spur service logs [sessionId] [name] [--sidecar] [--limit <n>] [--json]` — retained pane and archived rows, default runtime scope and global 200-row limit; route 404/502 errors exit nonzero; `v2/src/cli.ts`. `spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
 `spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect. `spur comment-seen record <id...>` — marks GitHub review-comment ids seen, needs `SPUR_PROJECT`.
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`. States: `SESSION_STATES` in `v2/src/types.ts`.

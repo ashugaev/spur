@@ -55,7 +55,13 @@ setup_scenario() {
   cp "$HERE/../deploy/spur-mcp.npm.service" "$pkg_root/deploy/spur-mcp.npm.service"
   cp "$HERE/../deploy/spur-mcp-tunnel.npm.service" "$pkg_root/deploy/spur-mcp-tunnel.npm.service"
   while IFS= read -r entry || [[ -n "$entry" ]]; do
-    case "$entry" in dist/*) : >"$pkg_root/$entry" ;; esac
+    # Presence-only placeholders; this test never executes the companion.
+    case "$entry" in
+      dist/*|bin/auth-proxy/*|licenses/auth-proxy/*)
+        mkdir -p "$(dirname "$pkg_root/$entry")"
+        : >"$pkg_root/$entry"
+        ;;
+    esac
   done <"$REQUIRED_FILES_LIST"
   : >"$pkg_root/web/dist-server/web-server.js"
   : >"$pkg_root/spur.yaml.reference"

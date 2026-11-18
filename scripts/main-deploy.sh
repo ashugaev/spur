@@ -548,9 +548,12 @@ runtime_files_exist() {
   local entry found=false
   while IFS= read -r entry || [[ -n "$entry" ]]; do
     case "$entry" in
-      dist/*)
+      dist/*|bin/auth-proxy/*|licenses/auth-proxy/*)
         found=true
         [[ -f "$deploy_root/v2/$entry" ]] || return 1
+        if [[ "$entry" == bin/auth-proxy/* ]]; then
+          [[ -x "$deploy_root/v2/$entry" ]] || return 1
+        fi
         ;;
     esac
   done <"$manifest"
@@ -578,6 +581,8 @@ if [[ "$deployed_head" == "$remote_head" ]] && runtime_files_exist; then
   fi
   echo "main:deploy spur-web build missing at $remote_head — rebuilding" >&2
 fi
+
+bash "$deploy_root/scripts/build-auth-proxy.sh" --check-toolchain
 
 export CI=1
 if systemctl_cmd is-active --quiet spur-web.service; then

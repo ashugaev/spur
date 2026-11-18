@@ -75,6 +75,19 @@ describe("quotaLevel", () => {
     expect(quotaLevel([ok, failed])).toBe("attention");
     expect(quotaLevel([failed, failed])).toBe("error");
   });
+
+  it("counts pending as attention, never error", () => {
+    const pending: QuotaSourceResult = {
+      ...base,
+      status: "error",
+      error: "pending",
+      message: "m",
+      httpStatus: null,
+    };
+    expect(quotaLevel([pending])).toBe("attention");
+    expect(quotaLevel([ok, pending])).toBe("attention");
+    expect(quotaLevel([failed, pending])).toBe("attention");
+  });
 });
 
 describe("fetchUsage", () => {

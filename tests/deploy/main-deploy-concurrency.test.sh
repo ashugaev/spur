@@ -36,13 +36,28 @@ make_deploy_root() {
   cp "$repo_root/v2/required-package-files.txt" "$root/v2/required-package-files.txt"
   local entry
   while IFS= read -r entry || [[ -n "$entry" ]]; do
-    case "$entry" in dist/*) : >"$root/v2/$entry" ;; esac
+    case "$entry" in
+      dist/*|bin/auth-proxy/*|licenses/auth-proxy/*)
+        mkdir -p "$(dirname "$root/v2/$entry")"
+        : >"$root/v2/$entry"
+        [[ "$entry" != bin/auth-proxy/* ]] || chmod +x "$root/v2/$entry"
+        ;;
+    esac
   done <"$root/v2/required-package-files.txt"
   cp "$repo_root/deploy/spur-daemon.service" "$root/deploy/"
   cp "$repo_root/deploy/spur-web.service" "$root/deploy/"
   cp "$repo_root/deploy/spur-mcp.service" "$root/deploy/"
   cp "$repo_root/deploy/spur-mcp-tunnel.service" "$root/deploy/"
   cp "$script" "$root/scripts/main-deploy.sh"
+  cat >"$root/scripts/build-auth-proxy.sh" <<'BUILDER'
+#!/usr/bin/env bash
+[[ "${1:-}" == --check-toolchain ]] || exit 98
+echo auth-toolchain >>"$SPUR_DEPLOY_STATE"
+if [[ "${SPUR_DEPLOY_TEST_TOOLCHAIN_RC:-0}" != 0 ]]; then
+  echo "auth toolchain unavailable" >&2
+  exit "$SPUR_DEPLOY_TEST_TOOLCHAIN_RC"
+fi
+BUILDER
   git -C "$root" add -A
   git -C "$root" commit -qm init
   git -C "$root" branch -M main
@@ -68,6 +83,7 @@ EOF
   export PATH="$sudo_dir:$stub_dir:$PATH"
   export HOME="$work/home"
   export MAIN_DEPLOY_SERVICE_HOME="$HOME"
+  unset SPUR_CONFIG
   mkdir -p "$HOME"
   # Do NOT preset MAIN_DEPLOY_REEXECED: let the script acquire the deploy lock
   # and re-exec from $deploy_root exactly as in prod, so the test exercises the
@@ -86,6 +102,7 @@ EOF
   # needs; real deploys use the 1s production default.
   export SPUR_DEPLOY_WEB_POLL_INTERVAL=0
   unset SPUR_DEPLOY_COLD_START_POLLS
+  unset SPUR_DEPLOY_TEST_TOOLCHAIN_RC
   # Temp stand-in for packages/web/.next. web_chunks_consistent resolves served
   # /_next/static refs against this dir. Tests seed/remove files to drive the
   # consistent / stale paths.
@@ -1042,6 +1059,8 @@ test_selected_daemon_port() {
   local work
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' RETURN
+  export SPUR_CONFIG="$work/caller-config.yaml"
+  printf 'server:\n  port: 43218\n' >"$SPUR_CONFIG"
   setup_env "$work"
   export MAIN_DEPLOY_SERVICE_HOME="$work/service-home"
   local head
@@ -1165,6 +1184,24 @@ EOF
   fi
 }
 
+test_auth_toolchain_failure_keeps_services() {
+  local work rc=0
+  work="$(mktemp -d)"
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  export SPUR_DEPLOY_TEST_TOOLCHAIN_RC=1
+  bash "$script" >"$work/out" 2>&1 || rc=$?
+  if [[ "$rc" != 0 ]] && grep -qx auth-toolchain "$SPUR_DEPLOY_STATE" &&
+    ! grep -q '^stop ' "$SPUR_DEPLOY_STATE" &&
+    grep -q 'auth toolchain unavailable' "$work/out"; then
+    ok "auth-toolchain: unavailable prerequisite stops before services"
+  else
+    bad "auth-toolchain: missing prerequisite stopped services or skipped preflight"
+    cat "$work/out"
+  fi
+}
+
+test_auth_toolchain_failure_keeps_services
 test_runtime_integrity repair
 test_runtime_integrity complete
 test_runtime_integrity fail

@@ -5766,12 +5766,27 @@ projects:
     const config = loadConfig(configPath);
 
     expect(config.authRotation).toEqual({
-      autoRotateOnRateLimit: false,
+      autoRotateOnRateLimit: true,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
       switchAuth: false,
     });
   });
+
+  it.each(["cooldownMinutes: 1.5", "maxRotationsPerEpisode: 0.5"])(
+    "rejects fractional authRotation %s",
+    async (line) => {
+      const configPath = await writeConfig(`
+authRotation:
+  ${line}
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+      expect(() => loadConfig(configPath)).toThrow("must be a non-negative integer");
+    },
+  );
 
   it("ignores authRotation in project mode", async () => {
     const configPath = await writeConfig(`
@@ -5786,7 +5801,7 @@ projects:
     const config = loadProjectConfig(configPath);
 
     expect(config.authRotation).toEqual({
-      autoRotateOnRateLimit: false,
+      autoRotateOnRateLimit: true,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
       switchAuth: false,

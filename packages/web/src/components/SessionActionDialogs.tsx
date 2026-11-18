@@ -389,7 +389,7 @@ export function useSessionActionDialogs({
     }
   };
 
-  const handleSwitchAuth = async (accountId: string, force: boolean) => {
+  const handleSwitchAuth = async (accountId: string | null, force: boolean) => {
     if (!session) return;
     setSwitchAuthPending(true);
     setSwitchAuthError(null);
@@ -400,12 +400,12 @@ export function useSessionActionDialogs({
         body: JSON.stringify(force ? { accountId, force: true } : { accountId }),
       });
       if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to switch Claude account"));
+        throw new Error(await readApiErrorMessage(response, "Failed to switch account"));
       }
       onUpdated((await response.json()) as SpurSessionView);
       setSwitchAuthOpen(false);
     } catch (switchAuthErr) {
-      setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch Claude account"));
+      setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch account"));
     } finally {
       setSwitchAuthPending(false);
     }
@@ -506,10 +506,9 @@ export function useSessionActionDialogs({
           payload={recoverPayload}
         />
       ) : null}
-      {switchAuthOpen ? (
+      {switchAuthOpen && session.auth ? (
         <SwitchAuthDialog
-          accounts={(session.claudeAccounts ?? []).filter((account) => account.authenticated)}
-          activeAccountId={session.activeClaudeAccountId ?? null}
+          auth={session.auth}
           status={switchAuthPending ? "pending" : switchAuthError ? "error" : "idle"}
           errorMessage={switchAuthError}
           onConfirm={(accountId, force) => void handleSwitchAuth(accountId, force)}

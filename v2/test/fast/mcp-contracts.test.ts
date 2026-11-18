@@ -25,10 +25,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "5e1523420de33c535a090ab7b9e4937c17be4b59c55550d622662b30d833732f",
-  "types.ts": "307dc03e732700abf76e8ed805c197621614131a1d0eec1ff229fb9137efd6ea",
+  "server.ts": "1eac717ed3fe728c5e52e170bbd99ec5cf15d4f48398c14c326570d6df89d7fa",
+  "types.ts": "82866d077db1bc37facf475ef22a971c0cd49ca5057ed6d1eec172b1c57e37d1",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "57dff9541bf8e4237ada4c79bbcc9fa4339fae2508dd153914c4451fb56cb849",
+  "session-service.ts": "0c04e7fc6fb4432bebe92b192f69825332026485e3646c51b385b38ec4515ae3",
   "session-transitions.ts": "832771b8d95a6722cf67fc05685f2fd5f03e7a60a923c7a438e1b5b3bc0dcbb0",
   "session-slots.ts": "cb766d6b58c70f34775a18edf6afa77312acdc766a017770b30102462535ed73",
   "task-status.ts": "98700844f71e5d5edfd628c92653ed3cfcde4ff6c213acd24b9751935034bea1",
@@ -73,9 +73,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(114);
+    expect(routes).toHaveLength(126);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(114);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(126);
     expect(getDaemonOperation("get_latest_snapshots_by_link")?.query).toContainEqual(
       expect.objectContaining({ name: "link", type: "string[]", required: true }),
     );
@@ -462,7 +462,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(114);
+      expect(page.total).toBe(126);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",

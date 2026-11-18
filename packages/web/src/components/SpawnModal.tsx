@@ -2,6 +2,7 @@
 
 import type { ReactNode, RefObject } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
+import { AuthAccountSelect } from "@/components/AuthAccountSelect";
 import { BusyContent } from "@/components/BusyContent";
 import { ModelReasoningField } from "@/components/ModelReasoningField";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -76,6 +77,8 @@ export type SpawnModalMode =
         onChange: (next: string) => void;
         options: { value: string; label: string }[];
       };
+      /** Managed account for the spawned session; `null` is Auto. */
+      auth?: FieldControl<string | null>;
       branch: FieldControl<string>;
       workspaceMode: FieldControl<WorkspaceMode>;
       planMode: ToggleControl;
@@ -226,6 +229,13 @@ function ModeFields({
                 </option>
               ))}
             </select>
+          ) : null}
+          {mode.auth ? (
+            <AuthAccountSelect
+              agent={agent}
+              onChange={mode.auth.onChange}
+              value={mode.auth.value}
+            />
           ) : null}
         </div>
         {mode.project.options.length === 0 ? (

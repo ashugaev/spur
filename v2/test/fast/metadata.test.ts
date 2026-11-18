@@ -1775,6 +1775,32 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, "api-3")?.snapshotNudge).toBeUndefined();
   });
 
+  it("round-trips authChangePing and drops malformed claims", async () => {
+    const dataDir = await newDataDir();
+    const claim = { key: "2:backup", attempts: 2, pinged: false };
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      authChangePing: claim,
+    });
+    expect(readSession(dataDir, "api-2")?.authChangePing).toEqual(claim);
+    for (const bad of [
+      { ...claim, key: "" },
+      { ...claim, attempts: 3 },
+      { ...claim, attempts: -1 },
+      { ...claim, pinged: "yes" },
+    ]) {
+      writeSession(dataDir, {
+        ...legacyBase,
+        id: "api-3",
+        tmuxSession: "api-3",
+        authChangePing: bad,
+      } as SessionRecord);
+      expect(readSession(dataDir, "api-3")?.authChangePing).toBeUndefined();
+    }
+  });
+
   it("drops a malformed ToDo reminder fingerprint", async () => {
     const dataDir = await newDataDir();
     writeSession(dataDir, {
@@ -3214,6 +3240,18 @@ describe("listArchivedSessions", () => {
     expect(sessions.map((session) => session.id)).toEqual(["api-1"]);
   });
 
+  it("skips an archived record with malformed auth metadata and keeps the rest", async () => {
+    const dataDir = await newDataDir();
+    archiveRecords(dataDir, ["api-1", "api-2"]);
+    const path = join(dataDir, "sessions-archive", "api", "api-2.json");
+    const record = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    writeFileSync(path, JSON.stringify({ ...record, auth: { sessionId: 7 } }), "utf-8");
+
+    const sessions = listArchivedSessions(dataDir, () => true);
+
+    expect(sessions.map((session) => session.id)).toEqual(["api-1"]);
+  });
+
   it("runs the include predicate before parsing the file", async () => {
     const dataDir = await newDataDir();
     archiveRecords(dataDir, ["api-1", "api-2"]);
@@ -3258,6 +3296,20 @@ describe("listSessions concurrency", () => {
     writeSession(dataDir, { ...sessionBase, id: "api-2", tmuxSession: "api-2" });
     expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-2"]);
     expect(invalidEntries(dataDir)).toHaveLength(1);
+  });
+
+  it("skips a live record with malformed auth metadata, logs it, and readSession throws", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    writeSession(dataDir, { ...sessionBase, id: "api-2", tmuxSession: "api-2" });
+    const path = join(dataDir, "sessions", "api", "api-2.json");
+    const record = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    writeFileSync(path, JSON.stringify({ ...record, auth: { sessionId: 7 } }), "utf-8");
+
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+    expect(invalidEntries(dataDir)[0]?.message).toContain("auth");
+    expect(() => readSession(dataDir, "api-2")).toThrow();
   });
 });
 

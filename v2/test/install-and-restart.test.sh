@@ -38,7 +38,13 @@ run_helper() {
 seed_runtime_files() {
   local entry
   while IFS= read -r entry || [[ -n "$entry" ]]; do
-    case "$entry" in dist/*) : >"$1/$entry" ;; esac
+    # Presence-only placeholders; this test never executes the companion.
+    case "$entry" in
+      dist/*|bin/auth-proxy/*|licenses/auth-proxy/*)
+        mkdir -p "$(dirname "$1/$entry")"
+        : >"$1/$entry"
+        ;;
+    esac
   done <"$HERE/../required-package-files.txt"
 }
 

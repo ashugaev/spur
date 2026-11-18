@@ -29,6 +29,9 @@ import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import type * as agentsIndexModule from "../../src/agents/index.js";
 import type * as claudeModule from "../../src/agents/claude.js";
 import type * as codexModule from "../../src/agents/codex.js";
+import type * as authAccountsModule from "../../src/auth-accounts.js";
+import type { AuthAccountsState } from "../../src/auth-accounts.js";
+import type { AuthRegistration, AuthRotation } from "../../src/auth-proxy.js";
 import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
@@ -392,6 +395,23 @@ const touchAccountUsedMock: Mock = vi.fn();
 const ensureDefaultAccountMock: Mock = vi.fn();
 const seedSessionHomeMock: Mock = vi.fn();
 const swapSessionCredentialsMock: Mock = vi.fn();
+const authAccountsReadMock: Mock = vi.fn();
+const authAccountsRemoveMock: Mock = vi.fn();
+const authAccountsRecordIdentitiesMock: Mock = vi.fn();
+const authProxyConfigureMock: Mock = vi.fn();
+const authProxyGetStateMock: Mock = vi.fn();
+const authProxyGetUsageMock: Mock = vi.fn();
+const authProxySetApiKeyMock: Mock = vi.fn();
+const authProxyRegisterSessionMock: Mock = vi.fn();
+const authProxySwitchSessionMock: Mock = vi.fn();
+const authProxyRevokeSessionMock: Mock = vi.fn();
+const authProxyRecoverMock: Mock = vi.fn();
+const authProxyDisposeMock: Mock = vi.fn();
+const authProxyLoginMock: Mock = vi.fn();
+const authProxyLoginStatusMock: Mock = vi.fn();
+const authProxyCancelLoginMock: Mock = vi.fn();
+const authProxyRemoveAccountMock: Mock = vi.fn();
+const authProxyRotationHandler: { current?: (rotation: AuthRotation) => void } = {};
 
 interface TestAccount {
   id: string;
@@ -423,6 +443,65 @@ function resetAccountStoreMocks(accounts: () => TestAccount[]): void {
   ensureDefaultAccountMock.mockReset();
   seedSessionHomeMock.mockReset();
   swapSessionCredentialsMock.mockReset();
+  authAccountsReadMock.mockReset().mockImplementation(
+    (): AuthAccountsState => ({
+      schema: 1,
+      accounts: accounts().map(({ id, createdAt }) => ({ id, provider: "claude", createdAt })),
+      pools: accounts().length
+        ? {
+            claude: {
+              defaultAccountId: accounts()[0]!.id,
+              defaultGeneration: 0,
+              autoRotate: false,
+            },
+          }
+        : {},
+    }),
+  );
+  authAccountsRemoveMock.mockReset();
+  authAccountsRecordIdentitiesMock.mockReset();
+  authProxyConfigureMock.mockReset().mockResolvedValue(undefined);
+  authProxyGetUsageMock.mockReset().mockResolvedValue([]);
+  authProxySetApiKeyMock.mockReset();
+  authProxyGetStateMock.mockReset().mockImplementation(async () => ({
+    accounts: accounts().map(({ id, authenticated }) => ({
+      id,
+      provider: "claude",
+      status: authenticated ? "ready" : "sign-in-required",
+    })),
+    sessions: [],
+  }));
+  authProxyRegisterSessionMock.mockReset().mockImplementation(
+    async (input: {
+      sessionId: string;
+      provider: "claude" | "codex";
+      accountId: string | null;
+    }): Promise<AuthRegistration> => ({
+      ...input,
+      mode: input.accountId === null ? "auto" : "pinned",
+      effectiveAccountId: input.accountId ?? "default-profile",
+      generation: 1,
+      endpoint: "http://127.0.0.1:9999",
+      token: "fixture-routing-key",
+    }),
+  );
+  authProxySwitchSessionMock.mockReset();
+  authProxyRevokeSessionMock.mockReset().mockResolvedValue(undefined);
+  authProxyRecoverMock.mockReset().mockResolvedValue(undefined);
+  authProxyDisposeMock.mockReset();
+  authProxyLoginMock
+    .mockReset()
+    .mockImplementation(async (accountId: string) => ({ accountId, status: "pending" }));
+  authProxyLoginStatusMock.mockReset().mockImplementation(async (accountId: string) => ({
+    accountId,
+    status: accounts().find((account) => account.id === accountId)?.authenticated
+      ? "ready"
+      : "sign-in-required",
+  }));
+  authProxyCancelLoginMock
+    .mockReset()
+    .mockImplementation(async (accountId: string) => ({ accountId, status: "sign-in-required" }));
+  authProxyRemoveAccountMock.mockReset().mockResolvedValue(undefined);
 }
 const readCursorJsonlStateMock: Mock = vi.fn();
 const readCursorTokenUsageMock: Mock = vi.fn();
@@ -430,6 +509,7 @@ const configureCursorTurnEndedStoreMock: Mock = vi.fn();
 const sendDesktopNotificationMock: Mock = vi.fn();
 const findLatestClaudeSessionFileMock: Mock = vi.fn();
 const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDir}/codex-home`);
+const readCodexUserConfigMock: Mock = vi.fn();
 const captureCodexRolloutBaselineMock: Mock = vi.fn();
 const findLatestCodexSessionFileMock: Mock = vi.fn();
 const readCodexRolloutStateMock: Mock = vi.fn();
@@ -439,6 +519,8 @@ const ghMock: Mock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
 const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
 let TEST_DATA_DIR = resolve(`/tmp/spur-session-service-test-${process.pid}`);
+let TEST_HOME = join(TEST_DATA_DIR, "home");
+let hostHome: string | undefined;
 
 const writeTelegramOfferMock: Mock = vi.fn();
 const readInterfaceConsentMock: Mock = vi.fn();
@@ -536,7 +618,47 @@ vi.mock("../../src/claude-accounts.js", () => ({
   ensureDefaultAccount: ensureDefaultAccountMock,
   seedSessionHome: seedSessionHomeMock,
   swapSessionCredentials: swapSessionCredentialsMock,
+  ensureAccountProjectsLink: vi.fn(),
   sessionClaudeHome: (sessionToolDir: string) => `${sessionToolDir}/claude-home`,
+}));
+
+vi.mock("../../src/auth-accounts.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof authAccountsModule>()),
+  AuthAccounts: class {
+    read = authAccountsReadMock;
+    remove = authAccountsRemoveMock;
+    add = vi.fn();
+    recordIdentities = authAccountsRecordIdentitiesMock;
+    updatePool = vi.fn();
+  },
+}));
+
+vi.mock("../../src/auth-proxy.js", () => ({
+  authProxyBinaryPath: () => "/fixture/auth-proxy",
+  AuthProxy: class {
+    constructor(
+      _dataDir: string,
+      _configuration: unknown,
+      _binaryPath: unknown,
+      onRotated: (rotation: AuthRotation) => void,
+    ) {
+      authProxyRotationHandler.current = onRotated;
+    }
+    configure = authProxyConfigureMock;
+    getState = authProxyGetStateMock;
+    getUsage = authProxyGetUsageMock;
+    setApiKey = authProxySetApiKeyMock;
+    registerSession = authProxyRegisterSessionMock;
+    switchSession = authProxySwitchSessionMock;
+    revokeSession = authProxyRevokeSessionMock;
+    recover = authProxyRecoverMock;
+    dispose = authProxyDisposeMock;
+    login = authProxyLoginMock;
+    loginInput = vi.fn();
+    loginStatus = authProxyLoginStatusMock;
+    cancelLogin = authProxyCancelLoginMock;
+    removeAccount = authProxyRemoveAccountMock;
+  },
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
@@ -805,6 +927,7 @@ vi.mock("../../src/agent-hook-state.js", () => ({
 vi.mock("../../src/agents/codex.js", async (importOriginal) => ({
   ...(await importOriginal<typeof codexModule>()),
   codexHookHomePath: codexHookHomePathMock,
+  readCodexUserConfig: readCodexUserConfigMock,
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
   readCodexRolloutState: readCodexRolloutStateMock,
@@ -1312,6 +1435,7 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 type SessionServiceInternals = {
+  sendAuthChangePing(sessionId: string, key: string): Promise<void>;
   captureAgentSessionId(session: SessionRecord, timeoutMs: number): Promise<SessionRecord>;
   agentSessionIdPersistBackoffUntil: Map<string, number>;
   lastSuccessfulTodoNudgeAt: Map<string, number>;
@@ -1341,6 +1465,7 @@ type SessionServiceInternals = {
   waitForQueuedMessage(sessionId: string): Promise<string>;
   queuedDeliveryAckedAt: Map<string, number>;
   withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
+  withSessionLifecycleLocks<T>(sessionIds: readonly string[], task: () => Promise<T>): Promise<T>;
   enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
   classifySessionRecord(
     session: SessionRecord,
@@ -1431,6 +1556,11 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   // launch-command assertions. Same reason agents-claude.test.ts clears it.
   delete process.env["SPUR_CLAUDE_BIN"];
   TEST_DATA_DIR = mkdtempSync(join(tmpdir(), "spur-session-service-"));
+  // Managed Claude homes link from ~/.claude; never let a test reach the real host home.
+  hostHome ??= process.env["HOME"];
+  TEST_HOME = join(TEST_DATA_DIR, "home");
+  mkdirSync(TEST_HOME);
+  process.env["HOME"] = TEST_HOME;
   nextUuid = 1;
   vi.mocked(randomUUID).mockReset().mockImplementation(fixtureUuid);
   ({ normalizeSessionPrBinding } = await import("../../src/session-pr.js"));
@@ -1448,6 +1578,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   timerPromisesSleepMock.mockReset().mockImplementation((ms) => timersPromises.setTimeout(ms));
   rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
   resetAccountStoreMocks(accounts);
+  readCodexUserConfigMock.mockReset().mockResolvedValue("");
 
   upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
   addUnconfiguredProjectMock.mockReset().mockReturnValue([]);
@@ -2035,6 +2166,16 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   });
 }
 
+// Tests whose launch really writes under the slot tool dir (managed Claude home) must call this,
+// or they write to the host-shared /tmp/spur-tools, which another OS user may own.
+export function isolateSessionSlotTool(): void {
+  ensureSessionSlotToolMock.mockImplementation(({ sessionId }: { sessionId: string }) => {
+    const dir = join(TEST_DATA_DIR, "session-tools", sessionId);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  });
+}
+
 // afterEach body: drain and dispose every SessionService the test built.
 export async function disposeSessionServiceHarness(): Promise<void> {
   for (const service of activeSessionServices.splice(0)) {
@@ -2046,6 +2187,8 @@ export async function disposeSessionServiceHarness(): Promise<void> {
   vi.clearAllTimers();
   rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
   rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  if (hostHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = hostHome;
   vi.useRealTimers();
   vi.restoreAllMocks();
 }
@@ -2216,6 +2359,23 @@ export {
   ensureDefaultAccountMock,
   seedSessionHomeMock,
   swapSessionCredentialsMock,
+  authAccountsReadMock,
+  authAccountsRemoveMock,
+  authProxyConfigureMock,
+  authAccountsRecordIdentitiesMock,
+  authProxyGetStateMock,
+  authProxyGetUsageMock,
+  authProxySetApiKeyMock,
+  authProxyRegisterSessionMock,
+  authProxySwitchSessionMock,
+  authProxyRevokeSessionMock,
+  authProxyRecoverMock,
+  authProxyDisposeMock,
+  authProxyLoginMock,
+  authProxyLoginStatusMock,
+  authProxyCancelLoginMock,
+  authProxyRemoveAccountMock,
+  authProxyRotationHandler,
   readCursorJsonlStateMock,
   readCursorTokenUsageMock,
   sendDesktopNotificationMock,
@@ -2227,6 +2387,7 @@ export {
   TEST_ARTIFACTS_ROOT,
   artifactDirForSession,
   TEST_DATA_DIR,
+  TEST_HOME,
   writeTelegramOfferMock,
   readInterfaceConsentMock,
   writeInterfaceConsentMock,

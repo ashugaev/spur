@@ -328,6 +328,22 @@ describe("session transitions service", () => {
       }
     },
   );
+  it("passes a resolved Claude account list, not a promise, to classification during a strict refresh", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    const accounts = [{ id: "acct-1", authenticated: true }];
+    vi.spyOn(
+      service as unknown as { computeClaudeAccountsView(): Promise<unknown> },
+      "computeClaudeAccountsView",
+    ).mockResolvedValue(accounts);
+    const enrich = vi.spyOn(
+      service as unknown as { enrichWithClassified(...args: unknown[]): Promise<unknown> },
+      "enrichWithClassified",
+    );
+    await poll();
+    expect(enrich).toHaveBeenCalled();
+    for (const call of enrich.mock.calls) expect(call[1]).toEqual(accounts);
+  });
+
   it("observes a structured reset on the first poll and projects identical GET/full-list/dashboard markers", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     const reset = "2026-03-18T11:00:00.000Z";

@@ -61,12 +61,12 @@ async function mockCron(
 ): Promise<string[]> {
   const urls: string[] = [];
   // The content-width version label can shift the footer cluster under the
-  // pointer left on the clock, hover-opening the Claude accounts popover.
-  await page.route("**/api/claude-accounts", async (route) => {
+  // pointer left on the clock, hover-opening the agent accounts popover.
+  await page.route("**/api/auth-accounts", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ accounts: [] }),
+      body: JSON.stringify({ accounts: [], pools: {} }),
     });
   });
   await page.route("**/api/cron**", async (route) => {
