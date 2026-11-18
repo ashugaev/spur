@@ -20,19 +20,30 @@ import {
   type PruneOutcome,
 } from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { readJson } from "./github-app.js";
 import { basename, join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
+import { createInterface as createPromptInterface } from "node:readline/promises";
+import { setTimeout as sleep } from "node:timers/promises";
+import type { AuthLogin } from "./auth-proxy.js";
+import {
+  authProviderSchema,
+  type AuthAccountSummary,
+  type AuthPool,
+  type AuthProvider,
+} from "./auth-accounts.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, Option, type Help } from "commander";
 import { registerReviewApp } from "./review-app.js";
 import { registerReviewGate } from "./review-gate.js";
+import { parseTaskStatusRequest } from "./task-status.js";
 import {
   connectProjectConfig,
   deleteJson,
   disconnectProjectConfig,
+  getBytes,
   getJson,
   getExistingJson,
   listProjects,
@@ -90,6 +101,7 @@ import {
   isKillConfirmationRequiredMessage,
   isRestorableSession,
 } from "./session-service.js";
+import { normalizeSlotLinks } from "./session-slots.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import type { SidecarSweepResult } from "./sidecars/reap.js";
 import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
@@ -186,18 +198,24 @@ import {
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SpawnSessionRequest,
+  type SpawnSessionResponse,
   type SubscribeSessionStatesRequest,
   type SetSessionMemoryRequest,
   type SetSharedMemoryRequest,
   type UpdateSessionSlotsRequest,
   type UpdateSessionSlotsResponse,
   type HandoffSessionRequest,
+  type HandoffSessionResponse,
   type TodoMutationRequest,
   type TodoProjection,
+  type CloseoutEntry,
+  type CloseoutManifestView,
+  type CompleteSessionResult,
   type LatestSnapshotEntry,
   type WorkSnapshotMeta,
   type WorkSnapshotRead,
   type WriteSnapshotRequest,
+  type TaskStatusView,
 } from "./types.js";
 import { getVersion } from "./version.js";
 import {
@@ -220,6 +238,17 @@ const RESELECT_MESSAGE = "No session selected. Use ↑↓ to reselect first.";
 const SESSION_LOG_EVENT_LIMIT = 16;
 const SESSION_LOG_LOCAL_LIMIT = 8;
 const RUNTIME_LOGS_UNAVAILABLE = "(runtime log capture unavailable)";
+
+/** LEFT column of `auth accounts`: "" without quota, "62%", or "0% HH:MM" (local) when limited or empty. */
+function authQuotaLeft(account: AuthAccountSummary): string {
+  const exhausted = account.limited || account.quota?.leftPercent === 0;
+  if (!exhausted) return account.quota ? `${Math.round(account.quota.leftPercent)}%` : "";
+  const resetsAt = account.quota?.resetsAt ?? account.cooldownUntil;
+  const reset = resetsAt ? new Date(resetsAt) : undefined;
+  if (!reset || Number.isNaN(reset.getTime())) return "0%";
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `0% ${pad(reset.getHours())}:${pad(reset.getMinutes())}`;
+}
 
 function enableTmuxMouse(sessionName: string): void {
   try {
@@ -779,14 +808,14 @@ function replaceListedSession(
   return sortSessionsForList(sessions.map((entry) => (entry.id === updated.id ? updated : entry)));
 }
 
-function postSessionAction(
+function postSessionAction<T extends SessionView = SessionView>(
   cliEntrypoint: string,
   sessionId: string,
   action: "pause" | "complete" | "kill" | "reopen" | "restore",
   configPath?: string,
   body: object = {},
-): Promise<SessionView> {
-  return postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
+): Promise<T> {
+  return postJson<T>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
 }
 
 function resolveAutoPingSessionId(explicitSession: string | undefined): string {
@@ -1961,7 +1990,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c close, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
@@ -2497,7 +2526,7 @@ async function runInteractiveSessionList(
       sessions = sessions.filter((entry) => entry.id !== completed.id);
       setSelectedSession(null);
       clearPendingConfirmations();
-      statusMessage = brandLine(`Completed ${completed.id}.`);
+      statusMessage = brandLine(`Closed ${completed.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       statusMessage = brandLine(message);
@@ -2717,15 +2746,16 @@ export async function outputResult<T>(args: {
   label: string;
   action: () => Promise<T>;
   render: (value: T) => string;
-  success?: (value: T) => string;
+  success?: (value: T) => string | undefined;
   exitCode?: (value: T) => number | undefined;
 }): Promise<void> {
   const value = args.json ? await args.action() : await withSpinner(args.label, args.action);
   if (args.json) {
     printJson(value);
   } else {
-    if (args.success) {
-      writeStdout(brandLine(args.success(value)));
+    const successLine = args.success?.(value);
+    if (successLine !== undefined) {
+      writeStdout(brandLine(successLine));
     }
     writeStdout(args.render(value));
   }
@@ -3392,12 +3422,182 @@ export function createProgram(cliEntrypoint: string): Command {
       },
     );
 
+  const auth = program.command("auth").description("Manage saved provider authorization.");
+  auth
+    .command("accounts")
+    .description("List saved Claude and Codex authorization profiles.")
+    .option("--agent <name>", "claude or codex")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const provider =
+        options.agent !== undefined ? authProviderSchema.parse(options.agent) : undefined;
+      const result = await getJson<{ accounts: AuthAccountSummary[] }>(
+        cliEntrypoint,
+        `/auth-accounts${provider ? `?agent=${provider}` : ""}`,
+        configPath,
+      );
+      if (options.json) printJson(result);
+      else
+        for (const account of result.accounts) {
+          writeStdout(
+            `${account.id}\t${account.provider}\t${account.displayName}\t${account.status}\t${authQuotaLeft(account)}`,
+          );
+        }
+    });
+  auth
+    .command("login")
+    .description("Sign in to a saved authorization profile.")
+    .argument("<accountId>")
+    .option("--json", "Start login and print its status without waiting")
+    .action(async (accountId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      await runAuthLogin(accountId, options.json === true, configPath);
+    });
+  auth
+    .command("add")
+    .description("Add a Claude or Codex authorization profile and sign in to it.")
+    .requiredOption("--agent <name>", "claude or codex")
+    .option("--json", "Start login and print the profile and login status without waiting")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const { account } = await postJson<{ account: AuthAccountSummary }>(
+        cliEntrypoint,
+        "/auth-accounts",
+        { provider: authProviderSchema.parse(options.agent) },
+        configPath,
+      );
+      if (!options.json) writeStdout(`Added ${account.provider} profile ${account.id}`);
+      await runAuthLogin(account.id, options.json === true, configPath, account);
+    });
+  auth
+    .command("pool")
+    .description("Show or change a provider pool's default profile and auto-rotation.")
+    .argument("<agent>", "claude or codex")
+    .option("--auto-rotate <state>", "on or off")
+    .option("--default <accountId>", "Default profile for Auto sessions")
+    .option("--json", "Print raw JSON")
+    .action(async (agent: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const provider = authProviderSchema.parse(agent);
+      if (options.autoRotate !== undefined && !["on", "off"].includes(options.autoRotate)) {
+        throw new Error("--auto-rotate must be on or off");
+      }
+      const update = {
+        ...(options.autoRotate !== undefined ? { autoRotate: options.autoRotate === "on" } : {}),
+        ...(options.default !== undefined ? { defaultAccountId: options.default } : {}),
+      };
+      const pool =
+        Object.keys(update).length > 0
+          ? (
+              await patchJson<{ pool: AuthPool }>(
+                cliEntrypoint,
+                `/auth-pools/${provider}`,
+                update,
+                configPath,
+              )
+            ).pool
+          : ((
+              await getJson<{ pools: Partial<Record<AuthProvider, AuthPool>> }>(
+                cliEntrypoint,
+                `/auth-accounts?agent=${provider}`,
+                configPath,
+              )
+            ).pools[provider] ?? null);
+      if (options.json) printJson({ provider, pool });
+      else if (!pool) writeStdout(`${provider}: no pool; sessions use host authorization`);
+      else
+        writeStdout(
+          `${provider}\tdefault=${pool.defaultAccountId ?? "none"}\tauto-rotate=${pool.autoRotate ? "on" : "off"}`,
+        );
+    });
+  auth
+    .command("switch")
+    .description("Select a session's managed profile, or Auto, for its next request.")
+    .argument("<sessionId>")
+    .argument("<accountId>", "Profile id, or auto")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, accountId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const session = await postJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${encodeURIComponent(sessionId)}/switch-auth`,
+        { accountId: accountId === "auto" ? null : accountId },
+        configPath,
+      );
+      if (options.json) printJson(session);
+      else
+        writeStdout(
+          `${sessionId}\t${session.auth?.mode ?? "direct"}\t${session.auth?.effectiveAccountId ?? "host"}`,
+        );
+    });
+
+  async function runAuthLogin(
+    accountId: string,
+    json: boolean,
+    configPath: string,
+    account?: AuthAccountSummary,
+  ): Promise<void> {
+    const path = `/auth-accounts/${encodeURIComponent(accountId)}`;
+    let status = await postJson<AuthLogin>(cliEntrypoint, `${path}/login`, {}, configPath);
+    if (json) {
+      printJson(account ? { account, login: status } : status);
+      return;
+    }
+    // Interruption cancels the pending sign-in; the companion bounds an orphaned one at 16 minutes.
+    const abort = new AbortController();
+    const interrupt = () => abort.abort();
+    const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+    for (const signal of signals) process.once(signal, interrupt);
+    const prompt = createPromptInterface({ input: process.stdin, output: process.stdout });
+    // A TTY Ctrl-C reaches readline, not the process, while the interface is open.
+    prompt.on("SIGINT", interrupt);
+    const displayed = new Set<string>();
+    let submittedPrompt: string | undefined;
+    try {
+      while (status.status !== "ready") {
+        if (status.status === "failed" || status.status === "sign-in-required") {
+          throw new Error(status.error ?? "Authorization sign-in did not complete");
+        }
+        for (const value of [status.url, status.userCode]) {
+          if (value && !displayed.has(value)) {
+            displayed.add(value);
+            writeStdout(value);
+          }
+        }
+        if (status.prompt && !status.userCode && submittedPrompt !== status.prompt) {
+          const input = await prompt.question(`${status.prompt} `, { signal: abort.signal });
+          submittedPrompt = status.prompt;
+          status = await postJson<AuthLogin>(
+            cliEntrypoint,
+            `${path}/login-input`,
+            { input },
+            configPath,
+          );
+        } else {
+          await sleep(1_000, undefined, { signal: abort.signal });
+          status = await getJson<AuthLogin>(cliEntrypoint, `${path}/login-status`, configPath);
+        }
+      }
+      writeStdout("Authorization ready");
+    } finally {
+      for (const signal of signals) process.removeListener(signal, interrupt);
+      prompt.close();
+      if (status.status !== "ready") {
+        await postJson(cliEntrypoint, `${path}/login-input`, { cancel: true }, configPath).catch(
+          () => {},
+        );
+      }
+    }
+  }
+
   program
     .command("spawn")
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
     .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude, codex, cursor, or opencode")
+    .option("--auth-account <id>", "Pin a saved authorization account for this session")
     .addOption(reasoningEffortOption())
     .option(
       "--model <id>",
@@ -3432,6 +3632,17 @@ export function createProgram(cliEntrypoint: string): Command {
       appendOptionValue,
     )
     .option("--subscribe-message <message>", "Message delivered when the subscription fires")
+    .option(
+      "--link <label=url>",
+      "Session link set at creation; repeatable",
+      collectOptionValue,
+      [],
+    )
+    .option("--prompt-file <path|->", "Read the task prompt from a file, or stdin with -")
+    .option(
+      "--idempotency-key <key>",
+      "Retry-safe key: a repeat with the same key and request returns the existing session",
+    )
     .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[] | undefined, options, command) => {
       const parentProgram = command.parent as Command;
@@ -3451,7 +3662,23 @@ export function createProgram(cliEntrypoint: string): Command {
       }
       const overrides = resolveCliSpawnOverrides(options);
       const subscriptions = resolveCliSpawnSubscriptions(options);
-      const prompt = (promptParts ?? []).join(" ").trim();
+      const positionalPrompt = (promptParts ?? []).join(" ").trim();
+      if (options.promptFile !== undefined && positionalPrompt) {
+        throw new Error("use either [prompt...] or --prompt-file");
+      }
+      const promptFile = options.promptFile as string | undefined;
+      const prompt =
+        promptFile === undefined
+          ? positionalPrompt
+          : readFileSync(promptFile === "-" ? 0 : promptFile, "utf-8").trim();
+      const links = normalizeSlotLinks((options.link as string[]).map(parseSlotLink));
+      const repeatedLabel = links.find(
+        (link, index) => links.findIndex((other) => other.label === link.label) !== index,
+      );
+      if (repeatedLabel) {
+        throw new Error(`--link label repeated: ${repeatedLabel.label}`);
+      }
+      const idempotencyKey = options.idempotencyKey as string | undefined;
       const configPath = instance.configPath;
       const availableProjects = await listProjects(cliEntrypoint, configPath);
       if (!availableProjects.some((entry) => entry.id === project)) {
@@ -3464,7 +3691,13 @@ export function createProgram(cliEntrypoint: string): Command {
       let branch: string | undefined = options.branch;
 
       // Interactive branch confirmation: TTY, no --json, no explicit --branch
-      const interactive = !options.json && !branch && process.stdin.isTTY && process.stdout.isTTY;
+      // A model-generated branch would differ between retries of one idempotency key.
+      const interactive =
+        !options.json &&
+        !branch &&
+        idempotencyKey === undefined &&
+        process.stdin.isTTY &&
+        process.stdout.isTTY;
       if (interactive && prompt) {
         const preflight = await withSpinner("running preflight", () =>
           postPreflight(
@@ -3493,6 +3726,9 @@ export function createProgram(cliEntrypoint: string): Command {
         prompt,
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
+        ...(options.authAccount !== undefined
+          ? { authAccountId: options.authAccount as string }
+          : {}),
         ...(options.model !== undefined ? { model: options.model as string } : {}),
         ...(options.reasoningEffort !== undefined
           ? { reasoningEffort: options.reasoningEffort as ProviderReasoningEffort }
@@ -3503,11 +3739,16 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
         ...(subscriptions ? { subscriptions } : {}),
+        ...(links.length > 0 ? { slots: { links } } : {}),
+        ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
       };
       await outputResult({
         json: Boolean(options.json),
         label: "starting session",
-        action: () => postJson<SessionView>(cliEntrypoint, "/sessions", payload, configPath),
+        action: () =>
+          postJson<SpawnSessionResponse>(cliEntrypoint, "/sessions", payload, configPath),
+        success: (session) =>
+          session.replayed ? `existing session ${session.id} (same idempotency key)` : undefined,
         render: renderSessionCard,
       });
     });
@@ -3907,14 +4148,14 @@ export function createProgram(cliEntrypoint: string): Command {
 
   program
     .command("complete")
-    .description("Mark a session complete and clean up its runtime artifacts.")
+    .description("Close a session and clean up its runtime artifacts.")
     .argument("<sessionId>", "Session id")
     .option(
       "--pr-action <action>",
       "Handle open PR before cleanup (leave_open or close)",
       parsePrActionOption,
     )
-    .option("--skip-pr-check", "Complete without any GitHub PR check (no gh calls)")
+    .option("--skip-pr-check", "Close without any GitHub PR check (no gh calls)")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -3927,11 +4168,48 @@ export function createProgram(cliEntrypoint: string): Command {
       }
       await outputResult({
         json: Boolean(options.json),
-        label: "completing session",
-        action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath, body),
-        success: (session) => `Completed ${session.id}.`,
-        render: renderSessionCard,
+        label: "closing session",
+        action: () =>
+          postSessionAction<CompleteSessionResult>(
+            cliEntrypoint,
+            sessionId,
+            "complete",
+            configPath,
+            body,
+          ),
+        success: (session) => `Closed ${session.id}.`,
+        render: (session) =>
+          session.closeout
+            ? `${renderSessionCard(session)}\ncloseout: ${session.closeout.unverified} files not archived: path verification needs Linux (see manifest skipped)`
+            : renderSessionCard(session),
       });
+    });
+
+  program
+    .command("task-status")
+    .description("Read or declare the current task outcome without closing its session.")
+    .argument("[state]", "Task outcome: completed, needs_input, or clear")
+    .requiredOption("--session <id>", "Session id")
+    .option("--revision <integer>", "Revision retained at task start")
+    .option("--json", "Print raw JSON")
+    .action(async (state: string | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const path = `/sessions/${encodeURIComponent(options.session as string)}/task-status`;
+      const view =
+        state === undefined
+          ? await getJson<TaskStatusView>(cliEntrypoint, path, configPath)
+          : await postJson<TaskStatusView>(
+              cliEntrypoint,
+              path,
+              parseTaskStatusRequest({
+                state,
+                revision: options.revision === undefined ? undefined : Number(options.revision),
+                agentLaunchId: process.env["SPUR_AGENT_LAUNCH_ID"],
+              }),
+              configPath,
+            );
+      if (options.json) printJson(view);
+      else writeStdout(`revision ${view.revision}${view.state ? ` ${view.state}` : ""}\n`);
     });
 
   const todoCommand = program
@@ -4167,6 +4445,97 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
+  const closeoutCommand = program
+    .command("closeout")
+    .description("Read the archive complete keeps: show, get a file, or find by link.");
+  const closeoutPath = (sessionId: string): string =>
+    `/sessions/${encodeURIComponent(sessionId)}/closeout`;
+  const closeoutVersionQuery = (versionArg: string | undefined): string =>
+    versionArg === undefined ? "" : `?version=${encodeURIComponent(versionArg.trim())}`;
+  const closeoutLines = (manifest: CloseoutManifestView): string[] => [
+    `version ${manifest.version} of ${manifest.versions.join(",")} completed ${manifest.completedAt} snapshot ${manifest.snapshotVersion ?? "-"} head ${manifest.headSha ?? "-"}`,
+    ...(manifest.error ? [`error ${manifest.error}`] : []),
+    ...(manifest.expiredAt ? [`expired ${manifest.expiredAt}`] : []),
+    ...manifest.files.map((file) => `${file.root}/${file.path}\t${file.bytes}`),
+    ...manifest.skipped.map(
+      (file) => `skipped ${file.root}/${file.path}\t${file.bytes}\t${file.reason}`,
+    ),
+  ];
+  closeoutCommand
+    .command("show")
+    .argument("<sessionId>", "Session id")
+    .argument("[version]", "Archive version; defaults to the latest")
+    .option("--json", "Print the manifest as JSON")
+    .action(async (sessionId: string, versionArg: string | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const query = closeoutVersionQuery(versionArg);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading closeout",
+        action: () =>
+          getJson<CloseoutManifestView>(
+            cliEntrypoint,
+            `${closeoutPath(sessionId)}${query}`,
+            configPath,
+          ),
+        render: (manifest) => closeoutLines(manifest).join("\n"),
+      });
+    });
+  closeoutCommand
+    .command("get")
+    .argument("<sessionId>", "Session id")
+    .argument("<file>", "<root>/<path> as printed by closeout show")
+    .argument("[version]", "Archive version; defaults to the latest")
+    .option("--out <file>", "Write to a file instead of stdout")
+    .action(
+      async (sessionId: string, file: string, versionArg: string | undefined, options, command) => {
+        const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+        const query = closeoutVersionQuery(versionArg);
+        const encoded = file
+          .split("/")
+          .map((segment) => encodeURIComponent(segment))
+          .join("/");
+        const bytes = await withSpinner("downloading closeout file", () =>
+          getBytes(
+            cliEntrypoint,
+            `${closeoutPath(sessionId)}/files/${encoded}${query}`,
+            configPath,
+          ),
+        );
+        if (options.out) {
+          writeFileSync(options.out as string, bytes);
+          writeStdout(`Wrote ${bytes.length} bytes to ${options.out as string}`);
+        } else {
+          process.stdout.write(bytes);
+        }
+      },
+    );
+  closeoutCommand
+    .command("list")
+    .description("Latest closeout archive of every session whose links match.")
+    .option("--link <label[=url]>", "Session link; repeat to require all", collectOptionValue, [])
+    .option("--json", "Print the entries as JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      if (options.link.length === 0) throw new Error("closeout list requires --link");
+      const query = new URLSearchParams();
+      for (const link of options.link) query.append("link", link);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading closeouts",
+        action: () =>
+          getJson<CloseoutEntry[]>(cliEntrypoint, `/closeouts?${query.toString()}`, configPath),
+        render: (entries) =>
+          entries
+            .map((entry) =>
+              [`## ${entry.sessionId} (${entry.status})`, ...closeoutLines(entry.manifest)].join(
+                "\n",
+              ),
+            )
+            .join("\n"),
+      });
+    });
+
   const autoPingCommand = program
     .command("auto-ping")
     .description("Mute automatic trigger pings for a session.");
@@ -4335,7 +4704,7 @@ export function createProgram(cliEntrypoint: string): Command {
 
   program
     .command("reopen")
-    .description("Restart a completed session in place, keeping its id and history.")
+    .description("Restart a closed session in place, keeping its id and history.")
     .argument("<sessionId>", "Session id")
     .option(
       "--force",
@@ -4365,6 +4734,10 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--model <id>", "Model id for the target agent")
     .addOption(reasoningEffortOption())
     .option("--notes <text>", "Optional handoff notes for the next agent")
+    .option(
+      "--idempotency-key <key>",
+      "Retry-safe key: a repeat with the same key and request returns the existing successor",
+    )
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -4379,18 +4752,26 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(typeof options.notes === "string" && options.notes.trim()
           ? { notes: options.notes.trim() }
           : {}),
+        ...(typeof options.idempotencyKey === "string"
+          ? { idempotencyKey: options.idempotencyKey }
+          : {}),
       };
       await outputResult({
         json: Boolean(options.json),
         label: "handing off session",
         action: () =>
-          postJson<SessionView>(
-            cliEntrypoint,
-            `/sessions/${sessionId}/handoff`,
-            payload,
-            configPath,
-          ),
-        success: (session) => `Handed off to ${session.id} (${session.agent}).`,
+          // An older daemon omits the count.
+          postJson<
+            SessionView & Partial<Pick<HandoffSessionResponse, "movedTodoItems" | "replayed">>
+          >(cliEntrypoint, `/sessions/${sessionId}/handoff`, payload, configPath),
+        success: (session) =>
+          session.replayed
+            ? `existing session ${session.id} (same idempotency key)`
+            : `Handed off to ${session.id} (${session.agent})${
+                typeof session.movedTodoItems === "number"
+                  ? `; moved ${session.movedTodoItems} ToDo items`
+                  : ""
+              }.`,
         render: renderSessionCard,
       });
     });
@@ -5766,7 +6147,11 @@ export async function run(argv = process.argv): Promise<void> {
     await program.parseAsync(argvWithoutStrayHelpFlags(program, argv));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    log.error(message, { output: process.stderr, symbol: brandMark(), withGuide: false });
+    const separator = argv.indexOf("--");
+    const json = (separator === -1 ? argv : argv.slice(0, separator)).includes("--json");
+    // --json callers parse output; errors use the daemon's `{ "error": message }` body shape.
+    if (json) writeStderr(`${JSON.stringify({ error: message })}\n`);
+    else log.error(message, { output: process.stderr, symbol: brandMark(), withGuide: false });
     process.exitCode = 1;
   }
 }

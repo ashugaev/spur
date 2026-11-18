@@ -37,10 +37,18 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: companion/auth-proxy/go.mod
+          cache-dependency-path: companion/auth-proxy/go.sum
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
+      - name: Test managed account proxy
+        run: go -C companion/auth-proxy test -race -p 2 ./...
+      - run: bash tests/package/auth-proxy-package.test.sh
+      - run: bash v2/test/auth-proxy-licenses.test.sh
       - run: pnpm build
       - run: pnpm test
       - name: Telegram call offline boundaries
@@ -73,6 +81,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: companion/auth-proxy/go.mod
+          cache-dependency-path: companion/auth-proxy/go.sum
       - run: pnpm install --frozen-lockfile
       - id: candidate
         env:
@@ -138,6 +150,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: companion/auth-proxy/go.mod
+          cache-dependency-path: companion/auth-proxy/go.sum
       - name: Start tmux server
         run: tmux start-server
       - run: pnpm install --frozen-lockfile
@@ -164,6 +180,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: companion/auth-proxy/go.mod
+          cache-dependency-path: companion/auth-proxy/go.sum
       - name: Start tmux server
         run: tmux start-server
       - run: pnpm install --frozen-lockfile

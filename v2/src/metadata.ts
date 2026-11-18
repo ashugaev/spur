@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { authSessionSchema } from "./auth-proxy.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -19,6 +20,7 @@ import { parseConsent, type InterfaceConsent } from "./review-interface-consent.
 import {
   isSessionState,
   isTerminalSessionStatus,
+  AUTH_CHANGE_PING_MAX_ATTEMPTS,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   DELIVERY_MAX_ATTEMPTS,
   type AvailableBacklogItem,
@@ -51,6 +53,7 @@ import { aggregateTokenUsage } from "./token-usage.js";
 import { normalizePreflightTotals } from "./preflight-usage-store.js";
 import { parseArtifactRelativePath } from "./session-artifacts.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
+import { isTaskStatusRevision, normalizeTaskStatus } from "./task-status.js";
 
 export function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -737,7 +740,8 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         title: raw.title,
         repo: raw.repo,
         createdAt: raw.createdAt,
-        autoComplete: typeof raw.autoComplete === "boolean" ? raw.autoComplete : true,
+        // Either explicit false wins; absent/malformed legacy policy historically enables closing.
+        autoClose: raw.autoClose !== false && raw.autoComplete !== false,
       };
       const state = isWorkItemLifecycleState(raw.state) ? raw.state : "running";
       if (state === "pending") {
@@ -1556,7 +1560,23 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     (birthRequest.prompt === undefined || typeof birthRequest.prompt === "string")
       ? { triggerBirthKey: normalizedSession.triggerBirthKey, triggerBirthRequest: birthRequest }
       : {};
+  const receipt = normalizedSession.handoffIdempotency;
+  const handoffIdempotency =
+    isRecord(receipt) &&
+    typeof receipt.key === "string" &&
+    receipt.key.length > 0 &&
+    isRecord(receipt.request) &&
+    typeof receipt.request.agent === "string" &&
+    typeof receipt.successorId === "string" &&
+    receipt.successorId.length > 0 &&
+    Number.isSafeInteger(receipt.movedTodoItems) &&
+    receipt.movedTodoItems >= 0
+      ? { handoffIdempotency: receipt }
+      : {};
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
+  const declaration = normalizeTaskStatus(normalizedSession.taskStatus);
+  const taskStatus =
+    declaration?.agentLaunchId === normalizedSession.agentLaunchId ? declaration : undefined;
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
   const sidecarLaunches: Record<string, string> = {};
   if (isRecord(normalizedSession.sidecarLaunches)) {
@@ -1570,6 +1590,16 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
   const rateLimitClearFence = normalizeRateLimitClearFence(normalizedSession.rateLimitClearFence);
   const claudeStatusOwner = normalizeClaudeStatusOwner(normalizedSession.claudeStatusOwner);
+  const parsedAuth =
+    normalizedSession.auth === undefined
+      ? undefined
+      : authSessionSchema.safeParse(normalizedSession.auth);
+  if (parsedAuth && !parsedAuth.success) {
+    throw new InvalidSessionMetadataError(
+      `Invalid session metadata auth for ${normalizedSession.id}: ${parsedAuth.error.message}`,
+    );
+  }
+  const auth = parsedAuth?.data;
   // Records written before the rename carry the hold as launchUnconfirmedAt;
   // read it once here so an existing hold survives, and write only the new name.
   const legacyUnconfirmed = (normalizedSession as { launchUnconfirmedAt?: unknown })
@@ -1606,6 +1636,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     id: normalizedSession.id,
     project: normalizedSession.project,
     ...triggerBirth,
+    ...handoffIdempotency,
     // Legacy on-disk records only have `deskId` (or neither field); this is
     // where a pre-workspaceId record gets migrated in memory on every read.
     // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
@@ -1635,6 +1666,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
     ...(normalizedSession.agentLaunchId ? { agentLaunchId: normalizedSession.agentLaunchId } : {}),
+    ...(isTaskStatusRevision(normalizedSession.taskStatusRevision)
+      ? { taskStatusRevision: normalizedSession.taskStatusRevision }
+      : {}),
+    ...(taskStatus ? { taskStatus } : {}),
     ...(normalizedSession.cursorRestoreBoundary &&
     typeof normalizedSession.cursorRestoreBoundary.filePath === "string" &&
     Number.isSafeInteger(normalizedSession.cursorRestoreBoundary.offset) &&
@@ -1742,6 +1777,15 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     normalizedSession.serverErrorReactivationAttempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
       ? { serverErrorReactivationAttempts: normalizedSession.serverErrorReactivationAttempts }
       : {}),
+    ...(normalizedSession.authChangePing &&
+    typeof normalizedSession.authChangePing.key === "string" &&
+    normalizedSession.authChangePing.key !== "" &&
+    typeof normalizedSession.authChangePing.pinged === "boolean" &&
+    Number.isInteger(normalizedSession.authChangePing.attempts) &&
+    normalizedSession.authChangePing.attempts >= 0 &&
+    normalizedSession.authChangePing.attempts <= AUTH_CHANGE_PING_MAX_ATTEMPTS
+      ? { authChangePing: normalizedSession.authChangePing }
+      : {}),
     ...(normalizedSession.todoNudge &&
     typeof normalizedSession.todoNudge.fingerprint === "string" &&
     /^[a-f0-9]{64}$/.test(normalizedSession.todoNudge.fingerprint) &&
@@ -1761,6 +1805,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
+    ...(auth ? { auth } : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
     ...(normalizedSession.error &&
@@ -2698,6 +2743,19 @@ export function readWorkItemLifecycles(
   return existsSync(path) ? readWorkItemLifecycleFile(path) : new Map();
 }
 
+function writeWorkItemLifecycles(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  records: Map<string, WorkItemLifecycleRecord>,
+): void {
+  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
+    records: [...records.values()]
+      .sort((left, right) => left.externalId.localeCompare(right.externalId))
+      .map(({ autoClose, ...record }) => ({ ...record, autoComplete: autoClose })),
+  });
+}
+
 export function recordWorkItemLifecycle(
   dataDir: string,
   projectId: string,
@@ -2706,11 +2764,7 @@ export function recordWorkItemLifecycle(
 ): void {
   const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
   records.set(record.externalId, record);
-  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
-    records: [...records.values()].sort((left, right) =>
-      left.externalId.localeCompare(right.externalId),
-    ),
-  });
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
 }
 
 export function deleteWorkItemLifecycle(
@@ -2721,11 +2775,7 @@ export function deleteWorkItemLifecycle(
 ): void {
   const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
   if (!records.delete(externalId)) return;
-  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
-    records: [...records.values()].sort((left, right) =>
-      left.externalId.localeCompare(right.externalId),
-    ),
-  });
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
 }
 
 export function readPendingSendBatches(dataDir: string): Map<string, PersistedPendingBatch> {

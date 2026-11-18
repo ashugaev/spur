@@ -97,7 +97,7 @@ test.describe("Lifecycle reconciliation", () => {
     });
     await page.clock.install();
     await page.goto("/");
-    const done = page.getByRole("button", { name: `Mark ${session.id} as done` });
+    const done = page.getByRole("button", { name: `Close session ${session.id}` });
     await done.click();
     const before = polls;
     for (let index = 0; index < 3; index += 1) {
@@ -277,7 +277,7 @@ test.describe("Lifecycle reconciliation", () => {
     });
     await page.clock.install();
     await page.goto("/");
-    const done = page.getByRole("button", { name: `Mark ${old.id} as done` });
+    const done = page.getByRole("button", { name: `Close session ${old.id}` });
     await done.click();
     await expect.poll(() => polls).toBeGreaterThanOrEqual(2);
     await expect(done).toHaveCount(0);
@@ -692,14 +692,14 @@ async function fillSpawnForm(
   }
 
   if (selfDestruct !== undefined) {
-    const checkbox = page.getByRole("checkbox", { name: "Self-destruct" });
+    const checkbox = page.getByRole("checkbox", { name: "Auto-close session" });
     if ((await checkbox.isChecked()) !== selfDestruct) {
       await checkbox.click();
     }
   }
 
   if (selfDestructConditions !== undefined) {
-    await page.getByLabel("Self-destruct conditions").fill(selfDestructConditions);
+    await page.getByLabel("Auto-close conditions").fill(selfDestructConditions);
   }
 
   if (steps) {
@@ -1201,14 +1201,14 @@ test.describe("D2: Filters modal status counts are correct", () => {
     await expectStatusCount(page, "Stopped", 1);
   });
 
-  test("Completed shows 1 with one completed session", async ({ page }) => {
+  test("Closed shows 1 with one closed session", async ({ page }) => {
     const session = makeCompletedSession({ prompt: "Completed session" });
     await mockSessions(page, [session]);
     await page.goto("/");
-    await expectStatusCount(page, "Completed", 1);
+    await expectStatusCount(page, "Closed", 1);
   });
 
-  test("Completed count updates after polling when a session finishes", async ({ page }) => {
+  test("Closed count updates after polling when a session closes", async ({ page }) => {
     const working = makeWorkingSession({
       id: "wk-complete-1",
       prompt: "Completes after poll",
@@ -1218,7 +1218,7 @@ test.describe("D2: Filters modal status counts are correct", () => {
     await page.goto("/");
 
     await expect(page.getByText("Completes after poll")).toBeVisible();
-    await expectStatusCount(page, "Completed", 0);
+    await expectStatusCount(page, "Closed", 0);
 
     sessions = [
       {
@@ -1232,10 +1232,10 @@ test.describe("D2: Filters modal status counts are correct", () => {
 
     await page.waitForTimeout(5500);
 
-    await expectStatusCount(page, "Completed", 1);
+    await expectStatusCount(page, "Closed", 1);
     await expect(page.getByText("Completes after poll")).not.toBeVisible();
 
-    await selectStatus(page, "Completed");
+    await selectStatus(page, "Closed");
     await expect(page.getByText("Completes after poll")).toBeVisible();
   });
 
@@ -1273,7 +1273,7 @@ test.describe("D2: Filters modal status counts are correct", () => {
     await expect(page.getByText("Working session two")).toBeVisible();
   });
 
-  test("clicking Completed filters to only completed sessions", async ({ page }) => {
+  test("clicking Closed filters to only closed sessions", async ({ page }) => {
     const working = makeWorkingSession({ id: "wk-done-1", prompt: "Working still active" });
     const completed = makeCompletedSession({
       id: "done-only-1",
@@ -1285,14 +1285,14 @@ test.describe("D2: Filters modal status counts are correct", () => {
     await expect(page.getByText("Working still active")).toBeVisible();
     await expect(page.getByText("Completed and archived")).not.toBeVisible();
 
-    await selectStatus(page, "Completed");
+    await selectStatus(page, "Closed");
 
     await expect(page.getByText("Completed and archived")).toBeVisible();
     await expect(page.getByText("Working still active")).not.toBeVisible();
-    await expect(page.locator("section").getByText("Completed").first()).toBeVisible();
+    await expect(page.locator("section").getByText("Closed").first()).toBeVisible();
   });
 
-  test("clicking Completed again returns to current sessions", async ({ page }) => {
+  test("clicking Closed again returns to current sessions", async ({ page }) => {
     const working = makeWorkingSession({ id: "wk-done-2", prompt: "Working returns" });
     const completed = makeCompletedSession({
       id: "done-only-2",
@@ -1301,10 +1301,10 @@ test.describe("D2: Filters modal status counts are correct", () => {
     await mockSessions(page, [working, completed]);
     await page.goto("/");
 
-    await selectStatus(page, "Completed");
+    await selectStatus(page, "Closed");
     await expect(page.getByText("Completed hides again")).toBeVisible();
 
-    await selectStatus(page, "Completed");
+    await selectStatus(page, "Closed");
 
     await expect(page.getByText("Working returns")).toBeVisible();
     await expect(page.getByText("Completed hides again")).not.toBeVisible();
@@ -1833,6 +1833,33 @@ test.describe("D4: Terminal button state", () => {
 
 // D4b: Merged/closed-PR done button
 test.describe("D4b: Merged/closed-PR done button", () => {
+  test("completed tasks stay live while closed sessions have a separate filter", async ({
+    page,
+  }) => {
+    const completed = makeWorkingSession({
+      id: "task-completed",
+      state: "completed",
+      prompt: "Completed task stays live",
+    });
+    const closed = makeCompletedSession({ id: "session-closed", prompt: "Closed session history" });
+    await mockSessions(page, [completed, closed]);
+    await page.goto("/");
+    await expect(page.getByText("Completed task stays live")).toBeVisible();
+    await expect(page.getByText("Closed session history")).not.toBeVisible();
+    await expect(page.locator("section").getByText("Completed", { exact: true })).toBeVisible();
+    await expectStatusCount(page, "Completed", 1);
+    await expectStatusCount(page, "Closed", 1);
+    await page.getByRole("button", { name: "Actions for task-completed" }).click();
+    await expect(page.getByRole("menuitem", { name: "Close Session" })).toHaveAttribute(
+      "title",
+      "Stop the agent and services, delete artifacts, remove the worktree",
+    );
+    await page.keyboard.press("Escape");
+    await selectStatus(page, "Closed");
+    await expect(page.getByText("Closed session history")).toBeVisible();
+    await expect(page.getByText("Completed task stays live")).not.toBeVisible();
+  });
+
   test("done button visible when PR is merged and session is completable", async ({ page }) => {
     const session = makeSessionWithPR({
       id: "done-btn-1",
@@ -1845,9 +1872,9 @@ test.describe("D4b: Merged/closed-PR done button", () => {
 
     await page.goto("/");
 
-    // The done button has aria-label "Mark <id> as done"
+    // Closing the session remains separate from task completion.
     const doneBtn = page.getByRole("button", {
-      name: new RegExp(`Mark ${session.id} as done`, "i"),
+      name: new RegExp(`Close session ${session.id}`, "i"),
     });
     await expect(doneBtn).toBeVisible({ timeout: 8000 });
   });
@@ -1864,9 +1891,9 @@ test.describe("D4b: Merged/closed-PR done button", () => {
 
     await page.goto("/");
 
-    // The done button has aria-label "Mark <id> as done"
+    // Closing the session remains separate from task completion.
     const doneBtn = page.getByRole("button", {
-      name: new RegExp(`Mark ${session.id} as done`, "i"),
+      name: new RegExp(`Close session ${session.id}`, "i"),
     });
     await expect(doneBtn).toBeVisible({ timeout: 8000 });
   });
@@ -1915,13 +1942,15 @@ test.describe("D4b: Merged/closed-PR done button", () => {
 
     await page.goto("/");
 
-    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+    await page
+      .getByRole("button", { name: new RegExp(`Close session ${session.id}`, "i") })
+      .click();
 
     await expect.poll(() => completeRequestSeen).toBe(true);
     await expect(page.getByText("Optimistic done row")).not.toBeVisible();
-    await expectStatusCount(page, "Completed", 1);
+    await expectStatusCount(page, "Closed", 1);
 
-    await selectStatus(page, "Completed");
+    await selectStatus(page, "Closed");
     await expect(page.getByText("Optimistic done row")).toBeVisible();
 
     releaseComplete();
@@ -1995,7 +2024,9 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     });
 
     await page.goto("/");
-    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+    await page
+      .getByRole("button", { name: new RegExp(`Close session ${session.id}`, "i") })
+      .click();
 
     await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Leave Pull Request Open" })).toBeVisible();
@@ -2069,14 +2100,14 @@ test.describe("D4b: Merged/closed-PR done button", () => {
       });
     });
     page.on("dialog", async (dialog) => {
-      expect(dialog.message()).toBe(
-        "Complete this desk? 1 subagent on this checkout will be ended.",
-      );
+      expect(dialog.message()).toBe("Close this desk? 1 subagent on this checkout will be ended.");
       await dialog.accept();
     });
 
     await page.goto("/");
-    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+    await page
+      .getByRole("button", { name: new RegExp(`Close session ${session.id}`, "i") })
+      .click();
 
     await expect
       .poll(() => completeBody)
@@ -2121,7 +2152,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await mergeBtn.click();
     await expect(
       page.getByRole("button", {
-        name: new RegExp(`Mark ${session.id} as done`, "i"),
+        name: new RegExp(`Close session ${session.id}`, "i"),
       }),
     ).toBeVisible();
   });
@@ -2279,7 +2310,7 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, sessions);
     await page.goto("/");
 
-    // AttentionZone labels: "Errors", "Needs Input", "Working", "Waiting", "Stopped", "Completed"
+    // AttentionZone labels include task Completed and terminal Closed separately.
     await expect(page.getByText("Errors").first()).toBeVisible();
     await expect(page.getByText("Needs Input").first()).toBeVisible();
     await expect(page.getByText("Working").first()).toBeVisible();
@@ -2395,7 +2426,7 @@ test.describe("D6: Attention zone sections", () => {
 
     await expect(page.getByText("Visible session")).toBeVisible();
     await expect(page.getByText("Done zone session")).not.toBeVisible();
-    await expect(page.locator("section").getByText("Completed").first()).not.toBeVisible();
+    await expect(page.locator("section").getByText("Closed").first()).not.toBeVisible();
   });
 
   test("zone count is shown", async ({ page }) => {
@@ -2754,141 +2785,155 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.getByText("System")).not.toBeVisible();
   });
 
-  test("footer right side shows a Claude accounts trigger next to the version menu with a count of authenticated accounts", async ({
+  test("footer right side shows an agent accounts trigger next to the version menu with Claude and Codex sections", async ({
     page,
   }) => {
     await mockSessions(page, []);
-    await page.route("/api/claude-accounts", (route) => {
+    await page.route("/api/auth-accounts", (route) => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           accounts: [
-            { id: "acc-ready-01", label: "Work", authenticated: true },
-            { id: "acc-idle-02", label: "Home", authenticated: false },
+            {
+              id: "acc-ready-01",
+              provider: "claude",
+              identity: { email: "alek@x.com", organizationName: "Intelas" },
+              displayName: "alek@x.com",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              authenticated: true,
+              status: "ready",
+              limited: false,
+              credential: "oauth",
+            },
+            {
+              id: "abcdef1234567890",
+              provider: "codex",
+              displayName: "New Codex account",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              authenticated: false,
+              status: "sign_in_required",
+              limited: false,
+            },
           ],
+          pools: {
+            claude: { defaultAccountId: "acc-ready-01", defaultGeneration: 0, autoRotate: true },
+          },
         }),
       });
     });
     await page.goto("/");
 
     const footer = page.locator("footer");
-    const trigger = footer.getByRole("button", { name: "Manage Claude accounts" });
-    const versionMenu = footer.getByRole("button", { name: "Show Spur version information" });
-    await expect(trigger).toBeVisible();
-    await expect(versionMenu).toBeVisible();
-
-    // Trigger renders an accounts icon (not the old plain-text label).
-    await expect(trigger.locator("svg")).toBeVisible();
-    await expect(trigger.getByText("Claude accounts", { exact: true })).toHaveCount(0);
-
-    // Trigger sits in the same right-aligned footer group as the version menu.
+    const trigger = footer.getByRole("button", { name: "Manage agent accounts" });
     const rightGroup = footer.locator("div.ml-auto");
-    await expect(rightGroup.getByRole("button", { name: "Manage Claude accounts" })).toBeVisible();
+    await expect(rightGroup.getByRole("button", { name: "Manage agent accounts" })).toBeVisible();
     await expect(
       rightGroup.getByRole("button", { name: "Show Spur version information" }),
     ).toBeVisible();
+    await expect(trigger.locator("svg")).toBeVisible();
 
-    // Opening the menu, the header reflects only authenticated accounts (1 of 2).
     await trigger.click();
-    await expect(page.getByText("1 ready")).toBeVisible();
+    const claude = page.getByTestId("auth-section-claude");
+    const codex = page.getByTestId("auth-section-codex");
+    await expect(claude).toContainText("Claude");
+    await expect(codex).toContainText("Codex");
+    await expect(claude.getByTestId("auth-account-acc-ready-01")).toContainText("alek@x.com");
+    await expect(
+      claude.getByTestId("auth-account-acc-ready-01").getByRole("img", { name: "In use" }),
+    ).toBeVisible();
+    await expect(claude.getByLabel("Auto-rotate Claude accounts")).toBeChecked();
+    await expect(page.getByTestId("auth-accounts-popover")).not.toContainText(/\bready\b/i);
+    await expect(codex.getByRole("button", { name: "Sign in New Codex account" })).toBeVisible();
+    await expect(codex.getByLabel("Auto-rotate Codex accounts")).not.toBeChecked();
+    await expect(claude.getByRole("button", { name: "+ Add Claude account" })).toBeVisible();
+    await expect(page.getByTestId("auth-accounts-popover").getByRole("textbox")).toHaveCount(0);
   });
 
-  test("opening the Claude accounts menu lists each account by label or short id with a ready/not-logged-in badge and a per-account Remove action", async ({
-    page,
-  }) => {
-    await mockSessions(page, []);
-    await page.route("/api/claude-accounts", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          accounts: [
-            { id: "acc-labelled-01", label: "Work", authenticated: true },
-            { id: "abcdef1234567890", authenticated: false },
-          ],
-        }),
-      });
-    });
-    await page.goto("/");
-
-    await page.getByRole("button", { name: "Manage Claude accounts" }).click();
-
-    // Labelled account renders its label with the "ready" badge, a disabled Use
-    // action, and a Remove action.
-    const labelledRow = page.getByRole("listitem").filter({ hasText: "Work" });
-    await expect(labelledRow).toContainText("ready");
-    await expect(labelledRow.getByTestId("use-account-acc-labelled-01")).toBeDisabled();
-    await expect(
-      labelledRow.getByRole("button", { name: "Remove Claude account Work" }),
-    ).toBeVisible();
-
-    // No label falls back to the first 8 chars of the id, with the "not logged in" badge.
-    const shortIdRow = page.getByRole("listitem").filter({ hasText: "abcdef12" });
-    await expect(shortIdRow).toContainText("not logged in");
-    await expect(shortIdRow.getByTestId("use-account-abcdef1234567890")).toBeDisabled();
-    await expect(
-      shortIdRow.getByRole("button", { name: "Remove Claude account abcdef12" }),
-    ).toBeVisible();
-  });
-
-  test("adding an account posts to /api/claude-accounts/add and opens the login terminal, auto-closing once login-status authenticates", async ({
+  test("adding a Codex account starts sign-in, shows the URL and code, and closes once login-status is ready", async ({
     page,
   }) => {
     await mockSessions(page, []);
 
     let loginStatusCalls = 0;
-    let finishLoginCalled = false;
+    const account = {
+      id: "new-1",
+      provider: "codex",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const signedIn = {
+      ...account,
+      identity: { email: "new@x.com", plan: "Plus" },
+      displayName: "new@x.com",
+      authenticated: true,
+      status: "ready",
+      limited: false,
+      credential: "oauth",
+    };
+    let addBody: unknown = null;
+    const pending = {
+      accountId: "new-1",
+      status: "pending",
+      url: "https://auth.example.test/device",
+      userCode: "ABCD-1234",
+    };
 
-    await page.route("/api/claude-accounts", (route) => {
+    await page.route("/api/auth-accounts", (route) => {
+      if (route.request().method() === "POST") {
+        addBody = route.request().postDataJSON();
+        void route.fulfill({
+          status: 201,
+          contentType: "application/json",
+          body: JSON.stringify({ account }),
+        });
+        return;
+      }
       void route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ accounts: [] }),
+        body: JSON.stringify({ accounts: loginStatusCalls > 1 ? [signedIn] : [], pools: {} }),
       });
     });
-    await page.route("/api/claude-accounts/add", (route) => {
+    await page.route("/api/auth-accounts/new-1/login", (route) => {
       void route.fulfill({
-        status: 201,
+        status: 200,
         contentType: "application/json",
-        body: JSON.stringify({
-          account: { id: "new-1", label: "New", authenticated: false },
-          loginTmuxSession: "claude-login-x",
-        }),
+        body: JSON.stringify(pending),
       });
     });
-    await page.route("/api/claude-accounts/new-1/login-status", (route) => {
+    await page.route("/api/auth-accounts/new-1/login-status", (route) => {
       loginStatusCalls += 1;
-      // First poll is still pending; the next poll reports the account authenticated.
-      const authenticated = loginStatusCalls > 1;
       void route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ authenticated, loginActive: !authenticated }),
-      });
-    });
-    await page.route("/api/claude-accounts/new-1/finish-login", (route) => {
-      finishLoginCalled = true;
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ authenticated: true }),
+        body: JSON.stringify(
+          loginStatusCalls > 1 ? { accountId: "new-1", status: "ready" } : pending,
+        ),
       });
     });
 
     await page.goto("/");
 
-    await page.getByRole("button", { name: "Manage Claude accounts" }).click();
-    await page.getByTestId("add-account").click();
+    await page.getByRole("button", { name: "Manage agent accounts" }).click();
+    await page.getByTestId("add-account-codex").click();
 
-    // The login terminal opens on the returned tmux session (session id claude-login-new-1).
-    const loginTerminal = page.getByRole("dialog", { name: "Terminal claude-login-new-1" });
-    await expect(loginTerminal).toBeVisible();
+    const loginDialog = page.getByRole("dialog", { name: "Add Codex account" });
+    await expect(loginDialog).toBeVisible();
+    expect(addBody).toEqual({ provider: "codex" });
+    // The picker opens first; nothing starts until a method is chosen.
+    await expect(loginDialog.getByRole("radio", { name: /Device code/ })).toBeChecked();
+    await loginDialog.getByRole("button", { name: "Continue", exact: true }).click();
+    await expect(loginDialog.getByTestId("auth-login-url")).toHaveAttribute(
+      "href",
+      "https://auth.example.test/device",
+    );
+    await expect(loginDialog.getByTestId("auth-login-user-code")).toHaveText("ABCD-1234");
 
-    // Polling login-status (every LOGIN_POLL_INTERVAL_MS = 3s) flips to authenticated,
-    // which finishes login and auto-closes the terminal.
-    await expect(loginTerminal).toBeHidden({ timeout: 15_000 });
-    expect(finishLoginCalled).toBe(true);
+    // Polling login-status (every 3s) flips to ready: verified shows, then the dialog closes.
+    await expect(loginDialog.getByText("Signed in as new@x.com · Plus")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(loginDialog).toBeHidden({ timeout: 10_000 });
   });
 });
 
@@ -3003,7 +3048,7 @@ test.describe("D7: Spawn modal", () => {
     // Branch input
     await expect(page.getByLabel("branch name")).toBeVisible();
     await expect(page.getByRole("checkbox", { name: "Plan" })).toBeVisible();
-    await expect(page.getByRole("checkbox", { name: "Self-destruct" })).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: "Auto-close session" })).toBeVisible();
   });
 
   test("OpenCode selection exposes its discovered models", async ({ page }) => {
@@ -4191,8 +4236,8 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByLabel("branch name")).toHaveValue("");
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     await expect(page.getByRole("checkbox", { name: "Plan" })).not.toBeChecked();
-    await expect(page.getByRole("checkbox", { name: "Self-destruct" })).not.toBeChecked();
-    await expect(page.getByLabel("Self-destruct conditions")).toHaveCount(0);
+    await expect(page.getByRole("checkbox", { name: "Auto-close session" })).not.toBeChecked();
+    await expect(page.getByLabel("Auto-close conditions")).toHaveCount(0);
     await expect(page.getByLabel(/step 1/i)).toHaveCount(0);
     await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue(
       "other-project",
@@ -4229,7 +4274,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
       selfDestruct: true,
     });
 
-    const conditionsField = page.getByLabel("Self-destruct conditions");
+    const conditionsField = page.getByLabel("Auto-close conditions");
     await expect(conditionsField).toHaveValue("");
     await expect(conditionsField).toHaveAttribute(
       "placeholder",

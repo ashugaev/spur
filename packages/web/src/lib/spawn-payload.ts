@@ -35,6 +35,8 @@ export interface SpawnPayloadFields extends ComposerFields {
   trackerUrl: string | null;
   workspaceMode: WorkspaceMode;
   preflightBatchId: string | null;
+  /** Managed account; `null` is Auto. */
+  authAccountId: string | null;
 }
 
 export interface RespawnPayloadFields extends ComposerFields {
@@ -65,6 +67,7 @@ export interface SpawnSessionPayload {
   overrides: SpawnOverrides;
   slots?: { links: [{ label: "tracker"; url: string }] };
   preflightBatchId?: string;
+  authAccountId?: string;
 }
 
 export interface RespawnSessionPayload {
@@ -125,6 +128,7 @@ export function buildSpawnSessionPayload(fields: SpawnPayloadFields): SpawnSessi
   if (effort !== undefined) payload.reasoningEffort = effort;
   if (fields.preflightBatchId) payload.preflightBatchId = fields.preflightBatchId;
   if (fields.mode) payload.mode = fields.mode;
+  if (fields.authAccountId) payload.authAccountId = fields.authAccountId;
 
   const attachments = encodedAttachments(fields.attachments);
   if (attachments.length > 0) payload.attachments = attachments;

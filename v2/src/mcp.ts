@@ -268,7 +268,7 @@ export function createMcpWrapper(gateway: McpGateway): McpServer {
     "spawn_session",
     {
       description:
-        "Spawn a full-access agent. All SpawnSessionRequest fields accepted; background defaults true. describe_operations(spawn_session) describes fields. Agents can delete files.",
+        "Spawn a full-access agent. All SpawnSessionRequest fields accepted; background defaults true. describe_operations(spawn_session) describes fields. Pass idempotencyKey to make retries return the same session. Agents can delete files.",
       inputSchema: z.object({ project: id, background: z.boolean().optional() }).passthrough(),
       annotations: {
         readOnlyHint: false,

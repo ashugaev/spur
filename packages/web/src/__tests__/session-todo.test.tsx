@@ -238,4 +238,94 @@ describe("SessionTodo", () => {
     expect(reason).toHaveClass("[overflow-wrap:anywhere]");
     expect(reason).toHaveClass("whitespace-pre-wrap");
   });
+
+  describe("handoff provenance", () => {
+    const system = { kind: "system", source: "handoff" } as const;
+    const at = "2026-11-01T10:00:00.000Z";
+
+    function item(
+      id: string,
+      status: "open" | "cancelled",
+      extra: Partial<SpurTodoProjection["items"][number]>,
+    ): SpurTodoProjection["items"][number] {
+      return {
+        id,
+        text: `Text ${id}`,
+        status,
+        added: { reason: "Ship the retry fix before release", actor: system, at },
+        history: [],
+        ...extra,
+      };
+    }
+
+    async function renderItems(items: SpurTodoProjection["items"]) {
+      const body: SpurTodoProjection = {
+        revision: "r",
+        status: "active",
+        counts: {
+          total: items.length,
+          open: 1,
+          held: 0,
+          completed: 0,
+          cancelled: items.length - 1,
+        },
+        items,
+        finishOverrides: [],
+      };
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify(body), { status: 200 }),
+      );
+      render(<SessionTodo sessionId="api-2" />);
+      await screen.findByText("Text inherited");
+    }
+
+    it("shows the source session on an inherited item", async () => {
+      await renderItems([
+        item("inherited", "open", { handoffFrom: { sessionId: "api-1", itemId: "old-1" } }),
+      ]);
+      expect(
+        screen.getByText("From api-1 · Ship the retry fix before release"),
+      ).toBeInTheDocument();
+    });
+
+    it("shows the latest transition reason after the source once the inherited item has one", async () => {
+      await renderItems([
+        item("inherited", "open", {
+          handoffFrom: { sessionId: "api-1", itemId: "old-1" },
+          latestTransition: { type: "cancelled", reason: "Not needed", actor: system, at },
+        }),
+      ]);
+      expect(screen.getByText("From api-1 · Not needed")).toBeInTheDocument();
+    });
+
+    it("labels a handed-off source item instead of cancelled", async () => {
+      await renderItems([
+        item("inherited", "open", {}),
+        item("moved", "cancelled", {
+          handoffTo: { sessionId: "api-2", itemId: "new-1" },
+          latestTransition: { type: "cancelled", reason: "handed off to api-2", actor: system, at },
+        }),
+      ]);
+      const glyph = screen.getByLabelText("handed off");
+      expect(glyph).toHaveTextContent("→");
+      expect(screen.getByText("handed off to api-2")).toBeInTheDocument();
+    });
+
+    it("renders a rolled-back inherited copy as plain cancelled", async () => {
+      await renderItems([
+        item("inherited", "open", {}),
+        item("rolled", "cancelled", {
+          handoffFrom: { sessionId: "api-1", itemId: "old-1" },
+          latestTransition: {
+            type: "cancelled",
+            reason: "handoff to api-3 failed; item stays open in api-1",
+            actor: system,
+            at,
+          },
+        }),
+      ]);
+      expect(screen.getByLabelText("cancelled")).toHaveTextContent("×");
+      expect(screen.queryByLabelText("handed off")).not.toBeInTheDocument();
+    });
+  });
 });

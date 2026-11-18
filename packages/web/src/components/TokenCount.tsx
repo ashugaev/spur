@@ -99,7 +99,7 @@ export function TokenCount({
   if (hideEmpty && !available && !(measured && measured.totalTokens > 0)) return null;
   return (
     <span
-      className="relative inline-block tabular-nums"
+      className={`relative tabular-nums ${hideEmpty ? "hidden shrink-0 sm:inline-block" : "inline-block"}`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >

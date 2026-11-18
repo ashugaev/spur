@@ -78,6 +78,7 @@ import type {
   SessionRecord,
   SubmitAckBaseline,
   TelegramChoice,
+  WorkItemLifecycleRecord,
 } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -119,7 +120,7 @@ it("round-trips pending spawn ownership and rejects stale checkpoints and malfor
     number: 1,
     title: "task",
     repo: "repo",
-    autoComplete: false,
+    autoClose: false,
     createdAt: work.createdAt,
     state: "pending",
     spawnWorkId: "work",
@@ -414,6 +415,112 @@ describe("github poll-disabled registry", () => {
 });
 
 describe("work-item lifecycle registry", () => {
+  const lifecycleBase = {
+    externalId: "acme/api#7",
+    url: "https://github.com/acme/api/pull/7",
+    number: 7,
+    title: "Review me",
+    repo: "acme/api",
+    createdAt: "2026-05-11T10:00:00.000Z",
+  };
+  it.each([
+    [{}, true],
+    [{ autoComplete: true }, true],
+    [{ autoComplete: false }, false],
+    [{ autoComplete: "false" }, true],
+    [{ autoClose: true }, true],
+    [{ autoClose: false }, false],
+    [{ autoClose: true, autoComplete: true }, true],
+    [{ autoClose: false, autoComplete: false }, false],
+    [{ autoClose: false, autoComplete: true }, false],
+    [{ autoClose: true, autoComplete: false }, false],
+    [{ autoClose: "false", autoComplete: false }, false],
+    [{ autoClose: false, autoComplete: "true" }, false],
+    [{ autoClose: null, autoComplete: "false" }, true],
+  ] as const)("decodes policy %j as %s without rewriting", async (policy, autoClose) => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "work-item-lifecycle", "api");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "pr-watch.json");
+    const bytes = JSON.stringify({
+      records: [{ ...lifecycleBase, sessionId: "api-a1b2", ...policy }],
+    });
+    await writeFile(path, bytes);
+    expect(
+      readWorkItemLifecycles(dataDir, "api", "pr-watch").get(lifecycleBase.externalId),
+    ).toEqual({
+      ...lifecycleBase,
+      sessionId: "api-a1b2",
+      state: "running",
+      autoClose,
+    });
+    expect(readFileSync(path, "utf8")).toBe(bytes);
+  });
+
+  it("preserves false in every lifecycle state through record and delete for legacy readers", async () => {
+    const dataDir = await newDataDir();
+    const records: WorkItemLifecycleRecord[] = [
+      {
+        ...lifecycleBase,
+        externalId: "pending",
+        autoClose: false,
+        state: "pending",
+        spawnWorkId: "owned-work",
+      },
+      {
+        ...lifecycleBase,
+        externalId: "running",
+        autoClose: false,
+        state: "running",
+        sessionId: "api-a1b2",
+      },
+      {
+        ...lifecycleBase,
+        externalId: "failed",
+        autoClose: false,
+        state: "failed",
+        error: "spawn failed",
+      },
+      {
+        ...lifecycleBase,
+        externalId: "completed",
+        autoClose: false,
+        state: "completed",
+        sessionId: "api-a1b2",
+        completedAt: "2026-05-11T11:00:00.000Z",
+      },
+    ];
+    const path = join(dataDir, "source-state", "work-item-lifecycle", "api", "pr-watch.json");
+    const assertSurvivors = () => {
+      expect([...readWorkItemLifecycles(dataDir, "api", "pr-watch").values()]).toEqual(
+        [...records].sort((left, right) => left.externalId.localeCompare(right.externalId)),
+      );
+      const disk = JSON.parse(readFileSync(path, "utf8")) as {
+        records: Array<{ externalId: string; autoComplete?: unknown; autoClose?: unknown }>;
+      };
+      expect(disk.records.every((record) => !Object.hasOwn(record, "autoClose"))).toBe(true);
+      // Old binaries recognize only autoComplete and default absent/malformed values to true.
+      const legacy = disk.records.map((record) => ({
+        id: record.externalId,
+        autoComplete: typeof record.autoComplete === "boolean" ? record.autoComplete : true,
+      }));
+      expect(legacy).toEqual(
+        [...records]
+          .sort((left, right) => left.externalId.localeCompare(right.externalId))
+          .map((record) => ({ id: record.externalId, autoComplete: false })),
+      );
+    };
+    for (const record of records) recordWorkItemLifecycle(dataDir, "api", "pr-watch", record);
+    assertSurvivors();
+    recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
+      ...lifecycleBase,
+      autoClose: true,
+      state: "pending",
+    });
+    deleteWorkItemLifecycle(dataDir, "api", "pr-watch", lifecycleBase.externalId);
+    assertSurvivors();
+  });
+
   it("round-trips lifecycle records", async () => {
     const dataDir = await newDataDir();
     recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
@@ -425,7 +532,7 @@ describe("work-item lifecycle registry", () => {
       title: "Review me",
       repo: "acme/api",
       createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
+      autoClose: true,
     });
 
     expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
@@ -437,7 +544,7 @@ describe("work-item lifecycle registry", () => {
       title: "Review me",
       repo: "acme/api",
       createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
+      autoClose: true,
     });
   });
 
@@ -476,7 +583,7 @@ describe("work-item lifecycle registry", () => {
       title: "Review me",
       repo: "acme/api",
       createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
+      autoClose: true,
     });
   });
 
@@ -491,7 +598,7 @@ describe("work-item lifecycle registry", () => {
       title: "Review me",
       repo: "acme/api",
       createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
+      autoClose: true,
     });
 
     deleteWorkItemLifecycle(dataDir, "api", "pr-watch", "acme/api#7");
@@ -1668,6 +1775,32 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, "api-3")?.snapshotNudge).toBeUndefined();
   });
 
+  it("round-trips authChangePing and drops malformed claims", async () => {
+    const dataDir = await newDataDir();
+    const claim = { key: "2:backup", attempts: 2, pinged: false };
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      authChangePing: claim,
+    });
+    expect(readSession(dataDir, "api-2")?.authChangePing).toEqual(claim);
+    for (const bad of [
+      { ...claim, key: "" },
+      { ...claim, attempts: 3 },
+      { ...claim, attempts: -1 },
+      { ...claim, pinged: "yes" },
+    ]) {
+      writeSession(dataDir, {
+        ...legacyBase,
+        id: "api-3",
+        tmuxSession: "api-3",
+        authChangePing: bad,
+      } as SessionRecord);
+      expect(readSession(dataDir, "api-3")?.authChangePing).toBeUndefined();
+    }
+  });
+
   it("drops a malformed ToDo reminder fingerprint", async () => {
     const dataDir = await newDataDir();
     writeSession(dataDir, {
@@ -1699,6 +1832,97 @@ describe("session workspaceId normalization", () => {
       expect(readSession(dataDir, "api-2")?.closeoutOwner).toBe(expected);
     },
   );
+});
+
+describe("task-status persistence", () => {
+  const base: SessionRecord = {
+    id: "api-1",
+    project: "api",
+    agent: "claude",
+    prompt: "ship it",
+    branch: "feature/task-status",
+    worktree: true,
+    worktreePath: "/tmp/worktree",
+    tmuxSession: "api-1",
+    launchCommand: "claude",
+    status: "running",
+    agentLaunchId: "launch-a",
+    createdAt: "2026-11-15T00:00:00Z",
+    updatedAt: "2026-11-15T00:00:00Z",
+  };
+  it("round-trips a declaration across cache reloads and drops it on a new launch", async () => {
+    const dataDir = await newDataDir();
+    const taskStatus = {
+      state: "completed",
+      revision: 2,
+      agentLaunchId: "launch-a",
+      updatedAt: "2026-11-15T00:00:00Z",
+    } as const;
+    writeSession(dataDir, { ...base, taskStatusRevision: 2, taskStatus });
+    expect(readSession(dataDir, base.id)).toMatchObject({ taskStatusRevision: 2, taskStatus });
+    writeSession(dataDir, {
+      ...base,
+      agentLaunchId: "launch-b",
+      taskStatusRevision: 2,
+      taskStatus,
+    });
+    expect(readSession(dataDir, base.id)?.taskStatus).toBeUndefined();
+  });
+  it("accepts legacy absence and omits malformed optional values", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, base);
+    expect(readSession(dataDir, base.id)?.taskStatusRevision).toBeUndefined();
+    writeSession(dataDir, {
+      ...base,
+      taskStatusRevision: -1,
+      taskStatus: {
+        state: "completed",
+        revision: 0,
+        agentLaunchId: "launch-a",
+        updatedAt: "invalid",
+      },
+    });
+    expect(readSession(dataDir, base.id)?.taskStatus).toBeUndefined();
+    expect(readSession(dataDir, base.id)?.taskStatusRevision).toBeUndefined();
+  });
+});
+
+describe("handoff idempotency receipt", () => {
+  const base: SessionRecord = {
+    id: "api-1",
+    project: "api",
+    agent: "claude",
+    prompt: "ship it",
+    branch: "feature/handoff",
+    worktree: true,
+    worktreePath: "/tmp/worktree",
+    tmuxSession: "api-1",
+    launchCommand: "claude",
+    status: "completed",
+    createdAt: "2026-11-15T00:00:00Z",
+    updatedAt: "2026-11-15T00:00:00Z",
+  };
+  it("keeps a valid receipt and drops a malformed one", async () => {
+    const dataDir = await newDataDir();
+    const handoffIdempotency = {
+      key: "h1",
+      request: { agent: "cursor" as const },
+      successorId: "api-2",
+      movedTodoItems: 3,
+    };
+    writeSession(dataDir, { ...base, handoffIdempotency });
+    expect(readSession(dataDir, base.id)?.handoffIdempotency).toEqual(handoffIdempotency);
+    for (const broken of [
+      { ...handoffIdempotency, key: "" },
+      { ...handoffIdempotency, successorId: "" },
+      { ...handoffIdempotency, movedTodoItems: -1 },
+      { ...handoffIdempotency, movedTodoItems: 1.5 },
+      { ...handoffIdempotency, request: "cursor" },
+    ]) {
+      writeSession(dataDir, { ...base, handoffIdempotency: broken } as unknown as SessionRecord);
+      expect(readSession(dataDir, base.id)).not.toHaveProperty("handoffIdempotency");
+    }
+  });
 });
 
 describe("staleSidecars", () => {
@@ -3017,6 +3241,18 @@ describe("listArchivedSessions", () => {
     expect(sessions.map((session) => session.id)).toEqual(["api-1"]);
   });
 
+  it("skips an archived record with malformed auth metadata and keeps the rest", async () => {
+    const dataDir = await newDataDir();
+    archiveRecords(dataDir, ["api-1", "api-2"]);
+    const path = join(dataDir, "sessions-archive", "api", "api-2.json");
+    const record = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    writeFileSync(path, JSON.stringify({ ...record, auth: { sessionId: 7 } }), "utf-8");
+
+    const sessions = listArchivedSessions(dataDir, () => true);
+
+    expect(sessions.map((session) => session.id)).toEqual(["api-1"]);
+  });
+
   it("runs the include predicate before parsing the file", async () => {
     const dataDir = await newDataDir();
     archiveRecords(dataDir, ["api-1", "api-2"]);
@@ -3061,6 +3297,20 @@ describe("listSessions concurrency", () => {
     writeSession(dataDir, { ...sessionBase, id: "api-2", tmuxSession: "api-2" });
     expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-2"]);
     expect(invalidEntries(dataDir)).toHaveLength(1);
+  });
+
+  it("skips a live record with malformed auth metadata, logs it, and readSession throws", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    writeSession(dataDir, { ...sessionBase, id: "api-2", tmuxSession: "api-2" });
+    const path = join(dataDir, "sessions", "api", "api-2.json");
+    const record = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    writeFileSync(path, JSON.stringify({ ...record, auth: { sessionId: 7 } }), "utf-8");
+
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+    expect(invalidEntries(dataDir)[0]?.message).toContain("auth");
+    expect(() => readSession(dataDir, "api-2")).toThrow();
   });
 });
 

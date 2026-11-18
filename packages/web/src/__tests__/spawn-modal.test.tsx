@@ -171,7 +171,7 @@ describe("SpawnModal", () => {
     expect(screen.getByLabelText("branch name")).toBeInTheDocument();
     expect(screen.getByLabelText("workspace mode")).toBeInTheDocument();
     expect(screen.getByLabelText("Plan")).toBeInTheDocument();
-    expect(screen.getByLabelText("Self-destruct")).toBeInTheDocument();
+    expect(screen.getByLabelText("Auto-close session")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "+ Step" })).toBeInTheDocument();
   });
 
@@ -247,7 +247,7 @@ describe("SpawnModal", () => {
     expect(screen.getByLabelText("Agent")).toBeInTheDocument();
     expect(screen.queryByLabelText("Spawn project")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("workspace mode")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Self-destruct")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Auto-close session")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("branch name")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "+ Step" })).not.toBeInTheDocument();
   });

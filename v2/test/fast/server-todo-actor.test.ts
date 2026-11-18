@@ -91,24 +91,36 @@ describe("ToDo actor identity", () => {
     const lookupEntered = new Promise<void>((resolve) => {
       entered = resolve;
     });
-    const get = vi.spyOn(server, "get").mockImplementation(async () => {
-      entered();
-      await held;
-      throw new Error("Held full session lookup released");
-    });
-    const fullView = fetch(`${url}/${session.id}`);
-    await lookupEntered;
-    const mutation = fetch(`${url}/${session.id}/todo`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-spur-origin": "cli",
-        "x-spur-caller-session": session.id,
-      },
-      body: JSON.stringify({ action: "add", text: "Record the step", reason: "Test provenance" }),
-      signal: AbortSignal.timeout(1000),
-    });
+    const get = vi
+      .spyOn(server, "get")
+      .mockRejectedValue(new Error("Unexpected full session lookup during ToDo mutation"))
+      .mockImplementationOnce(async () => {
+        entered();
+        await held;
+        throw new Error("Held full session lookup released");
+      });
+    const identity = vi.spyOn(server, "getSessionIdentity");
+    const controller = new AbortController();
+    const fullView = fetch(`${url}/${session.id}`, { signal: controller.signal });
+    const requests = [fullView];
     try {
+      await Promise.race([
+        lookupEntered,
+        fullView.then(() => {
+          throw new Error("Full session lookup returned before entry");
+        }),
+      ]);
+      const mutation = fetch(`${url}/${session.id}/todo`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-spur-origin": "cli",
+          "x-spur-caller-session": session.id,
+        },
+        body: JSON.stringify({ action: "add", text: "Record the step", reason: "Test provenance" }),
+        signal: controller.signal,
+      });
+      requests.push(mutation);
       const response = await mutation;
       expect(response.status).toBe(200);
       const projection = (await response.json()) as TodoProjection;
@@ -117,9 +129,11 @@ describe("ToDo actor identity", () => {
       const ledger = await readFile(join(dataDir, "sessions", session.id, "todo.jsonl"), "utf8");
       expect(JSON.parse(ledger.trim())).toMatchObject({ type: "item_added", actor });
       expect(get).toHaveBeenCalledTimes(1);
+      expect(identity).toHaveBeenCalledExactlyOnceWith(session.id);
     } finally {
       release();
-      await Promise.allSettled([fullView, mutation]);
+      controller.abort();
+      await Promise.allSettled(requests);
     }
   });
 
@@ -195,5 +209,59 @@ describe("ToDo actor identity", () => {
       ).rejects.toThrow();
     }
     expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it("resolves a handoff caller to an agent actor for another target", async () => {
+    const lookup = vi.fn(async () => ({ id: "caller-1", agent: "claude" as const }));
+    await expect(
+      resolveTodoMutationActor({
+        origin: "cli",
+        callerHeader: "caller-1",
+        targetSessionId: "other-target",
+        lookup,
+        anyTarget: true,
+      }),
+    ).resolves.toEqual({ kind: "agent", agent: "claude", sessionId: "caller-1" });
+    await expect(
+      resolveTodoMutationActor({
+        origin: "ui",
+        callerHeader: "caller-1",
+        targetSessionId: "other-target",
+        lookup,
+        anyTarget: true,
+      }),
+    ).rejects.toThrow("Caller session requires CLI origin");
+    await expect(
+      resolveTodoMutationActor({
+        origin: "cli",
+        callerHeader: "caller-1",
+        targetSessionId: "other-target",
+        lookup,
+      }),
+    ).rejects.toThrow("Caller session does not match target session");
+  });
+
+  it("returns 403 handoff_target_not_stalled for an agent handing off a healthy running session", async () => {
+    const { dataDir, session, url } = await fixture();
+    writeSession(dataDir, { ...session, status: "running" });
+    writeSession(dataDir, { ...session, id: "test-caller", tmuxSession: "test-caller" });
+
+    const response = await fetch(`${url}/${session.id}/handoff`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-spur-origin": "cli",
+        "x-spur-caller-session": "test-caller",
+      },
+      body: JSON.stringify({ agent: "claude" }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      code: "handoff_target_not_stalled",
+      sessionId: session.id,
+      status: "running",
+      error: expect.stringContaining("not stalled"),
+    });
   });
 });
