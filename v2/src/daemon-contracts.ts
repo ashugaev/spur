@@ -1615,7 +1615,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "switch_session_auth",
     "POST",
     "/sessions/{sessionId}/switch-auth",
-    "Select managed authorization for the next request without restarting the agent.",
+    "Select managed authorization for the next request without restarting the agent; a session without a managed binding is bound and relaunched with resume.",
     {
       body: body("SwitchAuthRequest", [
         field("accountId", "string|null", "Saved account ID or null for Auto.", true),

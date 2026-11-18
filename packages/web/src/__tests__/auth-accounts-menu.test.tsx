@@ -813,6 +813,7 @@ describe("SwitchAuthDialog", () => {
   };
   const dialog = (props: Partial<Parameters<typeof SwitchAuthDialog>[0]> = {}) => (
     <SwitchAuthDialog
+      provider="claude"
       auth={auth}
       errorMessage={null}
       onCancel={vi.fn()}
@@ -861,6 +862,20 @@ describe("SwitchAuthDialog", () => {
     );
     expect(screen.getByText("Interrupt the request in flight")).toBeTruthy();
     expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("lists the same accounts for an unbound session and enables Switch for any choice", async () => {
+    const onConfirm = vi.fn();
+    render(dialog({ onConfirm, auth: undefined }));
+
+    const group = await screen.findByRole("radiogroup", { name: "Switch Claude account" });
+    await waitFor(() => expect(within(group).getAllByRole("radio")).toHaveLength(4));
+    expect(within(group).queryByRole("img", { name: "current" })).toBeNull();
+    const button = screen.getByRole("button", { name: "Switch" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+
+    expect(onConfirm).toHaveBeenCalledWith(null, false);
   });
 
   it("disables a signed-out account and keeps Switch off until the selection changes", async () => {

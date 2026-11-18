@@ -506,9 +506,11 @@ export function useSessionActionDialogs({
           payload={recoverPayload}
         />
       ) : null}
-      {switchAuthOpen && session.auth ? (
+      {switchAuthOpen &&
+      (session.auth || session.agent === "claude" || session.agent === "codex") ? (
         <SwitchAuthDialog
-          auth={session.auth}
+          provider={session.auth?.provider ?? (session.agent === "codex" ? "codex" : "claude")}
+          {...(session.auth ? { auth: session.auth } : {})}
           status={switchAuthPending ? "pending" : switchAuthError ? "error" : "idle"}
           errorMessage={switchAuthError}
           onConfirm={(accountId, force) => void handleSwitchAuth(accountId, force)}

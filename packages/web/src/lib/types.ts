@@ -1386,9 +1386,19 @@ export function canRespawn(session: DashboardSession): boolean {
   );
 }
 
-/** Only a managed (proxy-bound) session can switch accounts in place. */
-export function canSwitchAuth(session: DashboardSession): boolean {
-  return session.auth !== undefined;
+/**
+ * A managed (proxy-bound) session switches in place. An unbound claude/codex session switches by
+ * relaunching, offered while it runs or can be restored and its provider has a ready managed account.
+ */
+export function canSwitchAuth(
+  session: DashboardSession,
+  accounts: readonly Pick<AuthAccountSummary, "provider" | "authenticated">[] = [],
+): boolean {
+  if (session.auth !== undefined) return true;
+  if (session.agent !== "claude" && session.agent !== "codex") return false;
+  if (session.lifecyclePending) return false;
+  if (session.status !== "running" && !isRestorable(session)) return false;
+  return accounts.some((account) => account.provider === session.agent && account.authenticated);
 }
 
 export function canUseDeskCheckout(session: DashboardSession): boolean {

@@ -23692,18 +23692,99 @@ describe("SessionService", () => {
       },
     );
 
-    it.each([false, true])("leaves a direct session untouched with force=%s", async (force) => {
-      const original = runningSession({ claudeAccountId: "primary" });
+    it.each(["claude", "codex"] as const)(
+      "binds an unbound running %s session and relaunches it with resume",
+      async (provider) => {
+        seedManagedAccounts(provider);
+        const sessions = createSessionStore(
+          runningSession({ agent: provider, agentSessionId: "native-session-uuid" }),
+        );
+        mockClaudeJsonlState("waiting");
+        mockExitedThenRestoredProcess();
+        authProxyRegisterSessionMock.mockResolvedValue(registration(provider, "backup"));
+        const service = await createDisposedSessionService();
+
+        await service.switchAuth("api-1", "backup", { reason: "manual" });
+
+        expect(authProxySwitchSessionMock).not.toHaveBeenCalled();
+        expect(authProxyRegisterSessionMock).toHaveBeenCalledWith({
+          sessionId: "api-1",
+          provider,
+          accountId: "backup",
+        });
+        expect(killTmuxSessionMock).toHaveBeenCalled();
+        expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
+          provider,
+          "native-session-uuid",
+          expect.anything(),
+          expect.anything(),
+        );
+        expect(Object.values(createTmuxSessionMock.mock.calls.at(-1)?.[0].env ?? {})).toContain(
+          "fixture-routing-key",
+        );
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "running",
+          agentSessionId: "native-session-uuid",
+          auth: { provider, mode: "pinned", accountId: "backup" },
+        });
+        expect(sessions.get("api-1")?.auth).not.toHaveProperty("token");
+        service.dispose();
+      },
+    );
+
+    it("rolls the binding back when relaunching an unbound session fails", async () => {
+      seedManagedAccounts("claude");
+      const original = runningSession({ agentSessionId: "native-session-uuid" });
       const sessions = createSessionStore(original);
+      mockClaudeJsonlState("waiting");
+      authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      createTmuxSessionMock.mockRejectedValue(new Error("tmux launch failed"));
       const service = await createDisposedSessionService();
-      await expect(
-        service.switchAuth("api-1", "backup", { reason: "manual", force }),
-      ).rejects.toThrow(/Direct authorization/);
+
+      await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
+        /tmux launch failed/,
+      );
+
       expect(sessions.get("api-1")).toEqual(original);
-      expect(authProxySwitchSessionMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")).not.toHaveProperty("auth");
+      expect(authProxyRevokeSessionMock).toHaveBeenCalledWith("api-1");
+      service.dispose();
+    });
+
+    it("refuses to switch a working unbound session unless forced", async () => {
+      seedManagedAccounts("claude");
+      const original = runningSession({ agentSessionId: "native-session-uuid" });
+      const sessions = createSessionStore(original);
+      mockClaudeSessionStatus("working", "busy");
+      const service = await createDisposedSessionService();
+
+      await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
+        /is working/,
+      );
+
+      expect(sessions.get("api-1")).toEqual(original);
+      expect(authProxyRegisterSessionMock).not.toHaveBeenCalled();
       expect(killTmuxSessionMock).not.toHaveBeenCalled();
-      expect(swapSessionCredentialsMock).not.toHaveBeenCalled();
-      expect(seedSessionHomeMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("only persists the binding for an unbound session that is not running", async () => {
+      seedManagedAccounts("claude");
+      const sessions = createSessionStore(
+        runningSession({ status: "stopped", stopReason: "manual_pause" }),
+      );
+      authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+      const service = await createDisposedSessionService();
+
+      await service.switchAuth("api-1", "backup", { reason: "manual" });
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "stopped",
+        auth: { accountId: "backup" },
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
       service.dispose();
     });
 
