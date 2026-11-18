@@ -30,11 +30,12 @@ WORKFLOW
   3  Apply fixes. Minimal change, verify no regressions.
 
   4  bash .claude/skills/pr-comments-fix/scripts/reply-comment.sh COMMENT_ID "Fixed in <commit>"
-     bash .claude/skills/pr-comments-fix/scripts/resolve-thread.sh THREAD_ID
+     Resolve only threads opened by a non-Spur bot (Copilot and similar): bash .claude/skills/pr-comments-fix/scripts/resolve-thread.sh THREAD_ID
+     Never resolve a human thread or a thread whose opener carries the "Written by Spur ·" footer; its author verifies and resolves.
 
   5  bash .claude/skills/pr-comments-fix/scripts/verify-replies.sh
-     Must print: OK: all N threads have replies and are resolved.
-     FAIL: send missing replies and resolve before finishing.
+     Must print: OK: all N threads have replies; non-Spur bot threads are resolved.
+     FAIL: send missing replies and resolve non-Spur bot threads before finishing.
 
   6  Report:
 
@@ -46,6 +47,7 @@ WORKFLOW
 RULES
 
   - Never resolve a thread without replying, always explain what was done.
+  - Never resolve human or Spur-reviewer threads.
   - Never blindly apply suggestions, verify against codebase.
   - Bot/Copilot comments get extra scrutiny.
   - Suggestion breaks behavior -> reject it.
