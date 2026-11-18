@@ -24,7 +24,7 @@ Footer Accounts menu: one section per provider, Claude and Codex.
 Dashboard alert row per broken managed account or host login, above the agents list: Sign in and terminal icon.
 Row clears after a verified sign-in. Host rows open the terminal directly.
 
-Spawn dialog Account picker: Auto or an identified account; signed-out ones are disabled.
+Spawn dialog Account picker: Auto or an identified account; signed-out ones are disabled; hidden with exactly one usable account, where Auto is that account.
 Session Switch account: another profile or back to Auto, for the next request.
 
 Legacy Claude IDs remain, labels are ignored; sign in again for managed routing. An account shows its identity after sign-in.

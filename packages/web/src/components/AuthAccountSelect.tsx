@@ -37,6 +37,8 @@ export function AuthAccountSelect({ agent, value, onChange }: AuthAccountSelectP
   const providerAccounts = query.data.accounts.filter((account) => account.provider === agent);
   const accounts = providerAccounts.filter((account) => account.identity !== undefined);
   if (accounts.length === 0) return null;
+  // Auto lands on the only usable account, so choosing between them is meaningless.
+  if (accounts.filter((account) => account.authenticated).length === 1) return null;
   const auto = autoAccount(providerAccounts, query.data.pools[agent]);
 
   return (

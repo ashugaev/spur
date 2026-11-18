@@ -186,6 +186,7 @@ import {
   type QuotaSourceResult,
   type UsageReportDeps,
 } from "./usage-report.js";
+import { hostDuplicatesManaged, readHostIdentity } from "./host-identity.js";
 import {
   AuthAlerts,
   logAuthFailed,
@@ -25887,10 +25888,12 @@ export class SessionService {
   private async readAuthAlertInputs(): Promise<AlertEvaluationInput> {
     const state = this.authAccounts.read();
     let managed: ManagedBreakage[] | null = [];
+    let identified = state.accounts;
     if (state.accounts.length > 0) {
       try {
         const statuses = (await this.readAuthorizationState()).accounts;
-        const names = authDisplayNames(withCompanionIdentity(state.accounts, statuses));
+        identified = withCompanionIdentity(state.accounts, statuses);
+        const names = authDisplayNames(identified);
         managed = statuses.flatMap((entry) => {
           const account = state.accounts.find((candidate) => candidate.id === entry.id);
           return entry.brokenAt && account
@@ -25908,9 +25911,23 @@ export class SessionService {
         managed = null;
       }
     }
+    const hostIdentities = new Map(
+      await Promise.all(
+        (["claude", "codex"] as const).map(
+          async (provider) => [provider, await readHostIdentity(provider, homedir())] as const,
+        ),
+      ),
+    );
+    // A host login that a managed account of the same user covers raises no alert of its own.
     const host = (await readHostCredentialSources(this.usageReportDeps())).map((source) => ({
       provider: source.provider,
-      observation: observeHostSource(source),
+      observation: hostDuplicatesManaged(
+        hostIdentities.get(source.provider) ?? null,
+        source.provider,
+        identified,
+      )
+        ? ("ok" as const)
+        : observeHostSource(source),
     }));
     return { managed, host, sessions: listSessions(this.config.dataDir) };
   }

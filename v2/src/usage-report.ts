@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { listAccounts, sessionClaudeHome, type ClaudeAccount } from "./claude-accounts.js";
+import { hostDuplicatesManaged, readHostIdentity } from "./host-identity.js";
 import { listSessions, sessionFilePath } from "./metadata.js";
 import {
   summarizeTokenUsageWindows,
@@ -63,6 +64,7 @@ export interface ManagedQuotaAccount {
   id: string;
   provider: QuotaProvider;
   displayName: string;
+  identity?: { email?: string | undefined; organizationId?: string | undefined } | undefined;
   credential?: "oauth" | "api_key";
   status: string;
   quota?: { windows: QuotaWindow[]; fetchedAt: string };
@@ -577,10 +579,13 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
     accounts.unshift({ id: "default", label: "default", configDir: defaultDir, createdAt: "" });
   }
   const managed = deps.managedAccounts ?? [];
-  const managedProviders = new Set(
-    managed.filter((account) => account.status === "ready").map((account) => account.provider),
-  );
-  const hostAccounts = managedProviders.has("claude")
+  const readyManaged = managed.filter((account) => account.status === "ready");
+  // A host login is dropped only when a ready managed account is the same user.
+  const [claudeHostIdentity, codexHostIdentity] = await Promise.all([
+    readHostIdentity("claude", deps.homeDir),
+    readHostIdentity("codex", deps.homeDir),
+  ]);
+  const hostAccounts = hostDuplicatesManaged(claudeHostIdentity, "claude", readyManaged)
     ? accounts.filter((account) => account.configDir !== defaultDir)
     : accounts;
   const [hostQuotas, tokens] = await Promise.all([
@@ -592,7 +597,9 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
           sessions.filter((s) => s.claudeAccountId === account.id).map((s) => s.id),
         ),
       ),
-      ...(managedProviders.has("codex") ? [] : [codexSource(deps)]),
+      ...(hostDuplicatesManaged(codexHostIdentity, "codex", readyManaged)
+        ? []
+        : [codexSource(deps)]),
     ]),
     tokenActivity(deps, sessions),
   ]);

@@ -256,6 +256,7 @@ describe("buildUsageReport quotas", () => {
 
   it("returns a pending row for a ready OAuth account with no cached quota", async () => {
     const s = await setup();
+    await writeHostIdentities(s.home, "a@example.com", "c@example.com");
     const report = await buildUsageReport({
       ...s.deps(vi.fn() as unknown as typeof fetch),
       managedAccounts: [
@@ -263,6 +264,7 @@ describe("buildUsageReport quotas", () => {
           id: "acc-1",
           provider: "codex",
           displayName: "c@example.com",
+          identity: { email: "c@example.com" },
           credential: "oauth",
           status: "ready",
         },
@@ -295,6 +297,7 @@ describe("buildUsageReport quotas", () => {
 
   it("shows the last refresh failure kind instead of pending", async () => {
     const s = await setup();
+    await writeHostIdentities(s.home, "a@example.com", "c@example.com");
     const report = await buildUsageReport({
       ...s.deps(vi.fn() as unknown as typeof fetch),
       managedAccounts: [
@@ -302,6 +305,7 @@ describe("buildUsageReport quotas", () => {
           id: "acc-1",
           provider: "codex",
           displayName: "c@example.com",
+          identity: { email: "c@example.com" },
           credential: "oauth",
           status: "ready",
           quotaError: "unauthorized",
@@ -315,9 +319,92 @@ describe("buildUsageReport quotas", () => {
     });
   });
 
+  async function writeHostIdentities(home: string, claudeEmail: string, codexEmail: string) {
+    await writeFile(
+      join(home, ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: claudeEmail, organizationUuid: "org-1" } }),
+    );
+    await mkdir(join(home, ".codex"), { recursive: true });
+    const claims = Buffer.from(
+      JSON.stringify({
+        email: codexEmail,
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+      }),
+    ).toString("base64url");
+    await writeFile(
+      join(home, ".codex", "auth.json"),
+      JSON.stringify({ tokens: { access_token: "cx-token", id_token: `h.${claims}.s` } }),
+    );
+  }
+
+  it.each([
+    ["the same user", "a@example.com", "org-1", "c@example.com", "acct-1", []],
+    [
+      "another user",
+      "other@example.com",
+      "org-1",
+      "other@example.com",
+      "acct-1",
+      ["claude:default", "codex:codex"],
+    ],
+    [
+      "the same email in another organization",
+      "a@example.com",
+      "org-2",
+      "c@example.com",
+      "acct-2",
+      ["claude:default", "codex:codex"],
+    ],
+  ])(
+    "host rows follow identity: managed accounts of %s",
+    async (_label, email, organizationId, codexEmail, accountId, hostRows) => {
+      const s = await setup();
+      await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+      await writeHostIdentities(s.home, "a@example.com", "c@example.com");
+      const fetchMock = vi.fn(async (url: string | URL | Request) =>
+        String(url).includes("anthropic") ? json(CLAUDE_BODY) : json(CODEX_BODY),
+      );
+      const report = await buildUsageReport({
+        ...s.deps(fetchMock as unknown as typeof fetch),
+        managedAccounts: [
+          {
+            id: "m-claude",
+            provider: "claude",
+            displayName: email,
+            identity: { email, organizationId },
+            credential: "oauth",
+            status: "ready",
+            quota: { windows: [], fetchedAt: "2026-11-06T11:59:00.000Z" },
+          },
+          {
+            id: "m-codex",
+            provider: "codex",
+            displayName: codexEmail,
+            identity: { email: codexEmail, organizationId: accountId },
+            credential: "oauth",
+            status: "ready",
+            quota: { windows: [], fetchedAt: "2026-11-06T11:59:00.000Z" },
+          },
+        ],
+      });
+      expect(
+        report.quotas
+          .filter((q) => !q.source.startsWith("m-"))
+          .map((q) => `${q.provider}:${q.source}`),
+      ).toEqual(hostRows);
+      expect(JSON.stringify(report)).not.toContain("cx-token");
+    },
+  );
+
   it("lists one row per ready OAuth managed account and drops that provider's host source", async () => {
     const s = await setup();
     await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+    await writeFile(
+      join(s.home, ".claude.json"),
+      JSON.stringify({
+        oauthAccount: { emailAddress: "a@example.com", organizationUuid: "org-1" },
+      }),
+    );
     const windows = [{ label: "5h", usedPercent: 10, remainingPercent: 90, resetsAt: null }];
     const quota = { windows, fetchedAt: "2026-11-06T11:59:00.000Z" };
     const fetchMock = vi.fn(async () => json(CODEX_BODY));
@@ -328,6 +415,7 @@ describe("buildUsageReport quotas", () => {
           id: "acc-1",
           provider: "claude",
           displayName: "a@example.com",
+          identity: { email: "a@example.com", organizationId: "org-1" },
           credential: "oauth",
           status: "ready",
           quota,

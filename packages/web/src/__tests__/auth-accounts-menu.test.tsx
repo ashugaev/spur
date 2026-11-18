@@ -782,6 +782,29 @@ describe("AuthAccountSelect", () => {
     expect(onChange.mock.calls).toEqual([["claude-home"], [null]]);
   });
 
+  it("hides the choice when only one account is usable", async () => {
+    routes["GET /api/auth-accounts"] = () => ({
+      payload: {
+        ...ACCOUNTS,
+        accounts: [WORK, { ...HOME, status: "sign_in_required", authenticated: false }],
+      },
+    });
+    const { container } = render(
+      <AuthAccountSelect agent="claude" onChange={vi.fn()} value={null} />,
+    );
+    await waitFor(() => expect(calls.length).toBe(1));
+    await waitFor(() => expect(container.querySelector("select")).toBeNull());
+  });
+
+  it("shows the choice when two accounts are usable", async () => {
+    routes["GET /api/auth-accounts"] = () => ({
+      payload: { ...ACCOUNTS, accounts: [WORK, HOME] },
+    });
+    render(<AuthAccountSelect agent="claude" onChange={vi.fn()} value={null} />);
+    const select = await loadedSelect();
+    expect(select.options.length).toBe(3);
+  });
+
   it("renders nothing when no account of the agent has an identity", async () => {
     routes["GET /api/auth-accounts"] = () => ({
       payload: { accounts: [FRESH], pools: {} },

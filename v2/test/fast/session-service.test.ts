@@ -267,6 +267,7 @@ import { writeCloseoutArchive } from "../../src/closeout-archive.js";
 import { allowsPrAlertBatch } from "../../src/pr-alert-owner.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { createPage } from "../../src/pages.js";
+import { __resetUsageCacheForTest } from "../../src/usage-report.js";
 import { isSpurReminder, snapshotRequestMessage } from "../../src/snapshots.js";
 import {
   DEFAULT_DAILY_WAKE_MESSAGE,
@@ -24337,6 +24338,52 @@ describe("SessionService", () => {
         expect(alerts.find((alert) => alert.accountId === "a")?.label).toBe("alek@x.com");
         service.dispose();
       });
+
+      it.each([
+        ["the same user", "c@x.com", "acct-1", []],
+        ["another user", "other@x.com", "acct-1", ["host:codex"]],
+        ["the same email in another account", "c@x.com", "acct-2", ["host:codex"]],
+      ])(
+        "raises a host alert unless a managed account is the same user: managed account of %s",
+        async (_label, email, accountId, expected) => {
+          stored("codex", ["c"]);
+          authProxyGetStateMock.mockResolvedValue({
+            accounts: [
+              {
+                id: "c",
+                provider: "codex",
+                status: "ready",
+                identity: { email, organizationId: accountId },
+              },
+            ],
+            sessions: [],
+          });
+          mkdirSync(join(TEST_HOME, ".codex"), { recursive: true });
+          const claims = Buffer.from(
+            JSON.stringify({
+              email: "c@x.com",
+              "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+            }),
+          ).toString("base64url");
+          writeFileSync(
+            join(TEST_HOME, ".codex", "auth.json"),
+            JSON.stringify({ tokens: { access_token: "cx", id_token: `h.${claims}.s` } }),
+          );
+          __resetUsageCacheForTest();
+          vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => new Response("rejected", { status: 401 })),
+          );
+          const { SessionService } = await loadSessionServiceModule();
+          const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+          const { alerts } = await service.listAuthAlerts();
+          expect(alerts.filter((alert) => alert.kind === "host").map((alert) => alert.id)).toEqual(
+            expected,
+          );
+          service.dispose();
+          vi.unstubAllGlobals();
+        },
+      );
 
       it("leaves the store alone when the companion rejects an API key", async () => {
         stored("claude", ["a"]);

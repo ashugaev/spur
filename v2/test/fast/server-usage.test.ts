@@ -87,12 +87,19 @@ describe("GET /usage", () => {
   it("passes managed accounts to the report and hides the host row", async () => {
     const { configPath, home } = await setup();
     vi.stubEnv("HOME", home);
+    await mkdir(join(home, ".codex"), { recursive: true });
+    const claims = Buffer.from(JSON.stringify({ email: "c@example.com" })).toString("base64url");
+    await writeFile(
+      join(home, ".codex", "auth.json"),
+      JSON.stringify({ tokens: { access_token: "cx-token", id_token: `h.${claims}.s` } }),
+    );
     const list = vi.spyOn(SessionService.prototype, "listAuthorizationAccounts").mockResolvedValue({
       accounts: [
         {
           id: "acc-1",
           provider: "codex",
           displayName: "c@example.com",
+          identity: { email: "c@example.com" },
           credential: "oauth",
           status: "ready",
           quota: {
