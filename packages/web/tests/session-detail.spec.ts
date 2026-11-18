@@ -5329,6 +5329,7 @@ test.describe("S5: Runtime sidebar", () => {
       release?.();
       await expect(page.getByText(/^starting$/i)).toHaveCount(0);
       await expect(page.getByText(/^working$/i)).toBeVisible();
+      await revealDetails(page, "Runtime & Access");
       await expect(page.getByText("100 / 100")).toBeVisible();
       await expect(page.getByPlaceholder("Message...")).toBeEnabled();
       await page.getByLabel("Tokens: 100", { exact: true }).focus();
@@ -5364,6 +5365,7 @@ test.describe("S5: Runtime sidebar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
+    await revealDetails(page, "Runtime & Access");
     await page.getByLabel("Tokens: at least 20").focus();
     await expect(page.getByText("Budget not enforced · earlier usage unknown")).toBeVisible();
     await expect(page.getByRole("button", { name: "Restore" })).toBeVisible();
@@ -5402,6 +5404,7 @@ test.describe("S5: Runtime sidebar", () => {
     });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
+    await revealDetails(page, "Runtime & Access");
     const count = page.getByLabel("Tokens: at least 20");
     await expect(count).toHaveText("≥20 / 100");
     await count.focus();
