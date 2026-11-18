@@ -1501,7 +1501,14 @@ type SwitchAuthOptions = {
 
 type SwitchAuthOutcome =
   | { switched: false }
-  | { switched: true; view: SessionView; effectiveAccountId: string | undefined };
+  | {
+      switched: true;
+      view: SessionView;
+      previousAccountId: string | undefined;
+      effectiveAccountId: string | undefined;
+    };
+
+type DefaultMigrationGuard = { provider: AuthProvider; defaultAccountId: string };
 
 type SessionLifecycleStamp = {
   id: string;
@@ -25498,12 +25505,12 @@ export class SessionService {
     return outcome.view;
   }
 
-  /** With onlyLiveAutoOf, skips (switched: false, no side effects) unless the session is still a live running Auto session of that provider, checked under the session lock. */
+  /** With a guard, skips (switched: false, no side effects) unless the session is still a live running Auto session of the provider not yet on the default, checked under the session lock. */
   private async switchAuthIf(
     sessionId: string,
     accountId: string | null,
     opts: SwitchAuthOptions,
-    onlyLiveAutoOf?: AuthProvider,
+    guard?: DefaultMigrationGuard,
   ): Promise<SwitchAuthOutcome> {
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -25515,7 +25522,7 @@ export class SessionService {
         }
         return this.lifecycleStamp(current);
       });
-      return this.switchAuthLocked(sessionId, accountId, opts, claim, onlyLiveAutoOf);
+      return this.switchAuthLocked(sessionId, accountId, opts, claim, guard);
     });
   }
 
@@ -25539,7 +25546,7 @@ export class SessionService {
     accountId: string | null,
     opts: SwitchAuthOptions,
     claim: SessionLifecycleStamp,
-    onlyLiveAutoOf?: AuthProvider,
+    guard?: DefaultMigrationGuard,
   ): Promise<SwitchAuthOutcome> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -25563,6 +25570,7 @@ export class SessionService {
       }
     }
     let pingKey: string | undefined;
+    let previousAccountId: string | undefined;
     const updated = await this.withSessionLifecycleLocks(
       this.lifecycleIdsFor(session),
       async () => {
@@ -25570,9 +25578,14 @@ export class SessionService {
         if (!current || !this.lifecycleStampMatches(current, claim)) {
           throw new Error(`Session ${sessionId} changed during auth selection`);
         }
-        if (onlyLiveAutoOf && !(await this.isLiveAutoOf(current, onlyLiveAutoOf))) {
+        if (
+          guard &&
+          (current.auth?.effectiveAccountId === guard.defaultAccountId ||
+            !(await this.isLiveAutoOf(current, guard.provider)))
+        ) {
           return null;
         }
+        previousAccountId = current.auth?.effectiveAccountId;
         const registration = await this.authProxy.switchSession(sessionId, accountId);
         this.authSnapshot = undefined;
         const { claudeAccountId: _legacyAccountId, ...base } = current;
@@ -25602,6 +25615,7 @@ export class SessionService {
     return {
       switched: true,
       view: await this.enrich(updated),
+      previousAccountId,
       effectiveAccountId: updated.auth?.effectiveAccountId,
     };
   }
@@ -25715,9 +25729,9 @@ export class SessionService {
             binding.sessionId,
             null,
             { reason: "manual" },
-            provider,
+            { provider, defaultAccountId: pool.defaultAccountId },
           );
-          if (outcome.switched && outcome.effectiveAccountId !== binding.effectiveAccountId) {
+          if (outcome.switched && outcome.effectiveAccountId !== outcome.previousAccountId) {
             moved += 1;
           }
         } catch (error) {

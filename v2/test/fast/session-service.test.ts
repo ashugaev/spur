@@ -23787,7 +23787,10 @@ describe("SessionService", () => {
         failing?: string,
         unchanged?: string,
         // Runs inside the first switch, after the target snapshot was taken.
-        interleave?: (sessions: Map<string, ReturnType<typeof runningSession>>) => void,
+        interleave?: (
+          sessions: Map<string, ReturnType<typeof runningSession>>,
+          service: Awaited<ReturnType<typeof createDisposedSessionService>>,
+        ) => void | Promise<void>,
       ) {
         seedManagedAccounts("claude");
         tmuxSessionExistsMock.mockImplementation(async (name: string) => name !== "offline-tmux");
@@ -23818,7 +23821,7 @@ describe("SessionService", () => {
         });
         authProxySwitchSessionMock.mockImplementation(async (sessionId: string) => {
           if (sessionId === failing) throw new Error("companion unavailable");
-          if (sessionId === "auto-run") interleave?.(sessions);
+          if (sessionId === "auto-run") await interleave?.(sessions, service);
           return {
             ...registration("claude", sessionId === unchanged ? "primary" : "backup"),
             sessionId,
@@ -23898,6 +23901,20 @@ describe("SessionService", () => {
         });
         expect(switchedEvents("auto-also")).toHaveLength(0);
         expect(switchedEvents("auto-run")).toHaveLength(1);
+      });
+
+      it("skips a session a public Auto switch already moved to the new default", async () => {
+        logSpurEventMock.mockClear();
+        const { result } = await changeDefault(true, undefined, undefined, async (_, service) => {
+          await service.switchAuth("auto-also", null, { reason: "manual" });
+        });
+
+        expect(result.moved).toBe(1);
+        expect(authProxySwitchSessionMock.mock.calls.map(([id]) => id).sort()).toEqual([
+          "auto-also",
+          "auto-run",
+        ]);
+        expect(switchedEvents("auto-also")).toHaveLength(1);
       });
 
       it("does not move a session stopped after the snapshot", async () => {
