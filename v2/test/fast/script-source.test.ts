@@ -6,6 +6,7 @@ import { normalizeSlotLinks } from "../../src/session-slots.js";
 import type { ScriptSourceConfig } from "../../src/types.js";
 import type { ScriptProcessResult } from "../../src/event-sources/script-process.js";
 import type * as metadataModule from "../../src/metadata.js";
+import { WORK_ITEM_RETRY_INTERVAL_MS } from "../../src/work-item-retry.js";
 
 const mocks = vi.hoisted(() => ({
   run: vi.fn(),
@@ -82,6 +83,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   mocks.crons.length = 0;
   mocks.read.mockReturnValue(new Set());
+  mocks.record.mockReset();
   mocks.run.mockResolvedValue(ok([]));
   dir = await mkdtemp(join(tmpdir(), "spur-script-source-"));
   vi.useFakeTimers({ toFake: ["Date"] });
@@ -155,6 +157,125 @@ describe("script output", () => {
 });
 
 describe("script source", () => {
+  async function startRetry(state: "failed" | "spawning" = "failed") {
+    const metadata = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+    mocks.read.mockImplementation(metadata.readWorkItemRegistry);
+    mocks.record.mockImplementation(metadata.recordWorkItem);
+    mocks.run.mockResolvedValue(ok([item("retry")]));
+    const { emit } = await start({ runOnStart: false });
+    await tick();
+    expect(emit).toHaveBeenCalledExactlyOnceWith("script:item.new", {
+      ...item("retry"),
+      externalId: "script:check#retry",
+      repo: "script:check",
+      url: "",
+      number: 0,
+    });
+    const claimedAt = new Date().toISOString();
+    const dueAt = Date.now() + WORK_ITEM_RETRY_INTERVAL_MS;
+    metadata.updateWorkItemMembers(
+      dir,
+      "api",
+      "check",
+      {
+        externalId: "script:check#retry",
+        title: "Failure",
+        repo: "script:check",
+        url: "",
+        number: 0,
+        autoClose: false,
+        createdAt: claimedAt,
+      },
+      () => [
+        {
+          triggerId: "review",
+          blockIndex: 0,
+          state,
+          claimedAt,
+          attempts: 1,
+          ...(state === "failed"
+            ? { error: "spawn failed", nextRetryAt: new Date(dueAt).toISOString() }
+            : {}),
+        },
+      ],
+    );
+    const record = () =>
+      metadata.readWorkItemLifecycles(dir, "api", "check").get("script:check#retry");
+    expect(record()?.members[0]?.state).toBe(state);
+    expect(metadata.readWorkItemRegistry(dir, "api", "check").has("script:check#retry")).toBe(true);
+    return { emit, dueAt, record, metadata };
+  }
+
+  it.each(["failed", "spawning"] as const)(
+    "re-emits a due persisted %s script item through scheduled polls",
+    async (state) => {
+      const { emit, dueAt, record } = await startRetry(state);
+      vi.setSystemTime(dueAt - 120_000);
+      await tick();
+      expect(emit).toHaveBeenCalledTimes(1);
+      expect(record()).not.toHaveProperty("lastRetryEmitAt");
+      await tick();
+      expect(emit).toHaveBeenCalledTimes(2);
+      expect(emit.mock.calls[1]).toEqual(emit.mock.calls[0]);
+      const emittedAt = new Date().toISOString();
+      expect(record()?.lastRetryEmitAt).toBe(emittedAt);
+      await tick();
+      expect(emit).toHaveBeenCalledTimes(2);
+      expect(record()?.lastRetryEmitAt).toBe(emittedAt);
+    },
+  );
+
+  it("retries only eligible seen items from valid successful script output", async () => {
+    const { emit, dueAt, record } = await startRetry();
+    vi.setSystemTime(dueAt);
+    for (const result of [
+      ok([]),
+      ok("broken"),
+      {
+        status: "failed",
+        reason: "exit",
+        exitCode: 1,
+        signal: null,
+        durationMs: 1,
+        stderrTail: "failed",
+      },
+      ok([{ ...item("retry"), url: "bad" }]),
+    ] satisfies ScriptProcessResult[]) {
+      mocks.run.mockResolvedValue(result);
+      await tick();
+      expect(emit).toHaveBeenCalledTimes(1);
+      expect(record()).not.toHaveProperty("lastRetryEmitAt");
+    }
+    mocks.run.mockResolvedValue(ok([item("retry"), item("retry")]));
+    await tick();
+    expect(emit).toHaveBeenCalledTimes(2);
+    expect(emit.mock.calls[1]).toEqual(emit.mock.calls[0]);
+    expect(record()?.lastRetryEmitAt).toBe(new Date().toISOString());
+  });
+
+  it("keeps the new-item cap and deferred drain alongside eligible seen retries", async () => {
+    const { emit, dueAt, record, metadata } = await startRetry();
+    mocks.run.mockResolvedValue(
+      ok([item("retry"), ...Array.from({ length: 12 }, (_, n) => item(String(n))), item("retry")]),
+    );
+    vi.setSystemTime(dueAt - 60_000);
+    await tick();
+    expect(emit.mock.calls.slice(1).map(([, data]) => data.id)).toEqual([
+      ...Array.from({ length: 10 }, (_, n) => String(n)),
+      "retry",
+    ]);
+    const seen = metadata.readWorkItemRegistry(dir, "api", "check");
+    expect(seen.size).toBe(11);
+    expect(seen.has("script:check#10")).toBe(false);
+    expect(seen.has("script:check#11")).toBe(false);
+    expect(record()?.lastRetryEmitAt).toBe(new Date().toISOString());
+    await tick();
+    expect(emit.mock.calls.slice(12).map(([, data]) => data.id)).toEqual(["10", "11"]);
+    await tick();
+    expect(emit).toHaveBeenCalledTimes(14);
+    expect(metadata.readWorkItemRegistry(dir, "api", "check").size).toBe(13);
+  });
+
   it("runs consecutive scheduled ticks despite callback jitter after prior run completes", async () => {
     mocks.run.mockResolvedValueOnce(ok([item("a")])).mockResolvedValueOnce(ok([item("b")]));
     const { emit } = await start({ runOnStart: false });
