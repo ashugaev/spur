@@ -26,7 +26,7 @@ INTERFACES
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
   Trigger auto-close policy and deprecated config alias: `docs/configuration.md#field-reference`.
   Edit scheduled jobs through footer Cron viewer or MCP; config behavior: docs/configuration.md; operations: docs/daemon-api.md.
-  Spur ToDo: ledger starts empty unless a handoff moved open/held items in; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion and self-destruct, an empty ledger its own handoff — `todo_ledger_empty`/`todo_open_work` (409); open/held work never refuses handoff, it moves to the successor; an agent may hand off another session only when stalled (`403 handoff_target_not_stalled`); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo-snapshot`.
+  Spur ToDo: ledger starts empty unless a handoff moved open/held items in; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion and self-destruct, an empty ledger its own handoff — `todo_ledger_empty`/`todo_open_work` (409); open/held work never refuses handoff, it moves to the successor; an agent can hand off another session only when stalled (`403 handoff_target_not_stalled`); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo-snapshot`.
   Work snapshots: `"$SPUR_SNAPSHOT_COMMAND" write --file <path|-> [--final]` stores full Markdown snapshot as next version; with `projects.<id>.snapshots.requireFinal`, agent complete/self-destruct need `--final` snapshot, self-handoff of a running source any snapshot, newer than last ToDo change — `work_snapshot_required` (409). Agent working over `projects.<id>.snapshots.freshnessMinutes` past latest snapshot gets snapshot request, ahead of ToDo reminders; `projects.<id>.snapshots.enabled: false` stops requests. Read any session's, archived too: `spur snapshot show|list|latest --link`; carries freshness, never wakes. Contract: `docs/commands.md#todo-snapshot`, `docs/snapshots.md`.
   Telegram: bot DM for commands/spawn; agent communication in assigned forum topics; completion deletes owned topics. Source identity: `docs/commands.md#source`; attachments/binding: `docs/configuration.md#telegram-binding`; sends: `docs/commands.md#source-reply`.
   Native Telegram calls to sandbox Shepherd: docs/telegram-calls.md.
@@ -63,7 +63,7 @@ DOCS
   Native PR alert ownership: docs/configuration.md#pr-alert-ownership.
   Closeout takeover and blocked-trigger notices: docs/commands.md, docs/configuration.md.
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
-  Saved provider accounts, pools, rotation and per-session switch: docs/claude-accounts.md; `spur auth`: docs/commands.md.
+  Saved accounts, pools, rotation, switching and restore constraints: docs/claude-accounts.md; `spur auth`: docs/commands.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
   Full-access MCP: Pages source binding, backend controls/logs, cached attached PR status; setup: docs/mcp.md
   Interactive session snippets: docs/snippets.md; SDK and components: docs/spur-sdk.md

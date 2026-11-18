@@ -155,6 +155,7 @@ import {
   codexUsesCustomProvider,
   findLatestCodexSessionFile,
   readCodexConversationTail,
+  readCodexResumeProvider,
   readCodexRolloutState,
   readCodexTranscriptEntries,
   readCodexUserConfig,
@@ -7665,6 +7666,7 @@ export class SessionService {
     project: ProjectConfig,
     accountId: string | null | undefined,
     managedBinding: boolean,
+    admitManaged?: () => Promise<void>,
   ): Promise<AuthRegistration | undefined> {
     if (agent !== "claude" && agent !== "codex") {
       if (accountId !== undefined && accountId !== null) {
@@ -7696,6 +7698,7 @@ export class SessionService {
       // No ready managed account: launch with host authorization, as before managed pools.
       return undefined;
     }
+    await admitManaged?.();
     return this.authProxy.registerSession({
       sessionId,
       provider: agent,
@@ -24643,6 +24646,53 @@ export class SessionService {
       : null;
     operation?.assertActive();
     if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
+    let checkedCodexResumeId: string | null | undefined;
+    let authRegistration: AuthRegistration | undefined;
+    try {
+      authRegistration = await this.prepareSessionAuthorization(
+        current.id,
+        current.agent,
+        restoreProjectConfig,
+        current.auth ? current.auth.accountId : current.claudeAccountId,
+        current.auth !== undefined,
+        current.agent === "codex"
+          ? async () => {
+              const sessionRootDir = join(
+                codexHookHomePath(slotToolDir(this.config.dataDir, current.id)),
+                "sessions",
+              );
+              checkedCodexResumeId =
+                current.agentSessionId ??
+                (await findAgentSessionId("codex", current.worktreePath, {
+                  codexSessionRootDir: sessionRootDir,
+                }));
+              if (!checkedCodexResumeId) return;
+              const provider = await readCodexResumeProvider(checkedCodexResumeId, {
+                sessionRootDir,
+              });
+              if (provider === "spur_managed") return;
+              const reason = provider
+                ? `saved provider ${provider} cannot change to spur_managed`
+                : "saved provider cannot be verified for spur_managed";
+              throw new AuthorizationError(
+                `Cannot restore Codex thread ${checkedCodexResumeId}: ${reason}. ` +
+                  `Preserve its history and use spur handoff ${sessionId} --agent codex.`,
+                400,
+              );
+            }
+          : undefined,
+      );
+      operation?.assertActive();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.restore.failed", {
+        level: "error",
+        sessionId,
+        projectId: current.project,
+        message: `Failed to restore ${sessionId}: ${message}`,
+      });
+      throw error;
+    }
     const codexRestoreStartedAt = current.agent === "codex" ? nowIso() : null;
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
@@ -24663,13 +24713,6 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
-      const authRegistration = await this.prepareSessionAuthorization(
-        current.id,
-        current.agent,
-        restoreProjectConfig,
-        current.auth ? current.auth.accountId : current.claudeAccountId,
-        current.auth !== undefined,
-      );
       const managedLaunch = managedAuthLaunch(
         authRegistration,
         sessionToolDir,
@@ -24766,17 +24809,18 @@ export class SessionService {
         return this.lifecycleStamp(latest);
       });
       const pinnedCodexId =
-        current.agent === "codex" && current.agentSessionId ? current.agentSessionId : undefined;
-      const launchPlan = pinnedCodexId
-        ? null
-        : await wait(
-            waitForRestorePlan(
-              current.agent,
-              current.worktreePath,
-              restorePrompt,
-              launchPlanOptions,
-            ),
-          );
+        current.agent === "codex" ? (checkedCodexResumeId ?? current.agentSessionId) : undefined;
+      const launchPlan =
+        pinnedCodexId || checkedCodexResumeId === null
+          ? null
+          : await wait(
+              waitForRestorePlan(
+                current.agent,
+                current.worktreePath,
+                restorePrompt,
+                launchPlanOptions,
+              ),
+            );
       const effectivePlan =
         launchPlan ?? buildAgentLaunchPlan(current.agent, freshLaunchPrompt, launchPlanOptions);
       operation?.assertActive();

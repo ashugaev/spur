@@ -2393,6 +2393,33 @@ async function findCodexThreadRolloutFile(
   return best?.filePath ?? null;
 }
 
+/** Saved provider identity for this exact native thread; null means unverifiable. */
+export async function readCodexResumeProvider(
+  threadId: string,
+  options?: { sessionRootDir?: string; sessionRootDirs?: string[] },
+): Promise<string | null> {
+  for (const root of resolveSessionRootDirs(options)) {
+    const filePath = await findCodexThreadRolloutFile(root, threadId);
+    if (!filePath) continue;
+    try {
+      let linesRead = 0;
+      for await (const line of readRolloutLines(filePath, 0)) {
+        if (++linesRead > 10) break;
+        if (!line.trim()) continue;
+        const parsed: unknown = JSON.parse(line);
+        if (!isRecord(parsed) || parsed["type"] !== "session_meta") continue;
+        const payload = parsed["payload"];
+        if (!isRecord(payload) || payload["id"] !== threadId) return null;
+        return readRolloutString(payload["model_provider"]) ?? null;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  return null;
+}
+
 export interface CodexConversationReaderState {
   filePath: string;
   cursor: CodexJsonlCursor<CodexTranscriptFold>;
