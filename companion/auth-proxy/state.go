@@ -43,6 +43,9 @@ type poolInput struct {
 	DefaultAccountID  *string  `json:"defaultAccountId"`
 	AutoRotate        bool     `json:"autoRotate"`
 	DefaultGeneration uint64   `json:"defaultGeneration"`
+	// KeepActive is set on the one configure that carries a default change: existing Auto
+	// bindings of the provider acknowledge the new generation and keep their account.
+	KeepActive bool `json:"keepActive"`
 }
 
 type policy struct {
@@ -293,6 +296,26 @@ func (r *router) configure(accounts []accountInput, pools []poolInput, p policy)
 	defer r.mu.Unlock()
 	if r.fatal != nil {
 		return errors.New("auth proxy persistence failed")
+	}
+	// Rebase moves an Auto binding only while its generation lags the pool's, so acknowledging the
+	// new generation without touching the effective account leaves the session where it runs.
+	pinned := false
+	for prov, next := range nextPools {
+		if prev, had := r.pools[prov]; !next.KeepActive || !had || next.DefaultGeneration == prev.DefaultGeneration {
+			continue
+		}
+		for id, b := range r.state.Sessions {
+			if b.Session.Provider == prov && b.Session.Mode == "auto" && b.DefaultGeneration != next.DefaultGeneration {
+				b.DefaultGeneration = next.DefaultGeneration
+				r.state.Sessions[id] = b
+				pinned = true
+			}
+		}
+	}
+	if pinned {
+		if err := r.persistLocked(); err != nil {
+			return errors.New("could not persist default change")
+		}
 	}
 	r.accounts, r.pools, r.policy, r.configured = nextAccounts, nextPools, p, true
 	return nil

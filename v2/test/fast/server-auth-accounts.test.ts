@@ -61,12 +61,14 @@ describe("managed authorization HTTP boundary", () => {
     expect(input).toHaveBeenCalledWith("work", null);
   });
 
+  const pool = { defaultAccountId: null, defaultGeneration: 0, autoRotate: false };
+
   it.each([{}, { autoRotate: false }, { defaultAccountId: null }])(
-    "preserves omitted pool fields and explicit values %j",
+    "preserves omitted pool fields and explicit values %j, keeping active sessions",
     async (update) => {
       const change = vi
         .spyOn(SessionService.prototype, "updateAuthorizationPool")
-        .mockResolvedValue({ defaultAccountId: null, defaultGeneration: 0, autoRotate: false });
+        .mockResolvedValue({ pool, moved: 0 });
       const base = await fixture();
       const response = await fetch(`${base}/auth-pools/codex`, {
         method: "PATCH",
@@ -74,9 +76,31 @@ describe("managed authorization HTTP boundary", () => {
         body: JSON.stringify(update),
       });
       expect(response.status).toBe(200);
-      expect(change).toHaveBeenCalledExactlyOnceWith("codex", update);
+      expect(change).toHaveBeenCalledExactlyOnceWith("codex", update, false);
     },
   );
+
+  it.each([true, false])("forwards applyToActive=%s and returns moved", async (applyToActive) => {
+    const change = vi
+      .spyOn(SessionService.prototype, "updateAuthorizationPool")
+      .mockResolvedValue({ pool, moved: 3 });
+    const base = await fixture();
+    const send = (body: unknown) =>
+      fetch(`${base}/auth-pools/claude`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const response = await send({ defaultAccountId: "work", applyToActive });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ pool, moved: 3 });
+    expect(change).toHaveBeenCalledExactlyOnceWith(
+      "claude",
+      { defaultAccountId: "work" },
+      applyToActive,
+    );
+    expect((await send({ applyToActive: "yes" })).status).toBe(400);
+  });
 
   const post = (base: string, path: string, body?: unknown) =>
     fetch(`${base}${path}`, {

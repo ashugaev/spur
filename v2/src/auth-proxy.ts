@@ -135,6 +135,7 @@ type AuthControlRequest =
           defaultAccountId: string | null;
           defaultGeneration: number;
           autoRotate: boolean;
+          keepActive?: boolean;
         }[];
         policy: { cooldownMinutes: number; maxRotationsPerEpisode: number };
       };
@@ -327,7 +328,8 @@ export class AuthProxy {
     });
   }
 
-  async configure(): Promise<void> {
+  /** `keepActiveProvider`: the pool default just changed and that provider's Auto sessions stay on their account. */
+  async configure(options?: { keepActiveProvider?: "claude" | "codex" }): Promise<void> {
     const { state, policy } = this.configuration();
     await this.request({
       method: "configure",
@@ -339,7 +341,15 @@ export class AuthProxy {
         })),
         pools: (["claude", "codex"] as const).flatMap((provider) => {
           const pool = state.pools[provider];
-          return pool ? [{ provider, ...pool }] : [];
+          return pool
+            ? [
+                {
+                  provider,
+                  ...pool,
+                  ...(options?.keepActiveProvider === provider ? { keepActive: true } : {}),
+                },
+              ]
+            : [];
         }),
         policy,
       },

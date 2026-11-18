@@ -3476,6 +3476,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<agent>", "claude or codex")
     .option("--auto-rotate <state>", "on or off")
     .option("--default <accountId>", "Default profile for Auto sessions")
+    .option("--apply-to-active", "With --default: also move running Auto sessions")
     .option("--json", "Print raw JSON")
     .action(async (agent: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
@@ -3483,9 +3484,13 @@ export function createProgram(cliEntrypoint: string): Command {
       if (options.autoRotate !== undefined && !["on", "off"].includes(options.autoRotate)) {
         throw new Error("--auto-rotate must be on or off");
       }
+      if (options.applyToActive && options.default === undefined) {
+        throw new Error("--apply-to-active requires --default");
+      }
       const update = {
         ...(options.autoRotate !== undefined ? { autoRotate: options.autoRotate === "on" } : {}),
         ...(options.default !== undefined ? { defaultAccountId: options.default } : {}),
+        ...(options.applyToActive ? { applyToActive: true } : {}),
       };
       const pool =
         Object.keys(update).length > 0

@@ -9,6 +9,7 @@ import type {
   AuthPool,
   AuthProvider,
   SpurSessionAuth,
+  SpurSessionsResponse,
   TerminalLogin,
 } from "@/lib/types";
 
@@ -151,6 +152,33 @@ export function autoAccount(
 ): AuthAccountSummary | undefined {
   const id = auth?.mode === "auto" ? auth.effectiveAccountId : pool?.defaultAccountId;
   return accounts.find((account) => account.id === id && account.authenticated);
+}
+
+/**
+ * Running sessions of a provider a default change touches: Auto sessions on another account move
+ * when applied to active sessions, pinned ones never do. A failed read counts none, so the change
+ * applies to new sessions only.
+ */
+export async function countRunningAuthSessions(
+  provider: AuthProvider,
+  newDefaultId: string,
+): Promise<{ active: number; pinned: number }> {
+  const counts = { active: 0, pinned: 0 };
+  try {
+    const response = await fetch("/api/sessions", { cache: "no-store" });
+    if (!response.ok) return counts;
+    const payload = (await response.json()) as Partial<SpurSessionsResponse>;
+    for (const session of payload.sessions ?? []) {
+      const auth = session.auth;
+      if (!auth || auth.provider !== provider || session.status !== "running") continue;
+      if (!session.runtimeAlive) continue;
+      if (auth.mode === "pinned") counts.pinned += 1;
+      else if (auth.effectiveAccountId !== newDefaultId) counts.active += 1;
+    }
+  } catch {
+    return { active: 0, pinned: 0 };
+  }
+  return counts;
 }
 
 /** One shared cache of every managed account and pool, filtered per caller. `poll` refetches while a menu or dialog is open. */

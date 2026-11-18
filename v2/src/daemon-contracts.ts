@@ -646,6 +646,11 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
       body: body("UpdateAuthPoolRequest", [
         field("defaultAccountId", "string|null", "Ready default account."),
         field("autoRotate", "boolean", "Rotate Auto sessions on quota."),
+        field(
+          "applyToActive",
+          "boolean",
+          "With defaultAccountId: true moves running Auto sessions on their next request; default false keeps them on their account. Response adds moved.",
+        ),
       ]),
     },
   ),

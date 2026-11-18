@@ -25630,7 +25630,8 @@ export class SessionService {
   async updateAuthorizationPool(
     provider: AuthProvider,
     update: { defaultAccountId?: string | null; autoRotate?: boolean },
-  ) {
+    applyToActive = false,
+  ): Promise<{ pool: ReturnType<AuthAccounts["updatePool"]>; moved: number }> {
     if (update.defaultAccountId !== null && update.defaultAccountId !== undefined) {
       const { accounts } = await this.listAuthorizationAccounts(provider);
       if (
@@ -25642,10 +25643,27 @@ export class SessionService {
         );
       }
     }
+    const previousDefault = this.authAccounts.read().pools[provider]?.defaultAccountId;
     const pool = this.authAccounts.updatePool(provider, update);
-    await this.authProxy.configure();
+    const defaultChanged =
+      update.defaultAccountId !== undefined && pool.defaultAccountId !== previousDefault;
+    await this.authProxy.configure(
+      defaultChanged && !applyToActive ? { keepActiveProvider: provider } : undefined,
+    );
     this.authSnapshot = undefined;
-    return pool;
+    // Running Auto sessions that leave their account on their next request.
+    let moved = 0;
+    if (defaultChanged && applyToActive) {
+      const bindings = (await this.authProxy.getState()).sessions;
+      moved = bindings.filter(
+        (binding) =>
+          binding.provider === provider &&
+          binding.mode === "auto" &&
+          binding.effectiveAccountId !== pool.defaultAccountId &&
+          readSession(this.config.dataDir, binding.sessionId)?.status === "running",
+      ).length;
+    }
+    return { pool, moved };
   }
 
   async removeAuthorizationAccount(accountId: string): Promise<void> {

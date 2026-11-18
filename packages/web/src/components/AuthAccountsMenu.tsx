@@ -9,12 +9,14 @@ import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { AuthSignInFlow, type SignInTarget } from "@/components/AuthSignInFlow";
 import { BusyContent } from "@/components/BusyContent";
+import { SetDefaultDialog } from "@/components/SetDefaultDialog";
 import { CHECKBOX_CLASS, DANGER_BUTTON_CLASS, SECONDARY_BUTTON_CLASS } from "@/design/classes";
 import {
   AUTH_ACCOUNTS_QUERY_KEY,
   AUTH_PROVIDERS,
   accountLines,
   authProviderName,
+  countRunningAuthSessions,
   postAuthJson,
   quotaText,
   useAuthAccounts,
@@ -86,7 +88,7 @@ function ProviderSection({
   const poolMutation = useMutation<
     unknown,
     Error,
-    { defaultAccountId: string | null } | { autoRotate: boolean }
+    { defaultAccountId: string | null; applyToActive?: boolean } | { autoRotate: boolean }
   >({
     mutationFn: (update) =>
       postAuthJson(
@@ -152,9 +154,36 @@ function ProviderSection({
     onSettled: () => void refresh(),
   });
 
+  const [setDefault, setSetDefault] = useState<{
+    account: AuthAccountSummary;
+    active: number;
+    pinned: number;
+  } | null>(null);
+  const [counting, setCounting] = useState(false);
+  const closeSetDefault = () => {
+    focusHandoff.current = false;
+    setSetDefault(null);
+  };
+  // A change that would reach running Auto sessions asks which scope; otherwise it applies at once.
+  const requestDefault = async (account: AuthAccountSummary) => {
+    setLastError(null);
+    setCounting(true);
+    const counts = await countRunningAuthSessions(provider, account.id);
+    setCounting(false);
+    if (counts.active === 0) {
+      poolMutation.mutate({ defaultAccountId: account.id });
+      return;
+    }
+    // The dialog takes focus out of the popover; hold the blur guard so the popover stays open.
+    focusHandoff.current = true;
+    setSetDefault({ account, ...counts });
+  };
+
   const defaultId = pool?.defaultAccountId ?? null;
+  const defaultAccount = accounts.find((account) => account.id === defaultId);
   const rotating = poolMutation.isPending && "autoRotate" in (poolMutation.variables ?? {});
-  const busy = poolMutation.isPending || removeMutation.isPending || addMutation.isPending;
+  const busy =
+    poolMutation.isPending || removeMutation.isPending || addMutation.isPending || counting;
 
   return (
     <section className="flex flex-col gap-1" data-testid={`auth-section-${provider}`}>
@@ -287,7 +316,7 @@ function ProviderSection({
                       className={SECONDARY_BUTTON_CLASS}
                       disabled={busy}
                       type="button"
-                      onClick={() => poolMutation.mutate({ defaultAccountId: account.id })}
+                      onClick={() => void requestDefault(account)}
                     >
                       Switch
                     </button>
@@ -328,6 +357,23 @@ function ProviderSection({
       >
         + Add {name} account
       </button>
+      {setDefault ? (
+        <SetDefaultDialog
+          account={setDefault.account}
+          active={setDefault.active}
+          pending={poolMutation.isPending}
+          pinned={setDefault.pinned}
+          provider={provider}
+          replaces={defaultAccount ? accountLines(defaultAccount).primary : null}
+          onCancel={closeSetDefault}
+          onConfirm={(applyToActive) =>
+            poolMutation.mutate(
+              { defaultAccountId: setDefault.account.id, applyToActive },
+              { onSettled: closeSetDefault },
+            )
+          }
+        />
+      ) : null}
     </section>
   );
 }

@@ -215,6 +215,17 @@ describe("spawn", () => {
       { autoRotate: false, defaultAccountId: "b" },
       "/tmp/spur.yaml",
     );
+    patchJsonMock.mockClear();
+    await parseCli(["auth", "pool", "claude", "--default", "b", "--apply-to-active"]);
+    expect(patchJsonMock).toHaveBeenCalledExactlyOnceWith(
+      "/tmp/dist/cli.js",
+      "/auth-pools/claude",
+      { defaultAccountId: "b", applyToActive: true },
+      "/tmp/spur.yaml",
+    );
+    await expect(parseCli(["auth", "pool", "claude", "--apply-to-active"])).rejects.toThrow(
+      "--apply-to-active requires --default",
+    );
     await expect(parseCli(["auth", "pool", "claude", "--auto-rotate", "maybe"])).rejects.toThrow(
       "--auto-rotate must be on or off",
     );

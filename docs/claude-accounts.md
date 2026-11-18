@@ -26,6 +26,7 @@ Row clears after a verified sign-in. Host rows open the terminal directly.
 
 Spawn dialog Account picker: Auto or an identified account; signed-out ones are disabled.
 Session Switch account: another profile or back to Auto, for the next request.
+Footer menu Switch on a non-default account asks "Only new sessions" (default) or "Also switch active sessions" when Auto sessions of that provider run on another account; pinned sessions never move.
 
 Legacy Claude IDs remain, labels are ignored; sign in again for managed routing. An account shows its identity after sign-in.
 Host credentials and existing direct processes remain untouched.

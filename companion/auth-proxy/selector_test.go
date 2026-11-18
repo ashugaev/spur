@@ -332,3 +332,38 @@ func TestSessionRequestsAreNotSerialized(t *testing.T) {
 		}
 	}
 }
+
+// A default change moves a running Auto session on its next request unless the configure that
+// carries it asks to keep active sessions where they run.
+func TestDefaultChangeKeepActive(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		r := testRouter(t)
+		if _, err := r.register("session-a", codex, nil, false); err != nil {
+			t.Fatal(err)
+		}
+		bID := "account-b"
+		pool := poolInput{Provider: codex, DefaultAccountID: &bID, AutoRotate: true, DefaultGeneration: 2, KeepActive: keep}
+		if err := r.configure([]accountInput{r.accounts["account-a"], r.accounts["account-b"], r.accounts["account-c"]}, []poolInput{pool}, r.policy); err != nil {
+			t.Fatal(err)
+		}
+		// The next admission of the running session resolves the default generation.
+		reg, err := r.register("session-a", codex, nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "account-b"
+		if keep {
+			want = "account-a"
+		}
+		if reg.EffectiveAccountID != want {
+			t.Fatalf("keepActive=%v: session on %s, want %s", keep, reg.EffectiveAccountID, want)
+		}
+		// A session that registers after the change starts on the new default either way.
+		if _, err := r.register("session-new", codex, nil, false); err != nil {
+			t.Fatal(err)
+		}
+		if got := pickForTest(t, r, testAdmission(t, r, "session-new"), "account-a", "account-b", "account-c").ID; got != authFileID("account-b") {
+			t.Fatalf("keepActive=%v: new session on %s", keep, got)
+		}
+	}
+}

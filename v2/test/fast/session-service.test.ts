@@ -166,6 +166,7 @@ import {
   authAccountsRemoveMock,
   authAccountsRecordIdentitiesMock,
   authProxyGetStateMock,
+  authProxyConfigureMock,
   authProxyGetUsageMock,
   authProxySetApiKeyMock,
   authProxyRegisterSessionMock,
@@ -23749,6 +23750,50 @@ describe("SessionService", () => {
         expect(createTmuxSessionMock).not.toHaveBeenCalled();
         expect(buildAgentResumePlanMock).not.toHaveBeenCalled();
         expect(swapSessionCredentialsMock).not.toHaveBeenCalled();
+        service.dispose();
+      },
+    );
+
+    it.each([false, true])(
+      "changes the pool default with applyToActive=%s",
+      async (applyToActive) => {
+        seedManagedAccounts("claude");
+        createSessionStore(runningSession({ auth: { ...registration("claude"), mode: "auto" } }));
+        authProxyGetStateMock.mockResolvedValue({
+          accounts: ["primary", "backup"].map((id) => ({
+            id,
+            provider: "claude",
+            status: "ready",
+          })),
+          sessions: [
+            {
+              sessionId: "api-1",
+              provider: "claude",
+              mode: "auto",
+              accountId: null,
+              effectiveAccountId: "primary",
+              generation: 1,
+            },
+          ],
+        });
+        const service = await createDisposedSessionService();
+        const updatePool = (
+          service as unknown as { authAccounts: { updatePool: ReturnType<typeof vi.fn> } }
+        ).authAccounts.updatePool;
+        const pool = { defaultAccountId: "backup", defaultGeneration: 1, autoRotate: true };
+        updatePool.mockReturnValue(pool);
+        authProxyConfigureMock.mockClear();
+
+        const result = await service.updateAuthorizationPool(
+          "claude",
+          { defaultAccountId: "backup" },
+          applyToActive,
+        );
+
+        expect(result).toEqual({ pool, moved: applyToActive ? 1 : 0 });
+        expect(authProxyConfigureMock).toHaveBeenCalledExactlyOnceWith(
+          applyToActive ? undefined : { keepActiveProvider: "claude" },
+        );
         service.dispose();
       },
     );
