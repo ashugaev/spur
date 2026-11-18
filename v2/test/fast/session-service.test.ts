@@ -23470,7 +23470,9 @@ describe("SessionService", () => {
             expect(sessionServiceInternals(service).sessionLifecycleLocks.size).toBe(0),
           );
           expect(
-            logSpurEventMock.mock.calls.filter(([, event]) => event.event === "session.restore.failed"),
+            logSpurEventMock.mock.calls.filter(
+              ([, event]) => event.event === "session.restore.failed",
+            ),
           ).toHaveLength(1);
           expect(
             sessionServiceInternals(service).lifecycle.snapshot("api-1").operation?.phase,
