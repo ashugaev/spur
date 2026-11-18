@@ -11,6 +11,7 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
+import { AuthAlertsBanner } from "@/components/AuthAlertsBanner";
 import type { SessionRowAction } from "@/components/SessionRow";
 import { useSessionActionDialogs } from "@/components/SessionActionDialogs";
 import { BusyContent } from "@/components/BusyContent";
@@ -486,6 +487,7 @@ const STATUS_LANE_ICONS: Record<AttentionLevel, ReactNode> = {
   respond: <IconChat />,
   working: <IconBolt />,
   pending: <IconClock />,
+  completed: <IconCheck />,
   stopped: <IconStop />,
   done: <IconCheck />,
 };
@@ -1136,6 +1138,7 @@ export function Dashboard() {
   const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
+  const [spawnAuthAccountId, setSpawnAuthAccountId] = useState<string | null>(null);
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
   const [spawnReasoningIntent, setSpawnReasoningIntent] = useState<ReasoningIntent>(
     initialReasoningIntent(false),
@@ -1573,6 +1576,7 @@ export function Dashboard() {
       respond: [],
       working: [],
       pending: [],
+      completed: [],
       stopped: [],
       done: [],
     };
@@ -1591,6 +1595,7 @@ export function Dashboard() {
       respond: grouped.respond.length,
       working: grouped.working.length,
       pending: grouped.pending.length,
+      completed: grouped.completed.length,
       stopped: grouped.stopped.length,
       done: grouped.done.length,
     }),
@@ -1736,6 +1741,7 @@ export function Dashboard() {
     setSpawnProjectId(nextProjectId);
     setSpawnPrompt(draft?.prompt ?? "");
     setSpawnAgent(draft?.agent ?? "claude");
+    setSpawnAuthAccountId(null);
     setSpawnModel(draft?.model ?? null);
     setSpawnReasoningIntent(draft?.reasoningIntent ?? initialReasoningIntent(false));
     setSpawnSessionMode(draft?.sessionMode ?? null);
@@ -2157,6 +2163,7 @@ export function Dashboard() {
         workspaceMode: spawnWorkspaceMode,
         defaultBranch: spawnDefaultBranch,
         preflightBatchId: spawnPreflightBatchIdRef.current,
+        authAccountId: spawnAuthAccountId,
       });
 
       const read = lifecycleRef.current.beginRead();
@@ -2630,7 +2637,7 @@ export function Dashboard() {
     // A dialog retry is the same Done click the user already confirmed.
     if (!options?.retry && activeSubagentCount > 0 && typeof window !== "undefined") {
       const ok = window.confirm(
-        `Complete this desk? ${activeSubagentCount} subagent${
+        `Close this desk? ${activeSubagentCount} subagent${
           activeSubagentCount === 1 ? "" : "s"
         } on this checkout will be ended.`,
       );
@@ -2687,14 +2694,14 @@ export function Dashboard() {
           setPrCheckUnavailable({ action: "complete", session, payload });
           return false;
         }
-        throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
+        throw new Error(responseErrorMessage(payload, "Failed to close Spur session"));
       }
       await reconcileAttempt(owner);
       return lifecycleRef.current.isCurrent(owner);
     } catch (completeError) {
       await reconcileAttempt(owner);
       if (!lifecycleRef.current.isCurrent(owner)) return false;
-      showErrorToast(errorMessage(completeError, "Failed to complete Spur session"));
+      showErrorToast(errorMessage(completeError, "Failed to close Spur session"));
       throw completeError;
     } finally {
       if (lifecycleRef.current.isCurrent(owner)) {
@@ -2873,7 +2880,7 @@ export function Dashboard() {
     <TagsContext.Provider value={tagsContextValue}>
       <div className="flex min-h-dvh flex-col">
         <header className="sticky top-0 z-40 border-b border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
-          <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-4 py-[7px] sm:px-5 lg:px-6">
+          <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-2 py-[7px] sm:px-5 lg:px-6">
             <BrandGlyph />
             <span className="inline-flex min-w-0">
               <ProjectMenu
@@ -3067,7 +3074,7 @@ export function Dashboard() {
           />
         ) : null}
 
-        <main className="mx-auto flex w-full max-w-[1500px] flex-1 flex-col px-4 py-4 pb-8 sm:px-5 lg:px-6">
+        <main className="mx-auto flex w-full max-w-[1500px] flex-1 flex-col px-2 py-4 pb-8 sm:px-5 lg:px-6">
           {newProjectOpen ? (
             <NewProjectModal
               displayName={newProjectDisplayName}
@@ -3171,6 +3178,7 @@ export function Dashboard() {
                       },
                     }
                   : {}),
+                auth: { value: spawnAuthAccountId, onChange: setSpawnAuthAccountId },
                 branch: {
                   value: spawnBranch,
                   onChange: (next) => {
@@ -3294,8 +3302,8 @@ export function Dashboard() {
                 ),
                 selfDestructSlot: spawnSelfDestruct ? (
                   <textarea
-                    aria-label="Self-destruct conditions"
-                    className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
+                    aria-label="Auto-close conditions"
+                    className={`min-h-20 w-full resize-y [--color-input-border:var(--color-text-secondary)] [--color-input-placeholder:var(--color-text-secondary)] ${INPUT_CLASS}`}
                     onChange={(event) => {
                       setSpawnSelfDestructConditions(event.target.value);
                     }}
@@ -3318,6 +3326,7 @@ export function Dashboard() {
               onAddFiles={addSpawnFiles}
               onAgentChange={(next) => {
                 setSpawnAgent(next);
+                setSpawnAuthAccountId(null);
                 setSpawnModel(null);
                 setSpawnReasoningIntent(initialReasoningIntent(false));
               }}
@@ -3363,6 +3372,8 @@ export function Dashboard() {
               voice={voice}
             />
           ) : null}
+
+          <AuthAlertsBanner />
 
           {loading ? <CenteredLoader className="flex-1" label="Loading dashboard" /> : null}
 

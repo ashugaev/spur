@@ -13,6 +13,7 @@ export type SpurSessionStatus =
 export type SpurSessionState =
   | "working"
   | "waiting"
+  | "completed"
   | "needs_input"
   | "rate_limited"
   | "stale"
@@ -140,7 +141,8 @@ export type QuotaErrorKind =
   | "rate_limited"
   | "http_error"
   | "network_error"
-  | "unparsable";
+  | "unparsable"
+  | "pending";
 
 interface QuotaSourceBase {
   provider: QuotaProvider;
@@ -250,14 +252,137 @@ export type SpurSessionTitleSource = "manual" | "agent";
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
-export interface SpurClaudeAccount {
-  id: string;
-  label?: string;
-  authenticated: boolean;
+export type AuthProvider = "claude" | "codex";
+
+export type AuthAccountStatus = "ready" | "sign_in_required" | "pending" | "error";
+
+export interface AuthIdentity {
+  email?: string;
+  organizationName?: string;
+  organizationId?: string;
+  plan?: string;
+  /** Last 4 characters of an API key. */
+  keyHint?: string;
 }
 
-export interface ClaudeAccountSummary extends SpurClaudeAccount {
-  lastUsedAt?: string;
+export interface AuthQuotaWindow {
+  label: string;
+  usedPercent: number;
+  remainingPercent: number;
+  resetsAt: string | null;
+}
+
+export interface AuthQuota {
+  leftPercent: number;
+  resetsAt: string | null;
+  windows: AuthQuotaWindow[];
+  fetchedAt: string;
+}
+
+export interface AuthAccountSummary {
+  id: string;
+  provider: AuthProvider;
+  /** Provider identity of the signed-in credential; never a secret. */
+  identity?: AuthIdentity;
+  /** The one server-computed name every surface shows. */
+  displayName: string;
+  /** Cached quota; ready OAuth accounts only. */
+  quota?: AuthQuota;
+  createdAt: string;
+  authenticated: boolean;
+  status: AuthAccountStatus;
+  /** True while a shared quota cooldown is active. */
+  limited: boolean;
+  /** ISO end of the cooldown; present only while cooling. */
+  cooldownUntil?: string;
+  credential?: "oauth" | "api_key";
+}
+
+export interface AuthPool {
+  defaultAccountId: string | null;
+  defaultGeneration: number;
+  autoRotate: boolean;
+}
+
+export interface AuthAccountsResponse {
+  accounts: AuthAccountSummary[];
+  pools: Partial<Record<AuthProvider, AuthPool>>;
+}
+
+/** Daemon login state; `url`/`userCode`/`prompt` drive the sign-in step. */
+export interface AuthLogin {
+  accountId: string;
+  status: "ready" | "sign-in-required" | "pending" | "failed" | "busy";
+  method?: "oauth" | "device" | "browser" | "api_key" | "import";
+  stage?: "authorize" | "submitted" | "verifying";
+  errorCode?: AuthLoginErrorCode;
+  url?: string;
+  userCode?: string;
+  prompt?: string;
+  error?: string;
+}
+
+export type AuthLoginErrorCode =
+  | "input_rejected"
+  | "expired"
+  | "key_rejected"
+  | "code_rejected"
+  | "provider_blocked"
+  | "not_confirmed"
+  | "identity"
+  | "duplicate"
+  | "failed";
+
+/** One broken managed account or host login from GET /auth-alerts. */
+interface AuthAlertBase {
+  id: string;
+  provider: AuthProvider;
+  label: string;
+  since: string;
+}
+
+export type AuthAlert =
+  | (AuthAlertBase & { kind: "managed"; accountId: string; sessionsWaiting?: number })
+  | (AuthAlertBase & { kind: "host" });
+
+export interface AuthAlertsResponse {
+  alerts: AuthAlert[];
+}
+
+export type TerminalLoginTarget =
+  | { accountId: string; provider: AuthProvider }
+  | { host: AuthProvider };
+
+export type TerminalLoginReason =
+  | "exited"
+  | "timed_out"
+  | "stopped"
+  | "identity"
+  | "duplicate"
+  | "not_confirmed"
+  | "failed"
+  | "another_sign_in_pending"
+  | "companion_unavailable";
+
+/** Native-CLI sign-in running in a daemon tmux session; `id` equals `tmuxSession`. */
+export interface TerminalLogin {
+  id: string;
+  target: TerminalLoginTarget;
+  tmuxSession: string;
+  status: "running" | "verifying" | "ready" | "not_signed_in";
+  reason?: TerminalLoginReason;
+  /** Display string of the native login command, from the daemon. */
+  command: string;
+}
+
+/** Managed authorization binding of one session. */
+export interface SpurSessionAuth {
+  sessionId: string;
+  provider: AuthProvider;
+  mode: "auto" | "pinned";
+  accountId: string | null;
+  effectiveAccountId: string;
+  generation: number;
 }
 
 export interface SpurSessionArtifact {
@@ -641,8 +766,7 @@ export interface SpurSessionView {
   workspaceId?: string;
   deskId?: string;
   deskGroupMembers?: SessionDeskMember[];
-  claudeAccounts?: SpurClaudeAccount[];
-  activeClaudeAccountId?: string;
+  auth?: SpurSessionAuth;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
@@ -681,6 +805,11 @@ export interface SpurTodoHistoryEvent {
   blocker?: { kind: "external" } | { kind: "human"; requiredAction: string };
 }
 
+export interface SpurTodoHandoffRef {
+  sessionId: string;
+  itemId: string;
+}
+
 export interface SpurTodoProjection {
   revision: string;
   status: "active" | "held" | "resolved";
@@ -690,6 +819,8 @@ export interface SpurTodoProjection {
     text: string;
     status: "open" | "held" | "completed" | "cancelled";
     added: { reason: string; actor: SpurTodoActor; at: string };
+    handoffFrom?: SpurTodoHandoffRef;
+    handoffTo?: SpurTodoHandoffRef;
     latestTransition?: {
       type: "completed" | "cancelled" | "held" | "resumed";
       reason?: string;
@@ -754,6 +885,13 @@ function todoOptionalTransition(value: unknown): boolean {
   );
 }
 
+function todoOptionalHandoffRef(value: unknown): boolean {
+  if (value === undefined) return true;
+  return (
+    todoRecord(value) && typeof value.sessionId === "string" && typeof value.itemId === "string"
+  );
+}
+
 export function isSpurTodoProjection(value: unknown): value is SpurTodoProjection {
   if (!todoRecord(value) || !todoRecord(value.counts)) return false;
   const counts = value.counts;
@@ -783,6 +921,8 @@ export function isSpurTodoProjection(value: unknown): value is SpurTodoProjectio
       typeof item.added.at === "string" &&
       todoActor(item.added.actor) &&
       todoOptionalTransition(item.latestTransition) &&
+      todoOptionalHandoffRef(item.handoffFrom) &&
+      todoOptionalHandoffRef(item.handoffTo) &&
       Array.isArray(item.history) &&
       item.history.every(
         (event) =>
@@ -964,6 +1104,7 @@ export type AttentionLevel =
   | "respond"
   | "working"
   | "pending"
+  | "completed"
   | "stopped"
   | "done";
 
@@ -973,6 +1114,7 @@ export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
   "respond",
   "working",
   "pending",
+  "completed",
   "stopped",
   "done",
 ];
@@ -992,12 +1134,17 @@ export const ATTENTION_LANE_META: Record<AttentionLevel, AttentionLaneMeta> = {
   respond: { label: "Needs Input", color: "var(--color-status-error)" },
   working: { label: "Working", color: "var(--color-status-working)" },
   pending: { label: "Waiting", color: "var(--color-status-attention)" },
+  completed: { label: "Completed", color: "var(--color-status-ready)" },
   stopped: {
     label: "Stopped",
     color: "var(--color-text-tertiary)",
     dividerColor: "var(--color-border-subtle)",
   },
-  done: { label: "Completed", color: "var(--color-status-ready)" },
+  done: {
+    label: "Closed",
+    color: "var(--color-text-tertiary)",
+    dividerColor: "var(--color-border-subtle)",
+  },
 };
 
 export function worstAttentionLevel(levels: readonly AttentionLevel[]): AttentionLevel {
@@ -1071,8 +1218,7 @@ export interface DashboardSession {
   deskId?: string;
   deskKey: string;
   deskGroupMembers?: SessionDeskMember[];
-  claudeAccounts?: SpurClaudeAccount[];
-  activeClaudeAccountId?: string;
+  auth?: SpurSessionAuth;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
@@ -1165,10 +1311,7 @@ export function toDashboardSession(
     deskKey: session.workspaceId?.trim() || session.deskId?.trim() || session.id,
     deskId: session.deskId,
     deskGroupMembers: session.deskGroupMembers,
-    ...(session.claudeAccounts ? { claudeAccounts: session.claudeAccounts } : {}),
-    ...(session.activeClaudeAccountId
-      ? { activeClaudeAccountId: session.activeClaudeAccountId }
-      : {}),
+    ...(session.auth ? { auth: session.auth } : {}),
     error: session.error,
     ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
     ...(session.tokenUsageView ? { tokenUsageView: session.tokenUsageView } : {}),
@@ -1243,11 +1386,9 @@ export function canRespawn(session: DashboardSession): boolean {
   );
 }
 
+/** Only a managed (proxy-bound) session can switch accounts in place. */
 export function canSwitchAuth(session: DashboardSession): boolean {
-  return (
-    session.agent === "claude" &&
-    (session.claudeAccounts?.some((account) => account.authenticated) ?? false)
-  );
+  return session.auth !== undefined;
 }
 
 export function canUseDeskCheckout(session: DashboardSession): boolean {
@@ -1354,6 +1495,10 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
 
   if (session.state === "waiting") {
     return "pending";
+  }
+
+  if (session.state === "completed") {
+    return "completed";
   }
 
   return "working";

@@ -10,7 +10,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, join, relative, sep } from "node:path";
+import { authSessionSchema } from "./auth-proxy.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isCursorDeliveryId } from "./agents/cursor-submit-ack.js";
 import { appendEventLog } from "./event-log.js";
@@ -18,6 +20,7 @@ import { parseConsent, type InterfaceConsent } from "./review-interface-consent.
 import {
   isSessionState,
   isTerminalSessionStatus,
+  AUTH_CHANGE_PING_MAX_ATTEMPTS,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   DELIVERY_MAX_ATTEMPTS,
   type AvailableBacklogItem,
@@ -54,6 +57,7 @@ import { aggregateTokenUsage } from "./token-usage.js";
 import { normalizePreflightTotals } from "./preflight-usage-store.js";
 import { parseArtifactRelativePath } from "./session-artifacts.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
+import { isTaskStatusRevision, normalizeTaskStatus } from "./task-status.js";
 
 export function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -830,7 +834,8 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         title: raw.title,
         repo: raw.repo,
         createdAt: raw.createdAt,
-        autoComplete: typeof raw.autoComplete === "boolean" ? raw.autoComplete : true,
+        // Either explicit false wins; absent/malformed legacy policy historically enables closing.
+        autoClose: raw.autoClose !== false && raw.autoComplete !== false,
         ...(lastRetryEmitAt !== undefined ? { lastRetryEmitAt } : {}),
         ...(typeof raw.spawnWorkId === "string" ? { spawnWorkId: raw.spawnWorkId } : {}),
       };
@@ -1336,8 +1341,13 @@ function validateDurableSpawnFields(session: SessionRecord): void {
       "submission",
       "pane",
       "telegramOrigin",
+      "closeoutTakenFrom",
     ],
     "intent",
+  );
+  durableCheck(
+    intent["closeoutTakenFrom"] === undefined || durableStrings(intent["closeoutTakenFrom"]),
+    "intent closeoutTakenFrom",
   );
   durableCheck(
     intent["version"] === 1 &&
@@ -1566,6 +1576,48 @@ function validateDurableSpawnFields(session: SessionRecord): void {
   }
 }
 
+function normalizeRateLimitClearFence(value: unknown): SessionRecord["rateLimitClearFence"] {
+  if (
+    !isRecord(value) ||
+    (value["agentLaunchId"] !== null && typeof value["agentLaunchId"] !== "string") ||
+    typeof value["paneLatched"] !== "boolean" ||
+    !isRecord(value["sourceOrdinals"])
+  )
+    return undefined;
+  const sourceOrdinals: Record<string, number> = {};
+  for (const [path, ordinal] of Object.entries(value["sourceOrdinals"])) {
+    if (!path || !Number.isSafeInteger(ordinal) || (ordinal as number) < 0) return undefined;
+    sourceOrdinals[path] = ordinal as number;
+  }
+  return {
+    agentLaunchId: value["agentLaunchId"],
+    paneLatched: value["paneLatched"],
+    sourceOrdinals,
+  };
+}
+
+function normalizeClaudeStatusOwner(value: unknown): SessionRecord["claudeStatusOwner"] {
+  if (
+    !isRecord(value) ||
+    typeof value["agentLaunchId"] !== "string" ||
+    !value["agentLaunchId"] ||
+    typeof value["agentSessionId"] !== "string" ||
+    !value["agentSessionId"] ||
+    typeof value["pid"] !== "number" ||
+    !Number.isSafeInteger(value["pid"]) ||
+    value["pid"] <= 0
+  )
+    return undefined;
+  const procStart = value["procStart"];
+  if (procStart !== undefined && (typeof procStart !== "string" || !procStart)) return undefined;
+  return {
+    agentLaunchId: value["agentLaunchId"],
+    agentSessionId: value["agentSessionId"],
+    pid: value["pid"],
+    ...(procStart !== undefined ? { procStart } : {}),
+  };
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   validateDurableSpawnFields(session);
   const normalizedSession = normalizeSessionPrBinding(session);
@@ -1579,7 +1631,23 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     (birthRequest.prompt === undefined || typeof birthRequest.prompt === "string")
       ? { triggerBirthKey: normalizedSession.triggerBirthKey, triggerBirthRequest: birthRequest }
       : {};
+  const receipt = normalizedSession.handoffIdempotency;
+  const handoffIdempotency =
+    isRecord(receipt) &&
+    typeof receipt.key === "string" &&
+    receipt.key.length > 0 &&
+    isRecord(receipt.request) &&
+    typeof receipt.request.agent === "string" &&
+    typeof receipt.successorId === "string" &&
+    receipt.successorId.length > 0 &&
+    Number.isSafeInteger(receipt.movedTodoItems) &&
+    receipt.movedTodoItems >= 0
+      ? { handoffIdempotency: receipt }
+      : {};
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
+  const declaration = normalizeTaskStatus(normalizedSession.taskStatus);
+  const taskStatus =
+    declaration?.agentLaunchId === normalizedSession.agentLaunchId ? declaration : undefined;
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
   const sidecarLaunches: Record<string, string> = {};
   if (isRecord(normalizedSession.sidecarLaunches)) {
@@ -1591,6 +1659,18 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   }
   const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
+  const rateLimitClearFence = normalizeRateLimitClearFence(normalizedSession.rateLimitClearFence);
+  const claudeStatusOwner = normalizeClaudeStatusOwner(normalizedSession.claudeStatusOwner);
+  const parsedAuth =
+    normalizedSession.auth === undefined
+      ? undefined
+      : authSessionSchema.safeParse(normalizedSession.auth);
+  if (parsedAuth && !parsedAuth.success) {
+    throw new InvalidSessionMetadataError(
+      `Invalid session metadata auth for ${normalizedSession.id}: ${parsedAuth.error.message}`,
+    );
+  }
+  const auth = parsedAuth?.data;
   // Records written before the rename carry the hold as launchUnconfirmedAt;
   // read it once here so an existing hold survives, and write only the new name.
   const legacyUnconfirmed = (normalizedSession as { launchUnconfirmedAt?: unknown })
@@ -1627,6 +1707,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     id: normalizedSession.id,
     project: normalizedSession.project,
     ...triggerBirth,
+    ...handoffIdempotency,
     // Legacy on-disk records only have `deskId` (or neither field); this is
     // where a pre-workspaceId record gets migrated in memory on every read.
     // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
@@ -1647,11 +1728,19 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.allowedTriggers !== undefined
       ? { allowedTriggers: normalizedSession.allowedTriggers }
       : {}),
+    ...(Array.isArray(normalizedSession.blockedTriggerNotices) &&
+    normalizedSession.blockedTriggerNotices.every((id) => typeof id === "string")
+      ? { blockedTriggerNotices: normalizedSession.blockedTriggerNotices }
+      : {}),
     ...(normalizedSession.selfDestruct ? { selfDestruct: normalizedSession.selfDestruct } : {}),
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
     ...(normalizedSession.agentLaunchId ? { agentLaunchId: normalizedSession.agentLaunchId } : {}),
+    ...(isTaskStatusRevision(normalizedSession.taskStatusRevision)
+      ? { taskStatusRevision: normalizedSession.taskStatusRevision }
+      : {}),
+    ...(taskStatus ? { taskStatus } : {}),
     ...(normalizedSession.cursorRestoreBoundary &&
     typeof normalizedSession.cursorRestoreBoundary.filePath === "string" &&
     Number.isSafeInteger(normalizedSession.cursorRestoreBoundary.offset) &&
@@ -1706,6 +1795,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(isWorkItemTriggerOrigin(normalizedSession.triggerOrigin)
       ? { triggerOrigin: normalizedSession.triggerOrigin }
       : {}),
+    ...(normalizedSession.terminalSlotsCaptured === true
+      ? { terminalSlotsCaptured: true as const }
+      : {}),
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
     ...(sidecarProcs ? { sidecarProcs } : {}),
@@ -1741,13 +1833,32 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
-    ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
+    ...(!isTerminalSessionStatus(normalizedSession.status) && normalizedSession.rateLimitedAt
+      ? { rateLimitedAt: normalizedSession.rateLimitedAt }
+      : {}),
+    ...(!isTerminalSessionStatus(normalizedSession.status) &&
+    normalizedSession.rateLimitedAt &&
+    typeof normalizedSession.rateLimitResetAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.rateLimitResetAt))
+      ? { rateLimitResetAt: new Date(normalizedSession.rateLimitResetAt).toISOString() }
+      : {}),
+    ...(rateLimitClearFence ? { rateLimitClearFence } : {}),
+    ...(claudeStatusOwner ? { claudeStatusOwner } : {}),
     ...(normalizedSession.serverErrorAt ? { serverErrorAt: normalizedSession.serverErrorAt } : {}),
     ...(typeof normalizedSession.serverErrorReactivationAttempts === "number" &&
     Number.isInteger(normalizedSession.serverErrorReactivationAttempts) &&
     normalizedSession.serverErrorReactivationAttempts >= 0 &&
     normalizedSession.serverErrorReactivationAttempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
       ? { serverErrorReactivationAttempts: normalizedSession.serverErrorReactivationAttempts }
+      : {}),
+    ...(normalizedSession.authChangePing &&
+    typeof normalizedSession.authChangePing.key === "string" &&
+    normalizedSession.authChangePing.key !== "" &&
+    typeof normalizedSession.authChangePing.pinged === "boolean" &&
+    Number.isInteger(normalizedSession.authChangePing.attempts) &&
+    normalizedSession.authChangePing.attempts >= 0 &&
+    normalizedSession.authChangePing.attempts <= AUTH_CHANGE_PING_MAX_ATTEMPTS
+      ? { authChangePing: normalizedSession.authChangePing }
       : {}),
     ...(normalizedSession.todoNudge &&
     typeof normalizedSession.todoNudge.fingerprint === "string" &&
@@ -1757,9 +1868,18 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     normalizedSession.todoNudge.attempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
       ? { todoNudge: normalizedSession.todoNudge }
       : {}),
+    ...(normalizedSession.snapshotNudge &&
+    typeof normalizedSession.snapshotNudge.fingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test(normalizedSession.snapshotNudge.fingerprint) &&
+    Number.isInteger(normalizedSession.snapshotNudge.attempts) &&
+    normalizedSession.snapshotNudge.attempts >= 0 &&
+    normalizedSession.snapshotNudge.attempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+      ? { snapshotNudge: normalizedSession.snapshotNudge }
+      : {}),
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
+    ...(auth ? { auth } : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
     ...(normalizedSession.error &&
@@ -1788,9 +1908,33 @@ function normalizeServiceInstanceRecord(service: ServiceInstanceRecord): Service
   };
 }
 
+type SessionWriteObserver = (session: SessionRecord) => void;
+const sessionWriteObservers = new Map<string, Set<SessionWriteObserver>>();
+const sessionWriteGuard = new AsyncLocalStorage<() => void>();
+
+/** Fence writes made inside an asynchronous classification across config reloads. */
+export function withSessionWriteGuard<T>(guard: () => void, action: () => T): T {
+  return sessionWriteGuard.run(guard, action);
+}
+
+export function observeSessionWrites(dataDir: string, observer: SessionWriteObserver): () => void {
+  const key = resolve(dataDir);
+  const observers = sessionWriteObservers.get(key) ?? new Set<SessionWriteObserver>();
+  observers.add(observer);
+  sessionWriteObservers.set(key, observers);
+  return () => {
+    observers.delete(observer);
+    if (observers.size === 0) sessionWriteObservers.delete(key);
+  };
+}
+
 export function writeSession(dataDir: string, session: SessionRecord): void {
+  sessionWriteGuard.getStore()?.();
   const path = sessionFilePath(dataDir, session.project, session.id);
-  writeJsonFile(path, normalizeSessionRecord(session));
+  const observers = sessionWriteObservers.get(resolve(dataDir));
+  const normalized = normalizeSessionRecord(session);
+  writeJsonFile(path, normalized);
+  for (const observer of observers ?? []) observer(normalized);
   writeSessionIndexEntry(dataDir, session.id, path);
 }
 
@@ -1923,6 +2067,31 @@ export function readArchivedSession(dataDir: string, sessionId: string): Session
     if (existsSync(path)) return readSessionFile(path);
   }
   return null;
+}
+
+// Archived records whose (project, id) pass `include`, uncached. The predicate runs before the
+// file is parsed, so callers pay only for the sessions they want. Invalid files are skipped.
+export function listArchivedSessions(
+  dataDir: string,
+  include: (projectId: string, sessionId: string) => boolean,
+): SessionRecord[] {
+  const root = join(dataDir, "sessions-archive");
+  if (!existsSync(root)) return [];
+  const sessions: SessionRecord[] = [];
+  for (const projectEntry of readdirSync(root, { withFileTypes: true })) {
+    if (!projectEntry.isDirectory()) continue;
+    const projectDir = join(root, projectEntry.name);
+    for (const fileName of readdirSync(projectDir)) {
+      if (!fileName.endsWith(".json")) continue;
+      if (!include(projectEntry.name, fileName.slice(0, -".json".length))) continue;
+      try {
+        sessions.push(readSessionFile(join(projectDir, fileName)));
+      } catch (error) {
+        if (!(error instanceof InvalidSessionMetadataError)) throw error;
+      }
+    }
+  }
+  return sessions;
 }
 
 // Group-atomic archival for session GC: moves every member's record (and its
@@ -2655,9 +2824,9 @@ function writeWorkItemLifecycles(
   records: Map<string, WorkItemLifecycleRecord>,
 ): void {
   writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
-    records: [...records.values()].sort((left, right) =>
-      left.externalId.localeCompare(right.externalId),
-    ),
+    records: [...records.values()]
+      .sort((left, right) => left.externalId.localeCompare(right.externalId))
+      .map(({ autoClose, ...record }) => ({ ...record, autoComplete: autoClose })),
   });
 }
 

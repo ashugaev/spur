@@ -123,6 +123,7 @@ async function scanFileForDeliveredText(
   filePath: string,
   startOffset: number,
   normalizedTarget: string,
+  floorMs?: number,
 ): Promise<boolean> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8", start: startOffset });
@@ -133,6 +134,13 @@ async function scanFileForDeliveredText(
         if (!trimmed) continue;
         const parsed = tryParseJson(trimmed);
         if (!parsed) continue;
+        // Fail closed: an entry with no readable timestamp cannot prove it
+        // post-dates the send.
+        if (floorMs !== undefined) {
+          const timestamp = parsed["timestamp"];
+          const entryMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+          if (!Number.isFinite(entryMs) || entryMs < floorMs) continue;
+        }
         const text = extractDeliveredText(parsed);
         // Raw first: a short send that is itself a pasted_content block is
         // recorded as typed, so unwrapping alone would miss it.
@@ -154,6 +162,10 @@ async function scanFileForDeliveredText(
   return false;
 }
 
+// The send's timestamp is taken before the pane write on the same host clock,
+// so a real ack is later; the margin absorbs ms rounding and clock slew.
+const CLAUDE_ACK_CLOCK_SKEW_MS = 1_000;
+
 export interface SubmitAckFileScanResult {
   found: boolean;
   scannedFile: string | null;
@@ -164,6 +176,7 @@ export async function scanClaudeJsonlForMessage(
   text: string,
   worktreePath: string,
   agentSessionId?: string,
+  options?: { notBeforeMs?: number },
 ): Promise<SubmitAckFileScanResult> {
   const normalizedTarget = normalize(text);
 
@@ -179,8 +192,13 @@ export async function scanClaudeJsonlForMessage(
   if (!latest || latest === baseline.file) {
     return { found: false, scannedFile: baseline.file };
   }
+  // A re-resolved transcript (after /clear or /resume) may hold an identical
+  // earlier prompt: only entries from this send on count. The baseline file is
+  // already bounded by its byte offset.
+  const floorMs =
+    options?.notBeforeMs !== undefined ? options.notBeforeMs - CLAUDE_ACK_CLOCK_SKEW_MS : undefined;
   return {
-    found: await scanFileForDeliveredText(latest, 0, normalizedTarget),
+    found: await scanFileForDeliveredText(latest, 0, normalizedTarget, floorMs),
     scannedFile: latest,
   };
 }

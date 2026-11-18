@@ -11,7 +11,7 @@ vi.mock("../../src/cursor-token-usage.js", () => ({
 
 const {
   ensureCodexHooksConfigMock,
-  ensureClaudeRestrictWritesSettingsMock,
+  ensureClaudeSettingsMock,
   captureCodexRolloutBaselineMock,
   scanCodexRolloutForMessageMock,
   captureClaudeSubmitBaselineMock,
@@ -32,7 +32,7 @@ const {
   readCursorTranscriptEntriesMock: vi.fn(),
   readClaudeSessionStatusMock: vi.fn(),
   ensureCodexHooksConfigMock: vi.fn(),
-  ensureClaudeRestrictWritesSettingsMock: vi.fn(),
+  ensureClaudeSettingsMock: vi.fn(),
   captureCodexRolloutBaselineMock: vi.fn(),
   scanCodexRolloutForMessageMock: vi.fn(),
   captureClaudeSubmitBaselineMock: vi.fn(),
@@ -57,7 +57,7 @@ vi.mock("../../src/agents/claude.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ClaudeModule>();
   return {
     ...actual,
-    ensureClaudeRestrictWritesSettings: ensureClaudeRestrictWritesSettingsMock,
+    ensureClaudeSettings: ensureClaudeSettingsMock,
   };
 });
 
@@ -123,7 +123,7 @@ import {
 
 beforeEach(() => {
   ensureCodexHooksConfigMock.mockReset();
-  ensureClaudeRestrictWritesSettingsMock.mockReset();
+  ensureClaudeSettingsMock.mockReset();
   captureCodexRolloutBaselineMock.mockReset();
   scanCodexRolloutForMessageMock.mockReset();
   captureClaudeSubmitBaselineMock.mockReset();
@@ -219,19 +219,28 @@ describe("setupAgentHooks", () => {
       expect.any(String),
     );
   });
-  it("does not configure hooks for claude", async () => {
+  it("always returns the claude settings path, without restrictWrites by default", async () => {
+    ensureClaudeSettingsMock.mockResolvedValue(
+      "/tmp/spur-data/session-tools/api-1/claude/settings.json",
+    );
+
     const result = await setupAgentHooks({
       agent: "claude",
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       sessionToolDir: "/tmp/spur-data/session-tools/api-1",
     });
 
-    expect(result).toEqual({});
+    expect(ensureClaudeSettingsMock).toHaveBeenCalledWith("/tmp/spur-data/session-tools/api-1", {
+      restrictWrites: false,
+    });
+    expect(result).toEqual({
+      claudeSettingsPath: "/tmp/spur-data/session-tools/api-1/claude/settings.json",
+    });
     expect(ensureCodexHooksConfigMock).not.toHaveBeenCalled();
   });
 
-  it("returns claude settings path when restrictWrites is enabled", async () => {
-    ensureClaudeRestrictWritesSettingsMock.mockResolvedValue(
+  it("passes restrictWrites to the claude settings generator", async () => {
+    ensureClaudeSettingsMock.mockResolvedValue(
       "/tmp/spur-data/session-tools/api-1/claude/settings.json",
     );
 
@@ -242,9 +251,9 @@ describe("setupAgentHooks", () => {
       restrictWrites: true,
     });
 
-    expect(ensureClaudeRestrictWritesSettingsMock).toHaveBeenCalledWith(
-      "/tmp/spur-data/session-tools/api-1",
-    );
+    expect(ensureClaudeSettingsMock).toHaveBeenCalledWith("/tmp/spur-data/session-tools/api-1", {
+      restrictWrites: true,
+    });
     expect(result).toEqual({
       claudeSettingsPath: "/tmp/spur-data/session-tools/api-1/claude/settings.json",
     });
@@ -596,6 +605,7 @@ describe("createAgentSubmitAckBinding", () => {
       "hello",
       ctx.worktreePath,
       undefined,
+      undefined,
     );
   });
 
@@ -617,6 +627,29 @@ describe("createAgentSubmitAckBinding", () => {
       "hello",
       ctx.worktreePath,
       "pinned-uuid",
+      undefined,
+    );
+  });
+
+  it("forwards ackNotBeforeMs to the claude scan", async () => {
+    captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/some/file.jsonl", size: 42 });
+    scanClaudeJsonlForMessageMock.mockResolvedValue({
+      found: false,
+      scannedFile: "/some/file.jsonl",
+    });
+
+    const binding = await createAgentSubmitAckBinding("claude", {
+      ...ctx,
+      agentSessionId: "pinned-uuid",
+      ackNotBeforeMs: 1_700_000_000_000,
+    });
+    await binding?.scan("hello");
+    expect(scanClaudeJsonlForMessageMock).toHaveBeenCalledWith(
+      { file: "/some/file.jsonl", size: 42 },
+      "hello",
+      ctx.worktreePath,
+      "pinned-uuid",
+      { notBeforeMs: 1_700_000_000_000 },
     );
   });
 

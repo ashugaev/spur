@@ -52,6 +52,10 @@ interface DirectTerminalProps {
   activity?: SpurSessionState | null;
   title?: string;
   onClose?: () => void;
+  /** Embedded in a dialog that already carries a title and close button. */
+  hideHeader?: boolean;
+  /** Phone-only Esc, up and down keys under the terminal, for native CLI prompts; Enter is in the control row. */
+  keyBar?: boolean;
 }
 
 interface TerminalLocation {
@@ -73,6 +77,20 @@ const TERMINAL_ARROW_CONTROLS = [
   { label: "Arrow Up", iconPath: "M5 15l7-7 7 7", sequence: "\x1b[A" },
   { label: "Arrow Down", iconPath: "M19 9l-7 7-7-7", sequence: "\x1b[B" },
   { label: "Arrow Right", iconPath: "M9 5l7 7-7 7", sequence: "\x1b[C" },
+] as const;
+
+const TERMINAL_KEY_BAR = [
+  { label: "Esc", name: "Escape", sequence: "\x1b" },
+  {
+    label: "↑",
+    name: TERMINAL_ARROW_CONTROLS[1].label,
+    sequence: TERMINAL_ARROW_CONTROLS[1].sequence,
+  },
+  {
+    label: "↓",
+    name: TERMINAL_ARROW_CONTROLS[2].label,
+    sequence: TERMINAL_ARROW_CONTROLS[2].sequence,
+  },
 ] as const;
 
 function isRetryableClose(code: number): boolean {
@@ -230,6 +248,8 @@ export function DirectTerminal({
   activity,
   title,
   onClose,
+  hideHeader = false,
+  keyBar = false,
 }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstanceRef = useRef<TerminalType | null>(null);
@@ -933,57 +953,81 @@ export function DirectTerminal({
     "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
-      <div
-        className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2"
-        data-testid="direct-terminal-header"
-      >
-        <TerminalStatusDot activity={activity} error={error} wsStatus={status} />
-        {title ? (
-          <div
-            className="min-w-0 flex-1 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
-            data-testid="direct-terminal-header-title"
-            title={title}
-          >
-            {title}
-          </div>
-        ) : null}
-        {/* Never truncates: the title yields space, this label just butts against it. */}
+    <div className="flex h-full min-h-0 flex-col overflow-hidden border-0 border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] sm:border">
+      {hideHeader ? null : (
         <div
-          className="ml-auto shrink-0 whitespace-nowrap text-[10px] leading-4 text-[var(--color-text-tertiary)]"
-          data-testid="direct-terminal-header-agent"
+          className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2"
+          data-testid="direct-terminal-header"
         >
-          {getAgentDisplayName(agent)}
-          {model ? ` • ${model}` : null}
-        </div>
-        {onClose ? (
-          <button
-            aria-label="Close terminal"
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
-            onClick={onClose}
-            type="button"
-          >
-            <svg
-              aria-hidden="true"
-              className="h-4 w-4"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              viewBox="0 0 24 24"
+          <TerminalStatusDot activity={activity} error={error} wsStatus={status} />
+          {title ? (
+            <div
+              className="min-w-0 flex-1 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
+              data-testid="direct-terminal-header-title"
+              title={title}
             >
-              <path d="M6 6l12 12M18 6L6 18" />
-            </svg>
-          </button>
-        ) : null}
-      </div>
+              {title}
+            </div>
+          ) : null}
+          {/* Never truncates: the title yields space, this label just butts against it. */}
+          <div
+            className="ml-auto shrink-0 whitespace-nowrap text-[10px] leading-4 text-[var(--color-text-tertiary)]"
+            data-testid="direct-terminal-header-agent"
+          >
+            {getAgentDisplayName(agent)}
+            {model ? ` • ${model}` : null}
+          </div>
+          {onClose ? (
+            <button
+              aria-label="Close terminal"
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+              onClick={onClose}
+              type="button"
+            >
+              <svg
+                aria-hidden="true"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                viewBox="0 0 24 24"
+              >
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          ) : null}
+        </div>
+      )}
 
       <div
-        className="min-h-0 flex-1 p-1.5"
+        className="min-h-0 flex-1 px-1.5 py-0 sm:p-1.5"
         data-testid="direct-terminal-surface"
         onPasteCapture={handleTerminalPaste}
       >
-        <div ref={terminalRef} className="h-full min-h-0" />
+        {/* Touch phones overlay the scrollbar, but FitAddon still reserves its fixed 14px
+            (DEFAULT_SCROLL_BAR_WIDTH); the negative margin hands that width back to the terminal. */}
+        <div ref={terminalRef} className="h-full min-h-0 max-sm:pointer-coarse:-mr-3.5" />
       </div>
+      {keyBar ? (
+        <div
+          aria-label="Terminal keys"
+          className="flex gap-1 border-t border-[var(--color-border-subtle)] p-1.5 sm:hidden"
+          data-testid="terminal-key-bar"
+          role="group"
+        >
+          {TERMINAL_KEY_BAR.map((key) => (
+            <button
+              aria-label={key.name}
+              className="h-8 flex-1 border border-[var(--color-border-default)] font-mono text-[10px] uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] active:bg-[var(--color-hover-overlay)]"
+              key={key.name}
+              onClick={() => sendTerminalInput(key.sequence)}
+              type="button"
+            >
+              {key.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {(voice.voiceError ?? submitError) ? (
         <div className="border-t border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
           {voice.voiceError ?? submitError}

@@ -4,7 +4,7 @@ export const WORK_ITEM_RETRY_INTERVAL_MS = 45 * 60_000;
 export const WORK_ITEM_RETRY_EMIT_CAP = 2;
 
 export type WorkItemRecordBase = WorkItemEventData & {
-  autoComplete: boolean;
+  autoClose: boolean;
   createdAt: string;
   lastRetryEmitAt?: string;
   spawnWorkId?: string | null;
@@ -84,7 +84,7 @@ export function buildWorkItemRecord(
     number: base.number,
     title: base.title,
     repo: base.repo,
-    autoComplete: base.autoComplete,
+    autoClose: base.autoClose,
     createdAt: base.createdAt,
     ...(base.lastRetryEmitAt !== undefined ? { lastRetryEmitAt: base.lastRetryEmitAt } : {}),
     ...(typeof base.spawnWorkId === "string" ? { spawnWorkId: base.spawnWorkId } : {}),

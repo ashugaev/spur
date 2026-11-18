@@ -1,22 +1,27 @@
 import type { HostMemory } from "./host-memory.js";
 import type { CursorPersistedSubmitBaseline } from "./agents/cursor-submit-ack.js";
+import type { AuthSession } from "./auth-proxy.js";
 
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
 export const AUTOMATIC_REMINDER_MAX_ATTEMPTS = 3;
+export const AUTH_CHANGE_PING_MAX_ATTEMPTS = 2;
 
-export type SessionStatus =
-  | "spawning"
-  | "running"
-  | "stopped"
-  | "budget_limited"
-  | "paused"
-  | "errored"
-  | "completed"
-  | "killed";
+export const SESSION_STATUSES = [
+  "spawning",
+  "running",
+  "stopped",
+  "budget_limited",
+  "paused",
+  "errored",
+  "completed",
+  "killed",
+] as const;
+export type SessionStatus = (typeof SESSION_STATUSES)[number];
 export const SESSION_STATES = [
   "working",
   "waiting",
+  "completed",
   "needs_input",
   "rate_limited",
   "stale",
@@ -34,7 +39,31 @@ export function isStaleParked(session: Pick<SessionRecord, "status" | "stopReaso
   return session.status === "stopped" && session.stopReason === "stale_timeout";
 }
 
-export type StateSource = "jsonl" | "codex_stale" | "hook" | "claude_status" | "status";
+export type StateSource =
+  | "jsonl"
+  | "codex_stale"
+  | "hook"
+  | "claude_status"
+  | "status"
+  | "task_status";
+
+export interface TaskStatusDeclaration {
+  state: "completed" | "needs_input";
+  revision: number;
+  agentLaunchId: string;
+  updatedAt: string;
+}
+
+export interface TaskStatusView {
+  revision: number;
+  state?: TaskStatusDeclaration["state"];
+}
+
+export interface TaskStatusRequest {
+  state: TaskStatusDeclaration["state"] | "clear";
+  revision: number;
+  agentLaunchId: string;
+}
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -49,6 +78,39 @@ export type SessionLogScope = "all" | "runtime" | "service" | "sidecar";
 export interface SessionLink {
   label: string;
   url: string;
+}
+export interface SessionLinkFilter {
+  label: string;
+  url?: string;
+}
+
+interface SessionTransitionFields {
+  cursor: string;
+  sessionId: string;
+  project: string;
+  at: string;
+  links: SessionLink[];
+  reason?: string;
+  stopReason?: string;
+  error?: string;
+  rateLimitResetAt?: string;
+  successorId?: string;
+}
+export type SessionTransition = SessionTransitionFields &
+  (
+    | { kind: "status"; from: SessionStatus | null; to: SessionStatus }
+    | { kind: "state"; from: SessionState | null; to: SessionState }
+  );
+export interface SessionTransitionsQuery {
+  since?: string;
+  links?: SessionLinkFilter[];
+  limit?: number;
+  kinds?: ("status" | "state")[];
+}
+export interface SessionTransitionsResponse {
+  entries: SessionTransition[];
+  nextCursor: string;
+  hasMore: boolean;
 }
 export type SessionSlotTitleSource = "manual" | "agent";
 export interface SessionPrBinding {
@@ -180,6 +242,10 @@ export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 export const GITHUB_PR_OCCURRENCE_KINDS = ["review_requested"] as const;
 export type GitHubPrOccurrenceKind = (typeof GITHUB_PR_OCCURRENCE_KINDS)[number];
 
+// GitHub-only signal kinds that report a PR state, not a lifecycle transition.
+export const GITHUB_PR_STATE_KINDS = ["out_of_date"] as const;
+export type GitHubPrStateKind = (typeof GITHUB_PR_STATE_KINDS)[number];
+
 export const GITHUB_PR_LIFECYCLE_KINDS = [
   "ready_for_review",
   "approved",
@@ -265,7 +331,7 @@ export interface WorkItemMember {
 }
 
 interface WorkItemLifecycleBase extends WorkItemEventData {
-  autoComplete: boolean;
+  autoClose: boolean;
   createdAt: string;
   members: WorkItemMember[];
   /** Legacy work-item journal retained until every desired member transfers. */
@@ -604,7 +670,7 @@ export interface TriggerSpawnBlockConfig {
 
 export interface TriggerSpawnConfig {
   blocks: TriggerSpawnBlockConfig[];
-  autoComplete?: boolean;
+  autoClose?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
 }
@@ -631,7 +697,7 @@ export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
 export interface ReviewSignal {
   key: string;
-  kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind;
+  kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind | GitHubPrStateKind;
   text: string;
   providerThreadTarget?: AutoPingThreadTarget;
   /** Until-change mute key: a different value means the subject changed. */
@@ -880,6 +946,61 @@ export interface ProjectConfig {
   tokenBudget?: number;
   tokenBudgetWarnOnly?: boolean;
   staleAfterMinutes?: number;
+  snapshots?: ProjectSnapshotsConfig;
+  closeout?: ProjectCloseoutConfig;
+}
+
+export interface ProjectSnapshotsConfig {
+  enabled?: boolean;
+  maxBytes?: number;
+  requireFinal?: boolean;
+  freshnessMinutes?: number;
+}
+
+export type CloseoutRoot = "artifacts" | "work" | "workspace";
+
+export interface ProjectCloseoutConfig {
+  enabled?: boolean;
+  include?: string[];
+  maxBytes?: number;
+  retentionDays?: number;
+}
+
+export interface CloseoutManifest {
+  version: number;
+  sessionId: string;
+  project: string;
+  completedAt: string;
+  links: SessionLink[];
+  snapshotVersion: number | null;
+  headSha: string | null;
+  files: { root: CloseoutRoot; path: string; bytes: number; sha256: string }[];
+  skipped: {
+    root: CloseoutRoot;
+    path: string;
+    bytes: number;
+    reason: "max_bytes" | "unreadable" | "changed" | "unverified";
+  }[];
+  missingRoots: CloseoutRoot[];
+  error?: string;
+  expiredAt?: string;
+}
+
+export interface CloseoutManifestView extends CloseoutManifest {
+  /** Every archive version of the session, ascending. */
+  versions: number[];
+}
+
+/** Added to a complete result when the archive listed files it could not verify. */
+export interface CloseoutReport {
+  unverified: number;
+}
+export type CompleteSessionResult = SessionView & { closeout?: CloseoutReport };
+
+export interface CloseoutEntry {
+  sessionId: string;
+  status: SessionStatus;
+  manifest: CloseoutManifestView;
 }
 
 export type ProviderReasoningEffort =
@@ -1087,7 +1208,7 @@ export interface AppConfig {
     autoRotateOnRateLimit: boolean;
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
-    // Manual "Switch auth" surface: daemon route plus SessionView.claudeAccounts.
+    // Legacy Claude session-menu visibility; managed selection is always available.
     switchAuth: boolean;
   };
   diskRetention: {
@@ -1226,12 +1347,21 @@ export interface CursorRestoreBoundary {
   offset: number;
 }
 
+export interface ClaudeStatusOwner {
+  agentLaunchId: string;
+  agentSessionId: string;
+  pid: number;
+  procStart?: string;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
   /** Internal durable trigger birth identity and original request. */
   triggerBirthKey?: string;
   triggerBirthRequest?: SpawnSessionRequest;
+  /** Internal: last keyed handoff of this source. */
+  handoffIdempotency?: HandoffIdempotencyReceipt;
   // The id of the workspace (shared git worktree) this session lives in.
   // Equals the session's own id for a session that does not share a
   // workspace; otherwise the id of the session whose workspace it joined
@@ -1256,7 +1386,10 @@ export interface SessionRecord {
   closeoutOwner?: boolean;
   prAlertTransfer?: PrAlertTransfer;
   claudeAccountId?: string;
+  auth?: AuthSession;
   allowedTriggers?: string[];
+  /** Send trigger ids already announced to the owner; one notice per id. */
+  blockedTriggerNotices?: string[];
   agentSessionId?: string;
   /** Cursor transcript position before the latest restore; excludes earlier activity from state. */
   cursorRestoreBoundary?: CursorRestoreBoundary;
@@ -1276,6 +1409,8 @@ export interface SessionRecord {
   launchCommand: string;
   /** Opaque identity shared only by one agent launch and its process tree. */
   agentLaunchId?: string;
+  taskStatusRevision?: number;
+  taskStatus?: TaskStatusDeclaration;
   status: SessionStatus;
   /** "memory_shed" is written only by the critical memory shed's session stop. */
   stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget" | "runtime_lost";
@@ -1291,6 +1426,8 @@ export interface SessionRecord {
   slots?: SessionSlots;
   /** Set when a work-item spawn trigger created this session; lets a retry find it after a lost spawn. */
   triggerOrigin?: WorkItemTriggerOrigin;
+  /** Distinguishes a captured empty terminal slot state from a legacy record. */
+  terminalSlotsCaptured?: true;
   selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
   // Sidecar names that were tmux-alive at park time (stale_timeout), replayed
@@ -1311,7 +1448,8 @@ export interface SessionRecord {
    * ISO time of a launch or send whose submit never confirmed. Every typed
    * send holds while set. A launch hold clears on the first transcript
    * activity after it; a send's hold (with `queuedMessageTyped`) clears only
-   * on the agent's ack of that text. Read from the legacy
+   * on the agent's ack of that text, or releases once it has stood past
+   * `SUBMIT_HOLD_CEILING_MS` with the agent at its prompt. Read from the legacy
    * `launchUnconfirmedAt` on older records.
    */
   submitUnconfirmedAt?: string;
@@ -1330,23 +1468,46 @@ export interface SessionRecord {
    */
   submitRequeuedMessage?: string;
   /**
-   * A send the agent never acked, after its one re-queue: the hold is
-   * released, the text shown with Retry and Dismiss until the user acts.
+   * A send the agent never acked, after its one re-queue or past the hold
+   * ceiling: the hold is released, the text shown with Retry and Dismiss until the user acts.
    */
   submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
+  /**
+   * Pid (and start time) of the pane's interactive claude that last reported
+   * agentSessionId for agentLaunchId; a session-id change is accepted only from
+   * it. Ignored when agentLaunchId differs.
+   */
+  claudeStatusOwner?: ClaudeStatusOwner;
   rateLimitedAt?: string;
+  /** Known active provider reset instant, ISO UTC; absent when unknown or cleared. */
+  rateLimitResetAt?: string;
+  rateLimitClearFence?: {
+    agentLaunchId: string | null;
+    /** Source key -> captured occurrence count; unkeyed readers use the file path. */
+    sourceOrdinals: Record<string, number>;
+    paneLatched: boolean;
+  };
+  /** One continue ping per account change: key is `generation:effectiveAccountId`, written before the send. */
+  authChangePing?: { key: string; attempts: number; pinged: boolean };
   serverErrorAt?: string;
   serverErrorReactivationAttempts?: number;
   todoNudge?: { fingerprint: string; attempts: number };
+  snapshotNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
   /** Internal provenance for a retained session error; absent on legacy records. */
   errorSource?: "inferred_runtime_exit" | "runtime_probe" | "other";
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
   todoLedgerVersion?: 1;
+}
+
+export interface RateLimitClearResult {
+  sessionId: string;
+  state: SessionState;
+  deliveryScheduled: boolean;
 }
 
 // Terminal-for-lifecycle predicate. Gates ~16 session-service.ts call sites
@@ -1400,6 +1561,8 @@ export interface SessionDeskMember {
 
 export interface CompleteDeskResponse {
   completedIds: string[];
+  /** Summed over members; present when the archives listed unverified files. */
+  closeout?: CloseoutReport;
   lifecycle: SessionLifecycleSnapshot;
 }
 
@@ -1453,9 +1616,15 @@ export interface SessionView extends Omit<
   | "queuedMessages"
   | "prAlertTransfer"
   | "agentLaunchId"
+  | "claudeStatusOwner"
+  | "taskStatusRevision"
+  | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
   | "triggerOrigin"
+  | "handoffIdempotency"
+  | "blockedTriggerNotices"
+  | "spawnIntent"
   | "sidecarLaunches"
   | "tokenUsage"
   | "preflightTokenUsage"
@@ -1463,7 +1632,10 @@ export interface SessionView extends Omit<
   | "codexRestoreStartedAt"
   | "restoredAt"
   | "errorSource"
+  | "terminalSlotsCaptured"
+  | "snapshotNudge"
 > {
+  spawnIntent?: Omit<DurableSpawnIntent, "closeoutTakenFrom">;
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1480,6 +1652,7 @@ export interface SessionView extends Omit<
   deskGroupMembers?: SessionDeskMember[];
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
+  authError?: string;
   queuedMessages?: SessionQueuedMessagesView;
   tokenUsageView?: SessionTokenUsageView;
   preflightTokenUsageView?: PreflightTokenUsageView;
@@ -1490,6 +1663,10 @@ export interface SessionView extends Omit<
    * not waiting.
    */
   queuedAheadReason?: "no_interrupt";
+  /** Explicit immediate-interrupt send response only; never persisted. */
+  sendOutcome?:
+    | { kind: "sent"; interrupted: boolean }
+    | { kind: "queued"; reason: "interrupt_guard" | "no_interrupt" };
 }
 
 /**
@@ -1512,16 +1689,25 @@ export type DashboardOmittedField =
   | "allowedTriggers"
   | "agentSessionId"
   | "agentLaunchId"
+  | "claudeStatusOwner"
+  | "taskStatusRevision"
+  | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
   | "triggerOrigin"
+  | "handoffIdempotency"
+  | "blockedTriggerNotices"
+  | "spawnIntent"
   | "sidecarLaunches"
   | "branchSource"
   | "tokenUsage"
   | "preflightTokenUsage"
-  | "errorSource";
+  | "errorSource"
+  | "terminalSlotsCaptured"
+  | "snapshotNudge";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
+  spawnIntent?: SessionView["spawnIntent"];
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1624,11 +1810,16 @@ export interface SpawnSessionRequest {
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
-  // Claude account whose CLAUDE_CONFIG_DIR the launch binds to. Carried across
-  // respawn so a rotated session relaunches onto its current account instead of
-  // falling back to the (still-rate-limited) default.
+  /** Saved provider account; omitted or null selects the managed Auto pool. */
+  authAccountId?: string | null;
+  /** Compatibility alias for a Claude profile. */
   claudeAccountId?: string;
   subscriptions?: SubscribeSessionStatesRequest[];
+  idempotencyKey?: string;
+}
+
+export interface SpawnSessionResponse extends SessionView {
+  replayed?: true;
 }
 
 export interface DurableSpawnReceipt {
@@ -1657,6 +1848,8 @@ export interface DurableSpawnIntent {
   };
   pane?: { pid: number; starttime: number };
   telegramOrigin?: TelegramSpawnOrigin;
+  /** Closeout owners this launch took; given back if the launch finally fails. */
+  closeoutTakenFrom?: string[];
 }
 
 /**
@@ -1800,6 +1993,11 @@ export type TodoActor =
 
 export type TodoBlocker = { kind: "external" } | { kind: "human"; requiredAction: string };
 
+export interface TodoHandoffRef {
+  sessionId: string;
+  itemId: string;
+}
+
 interface TodoEventBase {
   version: 1;
   eventId: string;
@@ -1814,11 +2012,18 @@ export type TodoEvent =
       itemId: string;
       text: string;
       reason: string;
+      handoffFrom?: TodoHandoffRef;
     })
   | (TodoEventBase & {
-      type: "item_completed" | "item_cancelled";
+      type: "item_completed";
       itemId: string;
       reason: string;
+    })
+  | (TodoEventBase & {
+      type: "item_cancelled";
+      itemId: string;
+      reason: string;
+      handoffTo?: TodoHandoffRef;
     })
   | (TodoEventBase & {
       type: "item_held";
@@ -1841,6 +2046,8 @@ export interface TodoItemProjection {
   text: string;
   status: "open" | "held" | "completed" | "cancelled";
   added: { reason: string; actor: TodoActor; at: string };
+  handoffFrom?: TodoHandoffRef;
+  handoffTo?: TodoHandoffRef;
   latestTransition?: {
     type: "completed" | "cancelled" | "held" | "resumed";
     reason?: string;
@@ -1877,6 +2084,58 @@ export type TodoMutationRequest =
       requiredHumanAction?: string;
     }
   | { action: "resume"; itemId: string };
+
+export type WorkSnapshotTrigger = "manual" | "timer" | "hook" | "event" | "final";
+
+export interface WorkSnapshotMeta {
+  version: number;
+  at: string;
+  sessionId: string;
+  project: string;
+  agent: AgentName;
+  model: string | null;
+  branch: string | null;
+  headSha: string | null;
+  dirty: boolean | null;
+  todoRevision: string;
+  links: SessionLink[];
+  trigger: WorkSnapshotTrigger;
+  final: boolean;
+}
+
+export interface WorkSnapshot extends WorkSnapshotMeta {
+  content: string;
+}
+
+export interface WorkSnapshotFreshness {
+  /** Whole seconds since the snapshot, never negative. */
+  ageSeconds: number;
+  /** ISO instant of the agent's first own work after `at`; null when none. */
+  activitySince: string | null;
+  /** Commits on HEAD after the snapshot's headSha; null when not countable. */
+  commitsSince: number | null;
+  /** The agent worked more than freshnessMinutes after `at`. */
+  stale: boolean;
+}
+
+export interface WorkSnapshotRead extends WorkSnapshot {
+  freshness: WorkSnapshotFreshness;
+  /** Completed ToDo items; present only when requested. Null: ledger unreadable. */
+  done?: TodoItemProjection[] | null;
+}
+
+export interface LatestSnapshotEntry {
+  sessionId: string;
+  status: SessionStatus;
+  /** Last observed state, not re-checked; null when never observed. */
+  state: SessionState | null;
+  snapshot: WorkSnapshotRead;
+}
+
+export interface WriteSnapshotRequest {
+  content: string;
+  final?: boolean;
+}
 
 export interface KillSessionRequest {
   force?: boolean;
@@ -1924,6 +2183,12 @@ export interface SpawnBatchConflictPayload {
   error: string;
 }
 
+export interface IdempotencyKeyConflictPayload {
+  code: "idempotency_key_conflict";
+  sessionId: string;
+  error: string;
+}
+
 export interface RespawnSessionRequest {
   prompt?: string;
   attachments?: SendMessageAttachment[];
@@ -1940,6 +2205,19 @@ export interface HandoffSessionRequest {
   model?: string;
   reasoningEffort?: ProviderReasoningEffort | null;
   notes?: string;
+  idempotencyKey?: string;
+}
+
+export interface HandoffIdempotencyReceipt {
+  key: string;
+  request: Omit<HandoffSessionRequest, "idempotencyKey">;
+  successorId: string;
+  movedTodoItems: number;
+}
+
+export interface HandoffSessionResponse extends SessionView {
+  movedTodoItems: number;
+  replayed?: true;
 }
 
 export interface UpdateSessionSlotsRequest {
@@ -2212,6 +2490,8 @@ export type TranscriptEntry =
       inputSummary?: string;
       output?: string;
       timestampMs?: number;
+      /** Claude Bash call that touches the session's Spur tools; its input is not kept otherwise. */
+      spurCall?: true;
     }
   | { kind: "reasoning"; text: string; timestampMs?: number }
   | {

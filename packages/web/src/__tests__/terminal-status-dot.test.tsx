@@ -3,6 +3,13 @@ import { describe, expect, it } from "vitest";
 import { TerminalStatusDot } from "@/components/TerminalStatusDot";
 
 describe("TerminalStatusDot", () => {
+  it("renders task completion without pulsing", () => {
+    render(<TerminalStatusDot wsStatus="connected" activity="completed" />);
+    const dot = screen.getByTestId("direct-terminal-header-status-dot");
+    expect(dot).toHaveAttribute("title", "completed");
+    expect(dot).toHaveStyle({ background: "var(--color-status-ready)" });
+    expect(dot.className).not.toContain("dot-pulse");
+  });
   it("renders the connecting state with a pulse", () => {
     render(<TerminalStatusDot wsStatus="connecting" />);
     const dot = screen.getByTestId("direct-terminal-header-status-dot");

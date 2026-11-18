@@ -35,6 +35,13 @@ const activityConfig: Record<string, ActivityConfig> = {
     bg: "var(--color-dot-bg-waiting)",
     text: "var(--color-status-attention)",
   },
+  completed: {
+    label: "completed",
+    dot: "var(--color-status-ready)",
+    bg: "var(--color-dot-bg-ready)",
+    text: "var(--color-status-ready)",
+  },
+  closed: { ...inactiveConfig, label: "closed" },
   needs_input: { ...errorConfig, label: "needs input" },
   rate_limited: {
     label: "rate limited",

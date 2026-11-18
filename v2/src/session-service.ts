@@ -10,6 +10,14 @@ import {
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { getBuildId } from "./build-identity.js";
 import {
+  closeoutDirAt,
+  closeoutSettings,
+  expireCloseout,
+  readCloseoutManifest,
+  resolveCloseoutFile,
+  writeCloseoutArchive,
+} from "./closeout-archive.js";
+import {
   consentPolicy,
   proposeConsent,
   presentConsent,
@@ -26,7 +34,27 @@ import {
   SessionLifecycleError,
   SessionLifecycleRegister,
 } from "./session-lifecycle.js";
-import { userInfo } from "node:os";
+import { homedir, userInfo } from "node:os";
+import { fileURLToPath } from "node:url";
+import {
+  AuthorizationError,
+  AuthAccounts,
+  authDisplayNames,
+  withCompanionIdentity,
+  type AuthProvider,
+  type AuthAccountSummary,
+} from "./auth-accounts.js";
+import { AuthQuota } from "./auth-quota.js";
+import {
+  AuthProxy,
+  authProxyBinaryPath,
+  type AuthRegistration,
+  type AuthLogin,
+  type AuthLoginMethod,
+  type AuthProxyState,
+  type AuthRotation,
+} from "./auth-proxy.js";
+import { managedAuthLaunch, publicAuthSession, scrubManagedClaudeHome } from "./auth-launch.js";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
 import {
@@ -116,16 +144,21 @@ import {
 } from "./branch-name.js";
 import {
   findLatestSessionFile as findLatestClaudeSessionFile,
-  claudeCommand,
   DEFAULT_CLAUDE_MODEL,
+  claudeCommand,
 } from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
   CODEX_HOME_DIR,
+  codexArgsSelectProvider,
+  codexCommand,
   codexHookHomePath,
+  codexUsesCustomProvider,
   findLatestCodexSessionFile,
   readCodexConversationTail,
   readCodexRolloutState,
+  readCodexTranscriptEntries,
+  readCodexUserConfig,
   type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
@@ -149,6 +182,21 @@ import {
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
+  readFreshSessionQuota,
+  readHostCredentialSources,
+  type QuotaSourceResult,
+  type UsageReportDeps,
+} from "./usage-report.js";
+import {
+  AuthAlerts,
+  logAuthFailed,
+  observeHostSource,
+  type AlertEvaluationInput,
+  type AuthAlert,
+  type ManagedBreakage,
+} from "./auth-alerts.js";
+import { AuthTerminalLogins, type TerminalLogin } from "./auth-terminal-login.js";
+import {
   ACTIVITY_WINDOW_MS,
   CONVERSATION_PAGE_ENTRIES,
   readClaudeConversationTail,
@@ -168,20 +216,7 @@ import {
   historyStampKey,
   historyStampSessionId,
 } from "./agent-history-delta.js";
-import {
-  addAccount,
-  ensureDefaultAccount,
-  findAccount,
-  isAccountAuthenticated,
-  isAccountReady,
-  listAccounts,
-  removeAccount,
-  seedSessionHome,
-  sessionClaudeHome,
-  swapSessionCredentials,
-  touchAccountUsed,
-  type ClaudeAccount,
-} from "./claude-accounts.js";
+import { findAccount, seedSessionHome, sessionClaudeHome } from "./claude-accounts.js";
 import {
   buildSidecarLinkUrl,
   DEFAULT_PROJECT_CONFIG_FILES,
@@ -204,6 +239,7 @@ import {
   extractBareUserTask,
   renderHandoffPrompt,
   wrapShepherdSpawnPrompt,
+  type HandoffPromptSnapshot,
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import {
@@ -222,6 +258,7 @@ import {
   sessionUserActionLogPath,
 } from "./user-action-log.js";
 import { archivePath, tryRotate } from "./jsonl-log-io.js";
+import { SessionTransitions } from "./session-transitions.js";
 import { DISK_PROBE_TIMEOUT_MS, readFreeKb } from "./disk-space.js";
 import { reserveNextSessionId } from "./ids.js";
 import {
@@ -291,6 +328,9 @@ import {
   writeTelegramReplyTarget,
   writeServiceInstance,
   writeSession,
+  observeSessionWrites,
+  withSessionWriteGuard,
+  listArchivedSessions,
 } from "./metadata.js";
 import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
@@ -349,13 +389,16 @@ import {
 import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
+  SNAPSHOT_TOOL_NAME,
   TODO_TOOL_NAME,
+  TASK_STATUS_TOOL_NAME,
   applyNormalizedSlotsUpdate,
   applySlotsUpdate,
   ensureSessionSlotTool,
   normalizeSlotLinks,
   normalizeSlotLabel,
   normalizeSlotUrl,
+  matchesSessionLinks,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
   slotToolDir,
@@ -370,6 +413,8 @@ import {
   isImageArtifactPath,
   listSessionArtifacts,
   readSessionArtifact,
+  SESSION_WORK_DIR,
+  sessionArtifactsDir,
   setSessionArtifactOrigin,
   setSessionArtifactUserAdded,
   type SessionArtifactFile,
@@ -393,6 +438,7 @@ import { readDiskBudgetReport } from "./disk-budget.js";
 import {
   deleteWorkspaceState,
   readPrAlertOwnership,
+  readWorkspaceState,
   resolveWorkspaceState,
   writeWorkspaceState,
   type WorkspaceState,
@@ -457,7 +503,19 @@ import {
   type RegistryScanResult,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
-import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
+import {
+  CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+  RATE_LIMIT_REACTIVATION_PROMPT,
+} from "./reactivation-prompts.js";
+import {
+  DEFAULT_DAILY_WAKE_MESSAGE,
+  DEFAULT_INTERVAL_WAKE_MESSAGE,
+  DEFAULT_WAKE_MESSAGE,
+  formatDailyWakeMessage,
+  formatIntervalWakeMessage,
+  normalizeDailyWakeTimes,
+  resolveNextDailyWakeAt,
+} from "./wake-schedule.js";
 import { reconcileTokenUsage, type ProviderTokenUsageSample } from "./token-usage.js";
 import {
   PreflightBatchClaimedError,
@@ -507,7 +565,11 @@ import {
   type PreflightTokenUsageView,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
+  type HandoffIdempotencyReceipt,
   type HandoffSessionRequest,
+  type HandoffSessionResponse,
+  type IdempotencyKeyConflictPayload,
+  type SpawnSessionResponse,
   type RespawnSessionRequest,
   type RestoreSessionRequest,
   type RunServiceRequest,
@@ -555,6 +617,8 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type ClaudeStatusOwner,
+  type RateLimitClearResult,
   type PrAlertTransfer,
   type DurableSpawnIntent,
   type CursorRestoreBoundary,
@@ -574,6 +638,8 @@ import {
   type SidecarStopView,
   type SessionListItemView,
   type SessionStateTransition,
+  type SessionTransitionsQuery,
+  type SessionTransitionsResponse,
   type SubscribeSessionStatesRequest,
   type SessionWorkspaceAccess,
   type UpdateProjectRequest,
@@ -586,12 +652,39 @@ import {
   type UpdateSessionSlotsRequest,
   type UpdateSessionSlotsResponse,
   type TodoActor,
+  AUTH_CHANGE_PING_MAX_ATTEMPTS,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
   type TodoProjection,
+  type LatestSnapshotEntry,
+  type SessionLink,
+  type SessionLinkFilter,
+  type CloseoutEntry,
+  type CloseoutManifestView,
+  type CloseoutReport,
+  type CompleteSessionResult,
+  type TodoItemProjection,
+  type WorkSnapshot,
+  type WorkSnapshotFreshness,
+  type WorkSnapshotMeta,
+  type TaskStatusRequest,
+  type TaskStatusView,
+  type WorkSnapshotRead,
 } from "./types.js";
 import {
+  clearTaskStatus,
+  projectTaskStatus,
+  readTaskStatus as taskStatusView,
+  TaskStatusError,
+} from "./task-status.js";
+import {
+  closeTodoItems,
   ensureTodoLedger,
+  inheritTodo,
+  planHandoffReconcile,
+  planHandoffTodo,
+  readTodoIfPresent,
+  type HandoffTodoItem,
   mutateTodo as applyTodoMutation,
   TodoEmptyLedgerError,
   TodoLedgerCorruptError,
@@ -600,6 +693,24 @@ import {
   todoLedgerBlock,
   unfinishedTodo,
 } from "./todo.js";
+import {
+  listSnapshots,
+  readSnapshot as readSnapshotVersion,
+  firstAgentWorkMs,
+  lastAgentWorkMs,
+  snapshotAgeSeconds,
+  snapshotDirAt,
+  snapshotDue,
+  snapshotGateBlock,
+  snapshotRequestMessage,
+  snapshotSettings,
+  writeSnapshot as storeSnapshot,
+  SnapshotConflictError,
+  SnapshotCorruptError,
+  WorkSnapshotRequiredError,
+  type SnapshotListQuery,
+  type SnapshotLocation,
+} from "./snapshots.js";
 import { cursorShowsReadyPrompt } from "./cursor-state.js";
 import { readCursorTokenUsage } from "./cursor-token-usage.js";
 import {
@@ -629,11 +740,14 @@ import {
   hasUnpushedCommits,
   isGitWorktree,
   readCurrentBranch,
+  readWorktreeHead,
+  countCommitsSince,
   removeWorktree,
   workspaceExists,
   probeWorkspace,
   worktreePathFor,
 } from "./workspace.js";
+import { createConcurrencyGate } from "./concurrency-gate.js";
 import { renderSelfMarker } from "./review-providers/github.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 import { getVersion } from "./version.js";
@@ -644,6 +758,8 @@ import { startDeploySwitch } from "./deploy-switch.js";
 import { getReleases } from "./releases-cache.js";
 import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./update-ledger.js";
 
+// Concurrent freshness reads for one by-link snapshot request.
+const SNAPSHOT_READ_CONCURRENCY = 4;
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const STATUS_DETECTION_ERROR_PREFIX = "Session status detection failed: ";
 const REPORTING_DETECTION_ERROR_PREFIX = STATUS_DETECTION_ERROR_PREFIX + "Resource readout ";
@@ -682,13 +798,10 @@ function recoverableRuntimeError(session: SessionRecord): boolean {
 // Not a message prefix (the message starts with "Session <id> ...") — a
 // substring marker matched via .includes() in isForeignAgentProcessMessage.
 const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
-const RATE_LIMIT_REACTIVATION_PROMPT =
-  "You were rate limited earlier and should be able to continue now. Please resume the task you were working on and pick up from where you left off.";
-const CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT =
-  "Claude hit a temporary server error earlier. Please try to continue the task now.";
 const CLAUDE_SERVER_ERROR_REACTIVATION_MS = 30 * 60 * 1000;
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
+const AUTH_CHANGE_PING_MESSAGE = "Account changed. Continue.";
 const SIDECAR_REAPER_INTERVAL_MS = 60_000;
 const MEMORY_SHED_INTERVAL_MS = 1_000;
 // Consecutive 1s ticks above the restore floor plus margin required before
@@ -724,6 +837,9 @@ const PANE_WRITE_FENCE_MS = 30_000;
 const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
 // Hookless turns have no hook to rule out a running tool, so require longer rollout silence (pure inference observed to ~312s).
 const CODEX_HOOKLESS_HUNG_MS = 600_000;
+// A typed send unacked this long with the agent waiting at its prompt moves to
+// Retry/Dismiss instead of holding the queue: over 2x the 300s ack window.
+export const SUBMIT_HOLD_CEILING_MS = 10 * 60_000;
 const RESTORE_WARMUP_MS = 30_000;
 const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
@@ -736,6 +852,7 @@ export const QUEUED_MESSAGE_SETTLE_MS = 2_000;
 // Longest a queued send() waits for the delivery runner's pane write before
 // answering with the message still queued. Never covers the submit ack.
 export const QUEUED_SEND_PANE_WRITE_WAIT_MS = 3_000;
+const SEND_INTERRUPT_GUARD_MS = 5_000;
 const CURSOR_TURN_ENDED_STORE_FILE = "cursor-turn-ended.json";
 
 export function getIdleWaitBeforeFlushMs(): number {
@@ -851,6 +968,7 @@ const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // this.config on every tick, so a config-only reload takes effect without a
 // daemon restart).
 const SESSION_GC_TICK_MS = 5 * 60_000;
+const CLOSEOUT_RETENTION_INTERVAL_MS = 60 * 60_000;
 const TELEGRAM_TOPIC_GC_INTERVAL_MS = 24 * 60 * 60_000;
 const TELEGRAM_TOPIC_GC_MAX_SESSIONS = 20;
 const TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS = 3;
@@ -912,8 +1030,6 @@ const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
-const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and continue orchestration.";
-const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
 
 type MemoryShedTrigger =
   | "available_floor"
@@ -991,7 +1107,6 @@ function nextCgroupMaxLatched(
 ): boolean {
   return headroomBytes <= emergencyBytes || (latched && headroomBytes <= 2 * emergencyBytes);
 }
-const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
 
 interface StoredImageAttachment {
   id: string;
@@ -1093,6 +1208,23 @@ export class GithubPrCheckUnavailableError extends Error {
   }
 }
 
+export class HandoffTargetNotStalledError extends Error {
+  readonly statusCode = 403;
+  readonly code = "handoff_target_not_stalled";
+  readonly payload: {
+    code: "handoff_target_not_stalled";
+    sessionId: string;
+    status: string;
+    error: string;
+  };
+
+  constructor(sessionId: string, status: string) {
+    const message = `Session ${sessionId} is ${status}, not stalled. An agent can hand off only its own session, or another session that is stopped, paused, errored, rate limited or erroring.`;
+    super(message);
+    this.payload = { code: this.code, sessionId, status, error: message };
+  }
+}
+
 export class SessionNotRestorableError extends Error {
   readonly statusCode = 409;
   readonly payload: SessionNotRestorablePayload;
@@ -1131,8 +1263,96 @@ export class SpawnBatchConflictError extends Error {
   }
 }
 
+export class IdempotencyKeyConflictError extends Error {
+  readonly statusCode = 409;
+  readonly payload: IdempotencyKeyConflictPayload;
+
+  constructor(message: string, sessionId: string) {
+    super(message);
+    this.payload = { code: "idempotency_key_conflict", sessionId, error: message };
+  }
+}
+
+export class InvalidIdempotencyKeyError extends Error {
+  readonly statusCode = 400;
+}
+
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
+function parseIdempotencyKey(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > 128 ||
+    CONTROL_CHARACTERS.test(value)
+  ) {
+    throw new InvalidIdempotencyKeyError(
+      "idempotencyKey must be a 1-128 character string without control characters",
+    );
+  }
+  return value;
+}
+
+interface InFlightCall<T> {
+  request: unknown;
+  result: Promise<T>;
+}
+
+// Joins a pending call made with the same request and returns its result. A different request
+// waits for the pending call to settle and returns undefined: the caller re-enters and gets the
+// answer it would have had if sent after it.
+async function joinInFlight<T>(
+  pending: InFlightCall<T>,
+  request: unknown,
+): Promise<{ value: T } | undefined> {
+  if (isDeepStrictEqual(pending.request, request)) return { value: await pending.result };
+  await pending.result.catch(() => undefined);
+  return undefined;
+}
+
+// Runs a call registered under id so concurrent calls can join it; the entry leaves with it.
+async function runInFlight<T, E extends InFlightCall<T>>(
+  calls: Map<string, E>,
+  id: string,
+  entry: Omit<E, "result">,
+  run: () => Promise<T>,
+): Promise<T> {
+  // Defer execution until the identity is registered, before the first await.
+  const result = Promise.resolve().then(run);
+  calls.set(id, { ...entry, result } as E);
+  try {
+    return await result;
+  } finally {
+    if (calls.get(id)?.result === result) calls.delete(id);
+  }
+}
+
+// Stored copy of a spawn request: attachment bytes become a sha256 so records stay small
+// while a changed file still reads as a different request.
+function birthFingerprint(request: SpawnSessionRequest): SpawnSessionRequest {
+  const fingerprint = structuredClone(request);
+  if (fingerprint.attachments) {
+    fingerprint.attachments = fingerprint.attachments.map((attachment) => ({
+      ...attachment,
+      data: `sha256:${createHash("sha256").update(attachment.data).digest("hex")}`,
+    }));
+  }
+  return fingerprint;
+}
+
 export class SessionRateLimitedError extends Error {
   readonly statusCode = 409;
+}
+
+export class RateLimitClearError extends Error {
+  readonly statusCode = 409;
+  constructor(
+    message: string,
+    readonly resetAt: string | null = null,
+  ) {
+    super(message);
+  }
 }
 
 // Message-only (like SessionRateLimitedError): the candidate session ids to
@@ -1322,6 +1542,7 @@ type AgentMessageOptions = AgentMessageWriteOptions & {
   /** Text carries a credential: stdin-loaded, scrubbed buffer, never in argv. */
   sensitive?: true;
   authorizeInput?: (send: () => Promise<void>) => Promise<boolean>;
+  onInterrupt?: () => void;
 };
 
 type PlannedAgentMessage = {
@@ -1336,6 +1557,7 @@ type PreparedTodoNudge = {
   lifecycleIds: string[];
   generation: PaneGeneration;
   stamp: SessionLifecycleStamp;
+  slot: "todoNudge" | "snapshotNudge";
   fingerprint: string;
   attempts: number;
   session: AgentMessageTarget;
@@ -1385,7 +1607,17 @@ type HandoffSourceStamp = Pick<
   "id" | "workspaceId" | "status" | "stopReason" | "updatedAt" | "tmuxSession"
 >;
 
+type HandoffEventDetails = {
+  actor: TodoActor | null;
+  callerSessionId?: string;
+  movedItems: Array<{ from: string; to: string }>;
+  snapshotVersion?: number;
+  snapshotGate?: "applied" | "skipped_source_cannot_write";
+};
+
 type PreparedHandoff = {
+  inheritedTodo: HandoffTodoItem[];
+  handoffDetails: HandoffEventDetails;
   token: symbol;
   lifecycleIds: string[];
   sourceStamp: HandoffSourceStamp;
@@ -1403,6 +1635,7 @@ type PreparedHandoff = {
     closeoutOwnerTransfer: boolean;
     validatedLaunchSelection: AgentLaunchSelection;
     receiptToken: symbol;
+    inheritedTodo?: HandoffTodoItem[];
   };
 };
 
@@ -1461,6 +1694,8 @@ interface SidecarReapEntryContext {
 // later fresh read before anything treats it as dead.
 type MemberRuntimeSample = "live" | "dead" | "dead_looking" | "unknown";
 
+type SessionJournalPolicy = "strict" | "read";
+
 interface SessionStateResult {
   session: SessionRecord;
   runtime: SessionRuntimeSnapshot;
@@ -1470,6 +1705,7 @@ interface SessionStateResult {
   workspacePresent: boolean;
   serverError: boolean;
   serverErrorEvidence?: "error" | "recovered";
+  rateLimitResetAt?: string;
   // When the agent last wrote to its own structured artifact (claude transcript
   // JSONL / codex rollout + hook state / cursor transcript JSONL). Null only
   // when the agent has no such artifact yet. Every value here is a byproduct of
@@ -1602,6 +1838,22 @@ async function wakeDeliverability(session: SessionRecord): Promise<WakeDeliverab
 
 function hasSessionErrorEvidence(session: Pick<SessionRecord, "error">): boolean {
   return typeof session.error === "string" && session.error.trim().length > 0;
+}
+
+// The persisted owner proves which pane process reported the stored claude id
+// for this launch. Two absent procStart values match (older claude builds).
+function claudeStatusOwnerMatches(
+  session: Pick<SessionRecord, "agentLaunchId" | "agentSessionId" | "claudeStatusOwner">,
+  status: { pid: number; procStart?: string },
+): boolean {
+  const owner = session.claudeStatusOwner;
+  return (
+    owner !== undefined &&
+    owner.agentLaunchId === session.agentLaunchId &&
+    owner.agentSessionId === session.agentSessionId &&
+    owner.pid === status.pid &&
+    owner.procStart === status.procStart
+  );
 }
 
 function sameSessionRuntimeOwner(left: SessionRecord, right: SessionRecord): boolean {
@@ -1957,6 +2209,24 @@ function resolveCloseoutOwner(args: {
   return args.worktree;
 }
 
+// Terminal or hand-paused records no longer run the Stop-hook closeout. Daemon
+// stops (stale, memory, runtime_lost) leave the owner in place for handoff.
+function isReleasedCloseoutStatus(record: Pick<SessionRecord, "status" | "stopReason">): boolean {
+  switch (record.status) {
+    case "completed":
+    case "killed":
+    case "errored":
+    case "budget_limited":
+      return true;
+    case "stopped":
+      return record.stopReason === "manual_pause" || record.stopReason === "token_budget";
+    case "spawning":
+    case "running":
+    case "paused":
+      return false;
+  }
+}
+
 async function setupSessionAgentHooks(args: {
   agent: AgentName;
   dataDir: string;
@@ -1965,6 +2235,7 @@ async function setupSessionAgentHooks(args: {
   sessionToolDir: string;
   restrictWrites: boolean;
   modelsCacheHome: string;
+  managedAuth?: boolean;
   model?: string;
   reasoningEffort?: ProviderReasoningEffort;
   reasoningVariantNames?: string[];
@@ -1976,9 +2247,10 @@ async function setupSessionAgentHooks(args: {
   // servers below. Default (no bound account, or record not yet
   // written at spawn time) falls back to homedir() inside setup().
   const session = readSession(args.dataDir, args.sessionId);
-  const claudeConfigDir = session
-    ? resolveClaudeAuthPlanOptions(args.dataDir, session).claudeConfigDir
-    : undefined;
+  const claudeConfigDir =
+    session && !session.auth && !args.managedAuth
+      ? resolveClaudeAuthPlanOptions(args.dataDir, session).claudeConfigDir
+      : undefined;
   const hookArgs = {
     agent: args.agent,
     worktreePath: args.worktreePath,
@@ -1989,6 +2261,7 @@ async function setupSessionAgentHooks(args: {
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
     ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
+    ...(args.managedAuth || session?.auth ? { managedAuth: true } : {}),
     ...(args.mcpExclude?.length ? { mcpExclude: args.mcpExclude } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
@@ -2509,8 +2782,10 @@ function buildInitialMessage(
   if (branchNamingRegex) {
     base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
   }
-  const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty. You own every item; nothing is added for you.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
+  const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty unless a handoff moved items to you (listed under Inherited ToDo). You own every item.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, self-destruct, or hand off yourself with an empty ledger; cannot finish or self-destruct with open/held work. Handoff moves open/held items to the successor.`;
+  const snapshotInstructions = `Spur snapshot:\n- Keep a backward-looking Markdown snapshot of your work: \`"$SPUR_SNAPSHOT_COMMAND" write --file <path>\` (\`--file -\` reads stdin). Each write stores a full new version.\n- Write one after each finished step and before you stop. Suggested sections: Now, Established, Tried, Next, Questions and risks, References.\n- When the project requires it, finishing or self-destruct needs a \`--final\` snapshot written after your last ToDo change; handoff needs any snapshot written after it.`;
   base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
+  base = `${base}\n\n${snapshotInstructions}`;
   base = `${base}\n\nRead associated chat and bot with \`"$SPUR_SESSION_TOOL_DIR/spur" source info --json\`.`;
   if (telegramInstructions) {
     base = `${base}\n\n${telegramInstructions}`;
@@ -2631,11 +2906,7 @@ function removeFirstOccurrence(list: string[], value: string): string[] {
   return [...list.slice(0, index), ...list.slice(index + 1)];
 }
 
-// Resolve the CLAUDE_CONFIG_DIR for a claude session from the runtime account
-// store. When an account is bound, seeds the per-session claude home under
-// session-tools/<id>/claude-home and returns it as claudeConfigDir. Session
-// homes isolate credential writeback from the source account directory.
-// Returns {} when no account is bound or the account no longer exists.
+// Retain native homes for legacy direct sessions; managed launches use auth-launch.ts.
 export function resolveClaudeAuthPlanOptions(
   dataDir: string,
   session: Pick<SessionRecord, "agent" | "claudeAccountId" | "id">,
@@ -2777,6 +3048,8 @@ function buildSessionEnv(args: {
     SPUR_SESSION_WORK_DIR: ensureSessionWorkDir(args.dataDir, args.artifactsSessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_TODO_COMMAND: join(args.sessionToolDir, TODO_TOOL_NAME),
+    SPUR_SNAPSHOT_COMMAND: join(args.sessionToolDir, SNAPSHOT_TOOL_NAME),
+    SPUR_STATUS_COMMAND: join(args.sessionToolDir, TASK_STATUS_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
@@ -3323,6 +3596,8 @@ interface SessionSpawnOptions {
   closeoutOwnerTransfer?: boolean;
   prAlertOwnerTransfer?: PrAlertTransfer;
   receiptToken?: symbol;
+  /** Handoff only: source ToDo items written into the successor ledger before launch. */
+  inheritedTodo?: HandoffTodoItem[];
   /** HTTP accepts a spawning identity when admission must wait. */
   acceptQueued?: boolean;
   /** Set by source adapters, never from the HTTP body. */
@@ -3348,6 +3623,7 @@ interface PreparedSpawn {
   sessionId: string;
   resolvedBranch?: ResolvedSpawnBranch;
   reuseWorkspacePath?: string;
+  closeoutTakenFrom?: string[];
   placeholder: SessionRecord;
   startupAttachments: StoredImageAttachment[];
   preflightBatchId: string;
@@ -3367,6 +3643,8 @@ interface SpawnAdmissionWaiter {
   resolve: (reservation: symbol) => void;
   reject: (error: SpawnAdmissionCancelledError) => void;
 }
+
+type HandoffIdempotency = Pick<HandoffIdempotencyReceipt, "key" | "request">;
 
 interface HandoffAdmission {
   token: symbol;
@@ -3395,6 +3673,28 @@ function resolveCarriedSpawnModel(
   return explicitModel ?? (targetAgent === session.agent ? session.model : undefined);
 }
 
+function requestedAuthAccount(
+  request: Pick<SpawnSessionRequest, "authAccountId" | "claudeAccountId">,
+  agent: AgentName,
+): string | null | undefined {
+  if (
+    request.authAccountId === undefined &&
+    request.claudeAccountId !== undefined &&
+    agent !== "claude"
+  ) {
+    throw new AuthorizationError(
+      "claudeAccountId is only valid for Claude; use authAccountId",
+      400,
+    );
+  }
+  return request.authAccountId !== undefined ? request.authAccountId : request.claudeAccountId;
+}
+
+/** The predecessor's managed account (null = Auto) when the successor uses the same provider. */
+function carriedAuthAccountId(session: SessionRecord, agent: AgentName): string | null | undefined {
+  return session.auth && agent === session.agent ? session.auth.accountId : undefined;
+}
+
 export function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
@@ -3404,6 +3704,7 @@ export function resolveRespawnRequest(
     model?: string;
     reasoningEffort?: ProviderReasoningEffort | null;
     bootstrap?: boolean;
+    links?: SessionSlots["links"];
   },
 ): SpawnSessionRequest {
   const agent = options?.agent ?? session.agent;
@@ -3414,6 +3715,7 @@ export function resolveRespawnRequest(
       : agent === session.agent
         ? session.reasoningEffort
         : undefined;
+  const authAccountId = carriedAuthAccountId(session, agent);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -3422,11 +3724,15 @@ export function resolveRespawnRequest(
     agent,
     ...(model !== undefined ? { model } : {}),
     ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
-    ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
+    ...(session.claudeAccountId && !session.auth && agent === "claude"
+      ? { claudeAccountId: session.claudeAccountId }
+      : {}),
+    ...(authAccountId !== undefined ? { authAccountId } : {}),
     ...(session.mode !== undefined ? { mode: session.mode } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
+    ...(options?.links?.length ? { slots: { links: options.links } } : {}),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
     ...(session.worktree &&
@@ -3462,6 +3768,7 @@ function resolveHandoffSpawnRequest(
     originalTaskPrompt: string;
     attachments?: SendMessageAttachment[];
     pipelineSteps?: string[];
+    authAccountId?: string;
   },
 ): SpawnSessionRequest {
   const reasoningEffort =
@@ -3476,6 +3783,7 @@ function resolveHandoffSpawnRequest(
     agent: options.agent,
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    ...(options.authAccountId !== undefined ? { authAccountId: options.authAccountId } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
     ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
@@ -3643,6 +3951,11 @@ const TELEGRAM_TOPIC_NAME_MAX = 128;
 // longer than this after the message arrived.
 const TELEGRAM_TYPING_MAX_MS = 10 * 60_000;
 
+function publicSpawnIntent(intent: DurableSpawnIntent): NonNullable<SessionView["spawnIntent"]> {
+  const { closeoutTakenFrom: _closeoutTakenFrom, ...view } = intent;
+  return view;
+}
+
 function sessionTitle(session: Pick<SessionView, "slots">): string | undefined {
   const title = session.slots?.title?.trim();
   return title ? title : undefined;
@@ -3686,6 +3999,12 @@ function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" |
 
 export class SessionService {
   private readonly preflightUsageStore: PreflightUsageStore;
+  private readonly authAccounts: AuthAccounts;
+  private readonly authProxy: AuthProxy;
+  private readonly authQuota: AuthQuota;
+  private readonly authAlerts: AuthAlerts;
+  private readonly authTerminals: AuthTerminalLogins;
+  private authSnapshot: { at: number; run: Promise<AuthProxyState> } | undefined;
   readonly bootstrapConfigPath: string;
   readonly startedAt: string;
   config: AppConfig;
@@ -3732,6 +4051,7 @@ export class SessionService {
   // Epoch ms at which the last queued delivery's submit ack was confirmed;
   // lets waitForQueuedMessage release the prompt hold without its grace.
   private readonly queuedDeliveryAckedAt = new Map<string, number>();
+  private readonly explicitInterruptAt = new Map<string, number>();
   // Epoch ms of the first drain-ready poll that yielded to each pending
   // send-trigger batch (session -> workId); bounds yieldsToTriggerBatch.
   private readonly triggerBatchYieldSince = new Map<string, Map<string, number>>();
@@ -3878,6 +4198,7 @@ export class SessionService {
   private lastDiskBudgetSweepAt = Date.now();
   // Same construction-time seed and same reason as lastSessionGcSweepAt.
   private lastArtifactRetentionSweepAt = Date.now();
+  private lastCloseoutRetentionSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private readonly scheduledWakeClaims = new Map<string, ScheduledWakeClaim>();
@@ -3899,6 +4220,17 @@ export class SessionService {
     engagedCause: MemoryDenialCause | null;
   } = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
+  private journalWritePolicy: SessionJournalPolicy = "strict";
+  private transitionsBinding:
+    | {
+        dataDir: string;
+        store: SessionTransitions;
+        unregister: () => void;
+      }
+    | undefined;
+  private transitionsRefresh:
+    | { binding: NonNullable<SessionService["transitionsBinding"]>; run: Promise<void> }
+    | undefined;
   // Local (in-worktree) project config resolved per session. The 2s dashboard
   // tick resolves a project for every session, so without this each tick
   // re-parsed the same YAML for the whole fleet — and re-logged the same parse
@@ -3931,6 +4263,11 @@ export class SessionService {
   // before the agent reaches its prompt and settles the record itself, so a
   // not-yet-started agent must not be reconciled to errored meanwhile.
   private readonly launchesInFlight = new Set<string>();
+  // Key = taking session id. Open from the take until the taking spawn exits.
+  private readonly closeoutTakesInFlight = new Map<
+    string,
+    { from: readonly string[]; settled: Promise<void>; settle: () => void }
+  >();
   private readonly triggerBirthsInFlight = new Map<
     string,
     { request: SpawnSessionRequest; result: Promise<SessionView> }
@@ -3959,6 +4296,15 @@ export class SessionService {
   private readonly pendingSpawnIds = new Set<string>();
   private admissionStopped = false;
   private readonly foregroundSpawnReceipts = new Map<symbol, ForegroundSpawnReceipt>();
+  // Source id -> the keyed handoff running for it, so a same-key retry waits for its result.
+  private readonly keyedHandoffsInFlight = new Map<
+    string,
+    {
+      key: string;
+      request: HandoffIdempotency["request"];
+      result: Promise<HandoffSessionResponse>;
+    }
+  >();
   private readonly handoffsInFlight = new Map<
     string,
     {
@@ -3966,6 +4312,9 @@ export class SessionService {
       phase: "waiting" | "activating";
     }
   >();
+  // Successor id -> source id while a handoff is in flight: the successor cannot be handed off
+  // itself until its own handoff settles (it would kill the pane the finalize still checks).
+  private readonly handoffSuccessors = new Map<string, string>();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
@@ -3993,7 +4342,15 @@ export class SessionService {
   // classes acquire pane-write before lifecycle; lifecycle-only helpers use
   // the Locked suffix and never acquire the pane lock.
   private readonly sessionLifecycleLocks = new Map<string, Promise<void>>();
-  private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
+  private readonly rateLimitClearBarriers = new Map<string, Promise<void>>();
+  private readonly classificationsInFlight = new Map<string, Set<Promise<SessionStateResult>>>();
+  private readonly rateLimitClearRevisions = new Map<string, number>();
+  // A reader pins its transcript path over the id, so each entry is tagged with
+  // the agentSessionId it was read under and reused only for that id.
+  private readonly claudeJsonlReaders = new Map<
+    string,
+    { agentSessionId: string | undefined; reader: ClaudeJsonlReaderState }
+  >();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
   // Kept for the life of the session, not pruned with live ids: a viewed
@@ -4018,10 +4375,6 @@ export class SessionService {
   private readonly prCheckRuns = new Set<Promise<void>>();
   /** Git wall clock spent by the current sweep resolving PR discovery targets. */
   private prCheckGitSpentMs = 0;
-  // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
-  // considered rate-limited; sessionId -> per-episode rotation count.
-  private readonly claudeAccountRateLimit = new Map<string, number>();
-  private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarEndpoints = new Map<string, SidecarEndpointEntry>();
   private readonly sidecarViewClaims = new WeakMap<
@@ -4046,6 +4399,19 @@ export class SessionService {
     string,
     { kind: "ledger_corrupt" | "target_gone"; reason: string }
   >();
+  // Latest corrupt snapshot version already logged per session.
+  private readonly snapshotCorruptLogged = new Map<string, number>();
+  // Last agent-work answer per session, valid while the activity instant is unchanged.
+  private readonly snapshotWorkCache = new Map<
+    string,
+    { activityMs: number; floorMs: number; workMs: number | null }
+  >();
+  // First agent work after a live session's snapshot, valid for that snapshot version.
+  private readonly firstWorkCache = new Map<string, { version: number; workMs: number }>();
+  // Live sessions whose tools this daemon process already rewrote.
+  private readonly toolsRefreshed = new Set<string>();
+  private readonly toolsRefreshFailedLogged = new Set<string>();
+  private readonly snapshotFailureLogged = new Set<string>();
   private readonly todoNudgeBackoff = new Map<
     string,
     { failures: number; nextRetryAtMs: number }
@@ -4155,6 +4521,54 @@ export class SessionService {
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);
     this.config = bootstrap.config;
+    this.authAccounts = new AuthAccounts(
+      this.config.dataDir,
+      () => this.config.authRotation.autoRotateOnRateLimit,
+    );
+    this.authProxy = new AuthProxy(
+      this.config.dataDir,
+      () => ({
+        state: this.authAccounts.read(),
+        policy: {
+          cooldownMinutes: this.config.authRotation.cooldownMinutes,
+          maxRotationsPerEpisode: this.config.authRotation.maxRotationsPerEpisode,
+        },
+      }),
+      authProxyBinaryPath,
+      (rotation) => void this.recordAuthRotation(rotation),
+    );
+    this.authQuota = new AuthQuota({
+      dataDir: this.config.dataDir,
+      fetchUsage: (accountIds) => this.authProxy.getUsage(accountIds),
+      now: () => Date.now(),
+      onSaveError: (error) =>
+        this.logEvent("auth.quota.cache_error", {
+          level: "warn",
+          message: `Account quota cache failed: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+    });
+    this.authAlerts = new AuthAlerts({
+      dataDir: this.config.dataDir,
+      onOpened: (entry) => logAuthFailed(this.config.dataDir, entry),
+    });
+    this.authTerminals = new AuthTerminalLogins({
+      dataDir: this.config.dataDir,
+      homeDir: homedir(),
+      createTmuxCommandSession,
+      killTmuxSession: (name) => killTmuxSession(name),
+      tmuxPaneDead: (name, options) => tmuxPaneDead(name, options),
+      accountProvider: (accountId) => this.requireAuthorizationAccount(accountId).provider,
+      cancelLogin: (accountId) => this.authProxy.cancelLogin(accountId),
+      importNativeLogin: (accountId, provider) =>
+        this.authProxy.importNativeLogin(accountId, provider),
+      loginStatus: (accountId) => this.authProxy.loginStatus(accountId),
+      hostProbe: async (provider) =>
+        (await readHostCredentialSources(this.usageReportDeps(), true)).find(
+          (source) => source.provider === provider,
+        ) ?? null,
+      agentCommand: (provider) => (provider === "claude" ? claudeCommand() : codexCommand()),
+      now: () => Date.now(),
+    });
     this.preflightUsageStore = new PreflightUsageStore(this.config.dataDir);
     void this.preflightUsageStore.prune();
     // Before any classification: a restart mid-command must already know
@@ -4225,6 +4639,8 @@ export class SessionService {
   }
 
   dispose(): void {
+    this.transitionsBinding?.unregister();
+    this.transitionsBinding = undefined;
     this.admissionStopped = true;
     for (const waiter of this.spawnAdmissionWaiters) {
       this.cancelSpawnAdmission(waiter, "disposed");
@@ -4233,6 +4649,8 @@ export class SessionService {
       completion.reject(new SpawnAdmissionCancelledError("disposed"));
     }
     this.spawnCompletions.clear();
+    this.authProxy.dispose();
+    this.authTerminals.dispose();
     // Settles every queued lookup as skipped:cancelled so a prCheckRuns drain
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
@@ -5516,36 +5934,6 @@ export class SessionService {
     return dueAt;
   }
 
-  private formatIntervalWakeMessage(
-    sessionId: string,
-    message: string,
-    stopCondition: string,
-  ): string {
-    return [
-      "Scheduled interval wake-up.",
-      `Stop condition: ${stopCondition}`,
-      "",
-      message,
-      "",
-      `If the stop condition is satisfied, cancel this interval with \`spur wake ${sessionId} --cancel\`.`,
-    ].join("\n");
-  }
-
-  private formatDailyWakeMessage(
-    sessionId: string,
-    message: string,
-    stopCondition: string,
-  ): string {
-    return [
-      "Scheduled daily wake-up.",
-      `Stop condition: ${stopCondition}`,
-      "",
-      message,
-      "",
-      `If the stop condition is satisfied, cancel this daily wake with \`spur wake ${sessionId} --cancel\`.`,
-    ].join("\n");
-  }
-
   // Gates a recurring wake (interval/daily) on wakeDeliverability before send()
   // is ever attempted. Emits session.wake.suppressed once on the transition into
   // workspace_missing and clears the once-per-session marker on the transition
@@ -5741,7 +6129,7 @@ export class SessionService {
             const nextDueAt = claimedNextDueAt;
             try {
               await this.send(session.id, {
-                message: this.formatIntervalWakeMessage(
+                message: formatIntervalWakeMessage(
                   session.id,
                   intervalWake.message,
                   intervalWake.stopCondition,
@@ -5806,35 +6194,8 @@ export class SessionService {
         }
 
         const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
-        // Auto-rotate a rate-limited claude session onto a fresh authenticated
-        // account PROMPTLY, independent of rateLimitReactivation.afterHours. The
-        // helper is fully self-gating (autoRotateOnRateLimit toggle, per-account
-        // cooldown, per-episode cap, and all-accounts-limited fall-through) and
-        // returns true only when a rotation happened. A successful rotation
-        // suppresses the afterHours nudge below.
-        // switchAuth (invoked inside tryAutoRotateClaudeAccount) can throw on a
-        // dirty-worktree kill-confirmation, a stale-liveState race, or a
-        // concurrently-removed account. Scope the catch to this session so one
-        // bad session does not propagate out of the loop and starve every later
-        // session of its wake this tick. On error treat rotated=false so the
-        // afterHours nudge fallback below still runs.
-        let rotated = false;
-        if (!this.memoryHold.engaged && liveState === "rate_limited") {
-          try {
-            rotated = await this.tryAutoRotateClaudeAccount(session);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.wake.failed", {
-              level: "warn",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to auto-rotate claude account for ${session.id}: ${message}`,
-            });
-          }
-        }
-
         const afterHours = this.config.rateLimitReactivation.afterHours;
-        if (!this.memoryHold.engaged && !rotated && afterHours > 0 && session.rateLimitedAt) {
+        if (!this.memoryHold.engaged && afterHours > 0 && session.rateLimitedAt) {
           const thresholdMs = afterHours * 60 * 60 * 1000;
           if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
             // Undefined liveState means classification has not populated stateHistory
@@ -5955,7 +6316,11 @@ export class SessionService {
                 this.rateLimitReactivationLastSkip.delete(session.id);
                 const current = readSession(this.config.dataDir, session.id) ?? session;
                 if (current.rateLimitedAt === session.rateLimitedAt) {
-                  const { rateLimitedAt: _rateLimitedAt, ...base } = current;
+                  const {
+                    rateLimitedAt: _rateLimitedAt,
+                    rateLimitResetAt: _reset,
+                    ...base
+                  } = current;
                   writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
                 }
               }
@@ -6138,7 +6503,7 @@ export class SessionService {
         if (claimedDailyNextDueAt !== null) {
           try {
             await this.send(session.id, {
-              message: this.formatDailyWakeMessage(
+              message: formatDailyWakeMessage(
                 session.id,
                 dailyWake.message,
                 dailyWake.stopCondition,
@@ -6312,6 +6677,33 @@ export class SessionService {
     setTmuxSocketName(this.config.tmux.socketName);
     mkdirSync(this.config.dataDir, { recursive: true });
     mkdirSync(this.config.worktreeDir, { recursive: true });
+    const dataDir = resolvePath(this.config.dataDir);
+    if (this.transitionsBinding?.dataDir !== dataDir) {
+      this.transitionsBinding?.unregister();
+      this.transitionsBinding = undefined;
+      this.stateCache.clear();
+      this.stateHistory.clear();
+      this.claudeJsonlReaders.clear();
+      this.lastClassifiedLogStates.clear();
+      this.claudeRateLimitReconfirmOverrides.clear();
+      this.codexPaneLimitObservedAt.clear();
+      this.claudeCompactingOverrides.clear();
+      this.codexMcpDialogOverrides.clear();
+      this.cursorPaneReadyOverrides.clear();
+      this.dashboardCache.clear();
+      this.dashboardEnrichedRecords.clear();
+      const store = new SessionTransitions(dataDir);
+      const binding = { dataDir, store, unregister: () => {} };
+      binding.unregister = observeSessionWrites(dataDir, (record) => {
+        if (this.transitionsBinding !== binding) return;
+        const links = this.displaySlotsForSession(record)?.links ?? [];
+        this.publishSessionTransition(record, () => store.observeStatus(record, links));
+      });
+      this.transitionsBinding = binding;
+      for (const record of listSessions(dataDir)) {
+        store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
+      }
+    }
     const removeIds = new Set(options.unconfiguredToRemove ?? []);
     mutateConfigRegistry(this.config.dataDir, (current) => ({
       configPaths: this.registryPaths,
@@ -6319,9 +6711,12 @@ export class SessionService {
         (entry) => !removeIds.has(entry.id),
       ),
     }));
-    this.protectDurableSpawns();
+    const sessions = listSessions(this.config.dataDir);
+    this.protectDurableSpawns(sessions);
+    this.rollbackUnlaunchedHandoffCopies(sessions);
     queueMicrotask(() => {
       if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverDurableSpawns());
+      if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverHandoffTodo(sessions));
     });
     this.resumeSessionDelivery();
   }
@@ -6612,6 +7007,13 @@ export class SessionService {
     return createRuntimeInfo(this.config, this.startedAt, this.lifecycle.instanceId);
   }
 
+  // Handoff: the spawned session is not a target, so the result passes through untouched.
+  private runLifecycle(
+    action: LifecycleAction,
+    targetIds: string[],
+    operationId: string | undefined,
+    work: () => Promise<HandoffSessionResponse>,
+  ): Promise<HandoffSessionResponse>;
   private runLifecycle(
     action: LifecycleAction,
     targetIds: string[],
@@ -6755,13 +7157,7 @@ export class SessionService {
         receipt.revision !== row.receipt.revision ||
         (record !== row.source &&
           (row.identity === true || !isDeepStrictEqual(record, row.source))) ||
-        !isDeepStrictEqual(
-          row.view.slots,
-          this.projectSidecarSlots(
-            record,
-            deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, record)),
-          ),
-        )
+        !isDeepStrictEqual(row.view.slots, this.displaySlotsForSession(record))
       );
     };
     let live = [...rows];
@@ -6933,6 +7329,277 @@ export class SessionService {
     return session.rateLimitedAt !== undefined;
   }
 
+  private activeRateLimitClearFence(session: SessionRecord): SessionRecord["rateLimitClearFence"] {
+    const fence = session.rateLimitClearFence;
+    return fence?.agentLaunchId === (session.agentLaunchId ?? null) ? fence : undefined;
+  }
+
+  private fencedStructuredRateLimit(
+    session: SessionRecord,
+    detection: RateLimitDetection | null,
+  ): RateLimitDetection | null {
+    const source = detection?.source;
+    const fence = this.activeRateLimitClearFence(session);
+    return source &&
+      fence &&
+      source.ordinal <= (fence.sourceOrdinals[source.key ?? source.filePath] ?? 0)
+      ? null
+      : detection;
+  }
+
+  private paneRateLimitFenced(
+    session: SessionRecord,
+    paneText: string,
+    detection: RateLimitDetection | null,
+  ): boolean {
+    if (!this.activeRateLimitClearFence(session)?.paneLatched) return false;
+    if (detection?.limited || paneText.trim() === "") return true;
+    const current = readSession(this.config.dataDir, session.id);
+    if (current?.rateLimitClearFence?.agentLaunchId === (session.agentLaunchId ?? null)) {
+      writeSession(this.config.dataDir, {
+        ...current,
+        rateLimitClearFence: { ...current.rateLimitClearFence, paneLatched: false },
+      });
+    }
+    return false;
+  }
+
+  private claudeJsonlReaderFor(session: SessionRecord): ClaudeJsonlReaderState | undefined {
+    const entry = this.claudeJsonlReaders.get(session.id);
+    if (!entry || entry.agentSessionId !== session.agentSessionId) return undefined;
+    return entry.reader;
+  }
+
+  private cacheClaudeJsonlReader(session: SessionRecord, reader: ClaudeJsonlReaderState): void {
+    this.claudeJsonlReaders.set(session.id, { agentSessionId: session.agentSessionId, reader });
+  }
+
+  // Rebinds the stored claude id after /clear or /resume rotated it in the
+  // pane. One synchronous span: re-read, check, write.
+  private rotateClaudeSessionId(
+    session: SessionRecord,
+    agentSessionId: string,
+    status: { pid: number; procStart?: string },
+    probeRevision: number,
+  ): SessionRecord | undefined {
+    const current = this.readClaudeStatusRecordIfUnchanged(session, probeRevision);
+    if (!current?.claudeStatusOwner || !claudeStatusOwnerMatches(current, status)) {
+      return undefined;
+    }
+    const rotated = {
+      ...current,
+      agentSessionId,
+      claudeStatusOwner: { ...current.claudeStatusOwner, agentSessionId },
+    };
+    writeSession(this.config.dataDir, rotated);
+    this.stateCache.delete(session.id);
+    this.claudeJsonlReaders.delete(session.id);
+    return rotated;
+  }
+
+  // Records the pane process that reports the stored id, once per change.
+  private persistClaudeStatusOwner(
+    session: SessionRecord,
+    owner: ClaudeStatusOwner,
+    probeRevision: number,
+  ): SessionRecord | undefined {
+    const current = this.readClaudeStatusRecordIfUnchanged(session, probeRevision);
+    if (!current || isDeepStrictEqual(current.claudeStatusOwner, owner)) return undefined;
+    const persisted = { ...current, claudeStatusOwner: owner };
+    writeSession(this.config.dataDir, persisted);
+    return persisted;
+  }
+
+  // Freshest record, only while the classify's launch, owner, lifecycle and
+  // revision still hold; callers write in the same synchronous span.
+  private readClaudeStatusRecordIfUnchanged(
+    session: SessionRecord,
+    probeRevision: number,
+  ): SessionRecord | undefined {
+    const current = readSession(this.config.dataDir, session.id);
+    const lifecycle = this.lifecycle.snapshot(session.id);
+    if (
+      !current ||
+      current.agentSessionId !== session.agentSessionId ||
+      current.agentLaunchId !== session.agentLaunchId ||
+      !sameSessionRuntimeOwner(current, session) ||
+      !this.lifecycleStateMatches(current, this.lifecycleStamp(session)) ||
+      lifecycle.revision !== probeRevision ||
+      lifecycle.operation?.phase === "pending"
+    ) {
+      return undefined;
+    }
+    return current;
+  }
+
+  private async captureRateLimitSourceOrdinals(
+    session: SessionRecord,
+  ): Promise<Record<string, number>> {
+    if (session.agent === "codex") {
+      const ordinals = (await this.classifyCodexState(session)).rateLimitOrdinals;
+      if (!ordinals || Object.keys(ordinals).length === 0)
+        throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
+      return ordinals;
+    }
+    if (session.agent === "claude") {
+      const result = await readClaudeJsonlState(
+        session.worktreePath,
+        this.claudeJsonlReaderFor(session),
+        session.agentSessionId,
+      );
+      if (!result) throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
+      this.cacheClaudeJsonlReader(session, result.reader);
+      if (result.reader.rateLimitCounts && Object.keys(result.reader.rateLimitCounts).length > 0)
+        return { ...result.reader.rateLimitCounts };
+      return { [result.reader.filePath]: 0 };
+    }
+    if (session.agent !== "cursor") return {};
+    const cursorChatId = await this.cursorTranscriptId(session);
+    const result = cursorChatId
+      ? await readCursorJsonlState(
+          session.worktreePath,
+          this.cursorJsonlReaders.get(session.id),
+          cursorChatId,
+          session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {},
+        )
+      : null;
+    if (!result) throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
+    this.cursorJsonlReaders.set(session.id, result.reader);
+    return {
+      [result.rateLimit?.source?.key ?? result.reader.filePath]: Math.max(
+        result.reader.rateLimitOrdinal ?? 0,
+        result.rateLimit?.source?.ordinal ?? 0,
+      ),
+    };
+  }
+
+  private async freshQuotaForClear(session: SessionRecord): Promise<QuotaSourceResult | null> {
+    // Host credentials do not describe a managed session's proxy account; clear needs --force.
+    if (session.auth) return null;
+    return readFreshSessionQuota(this.usageReportDeps(), session);
+  }
+
+  private usageReportDeps(): UsageReportDeps {
+    const nowMs = Date.now();
+    const todayStart = new Date(nowMs);
+    todayStart.setHours(0, 0, 0, 0);
+    return {
+      fetch: globalThis.fetch,
+      homeDir: homedir(),
+      dataDir: this.config.dataDir,
+      nowMs,
+      todayStartMs: todayStart.getTime(),
+    };
+  }
+
+  async clearRateLimit(
+    sessionId: string,
+    force: boolean,
+    actor: string,
+  ): Promise<RateLimitClearResult> {
+    const initial = readSession(this.config.dataDir, sessionId);
+    if (!initial) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    if (initial.status !== "running" || !this.isLiveStateRateLimited(initial))
+      throw new RateLimitClearError(`Session ${sessionId} is not live and rate limited`);
+    if (!force) {
+      const quota = await this.freshQuotaForClear(initial);
+      if (!quota || quota.status !== "ok" || quota.windows.length === 0)
+        throw new RateLimitClearError(`Quota unavailable for session ${sessionId}; use --force`);
+      const exhausted = quota.windows.filter((window) => window.usedPercent >= 100);
+      if (exhausted.length > 0) {
+        const resets = exhausted
+          .map((window) => window.resetsAt)
+          .filter((reset): reset is string => reset !== null && Number.isFinite(Date.parse(reset)));
+        const resetAt =
+          resets.sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+        throw new RateLimitClearError(
+          `Quota exhausted for session ${sessionId}; reset ${resetAt ?? "unknown"}`,
+          resetAt,
+        );
+      }
+    }
+    return this.withSessionLifecycleLock(sessionId, async () => {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (
+        current.status !== "running" ||
+        !this.isLiveStateRateLimited(current) ||
+        current.agent !== initial.agent ||
+        current.agentLaunchId !== initial.agentLaunchId ||
+        current.agentSessionId !== initial.agentSessionId ||
+        (current.agent === "claude" &&
+          (current.claudeAccountId ?? "default") !== (initial.claudeAccountId ?? "default")) ||
+        (current.auth?.accountId ?? null) !== (initial.auth?.accountId ?? null) ||
+        (current.auth?.effectiveAccountId ?? null) !== (initial.auth?.effectiveAccountId ?? null)
+      )
+        throw new RateLimitClearError(`Session/account changed; retry clear`);
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      this.rateLimitClearBarriers.set(sessionId, barrier);
+      this.rateLimitClearRevisions.set(
+        sessionId,
+        (this.rateLimitClearRevisions.get(sessionId) ?? 0) + 1,
+      );
+      try {
+        await Promise.allSettled([...(this.classificationsInFlight.get(sessionId) ?? [])]);
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!latest || latest.status !== "running")
+          throw new RateLimitClearError(`Session ${sessionId} changed during clear`);
+        const sourceOrdinals = await this.captureRateLimitSourceOrdinals(latest);
+        const paneText = await captureTmuxPane(latest.tmuxSession);
+        const paneLatched =
+          paneText === null ||
+          paneText.trim() === "" ||
+          Boolean(scanTmuxRateLimit(paneText)) ||
+          (latest.agent === "claude" && Boolean(detectClaudeUsageLimitMenu(paneText)));
+        const { rateLimitedAt: _rateLimitedAt, rateLimitResetAt: _reset, ...base } = latest;
+        const cleared: SessionRecord = {
+          ...base,
+          rateLimitClearFence: {
+            agentLaunchId: latest.agentLaunchId ?? null,
+            sourceOrdinals,
+            paneLatched,
+          },
+          updatedAt: nowIso(),
+        };
+        writeSession(this.config.dataDir, cleared);
+        this.claudeRateLimitReconfirmOverrides.delete(sessionId);
+        this.codexPaneLimitObservedAt.delete(sessionId);
+        this.lastClassifiedLogStates.delete(sessionId);
+        this.stateCache.delete(sessionId);
+        const classified = await this.classifySessionRecord(cleared, {
+          bypassClearBarrier: true,
+          suppressMenuConfirmation: true,
+          reconcileRuntime: false,
+        });
+        const state = this.stabilizeState(sessionId, classified.state);
+        await this.updateStateHistory(
+          cleared,
+          state,
+          classified.source,
+          classified.historySourcePath ?? null,
+          classified.serverError,
+          classified.serverErrorEvidence,
+        );
+        const deliveryScheduled = state !== "rate_limited";
+        if (deliveryScheduled) this.ensureDeliveryRunner(sessionId);
+        this.logEvent("session.rate_limit.cleared", {
+          level: "info",
+          sessionId,
+          projectId: latest.project,
+          message: `Rate limit cleared for ${sessionId}`,
+          details: { actor, force },
+        });
+        return { sessionId, state, deliveryScheduled };
+      } finally {
+        this.rateLimitClearBarriers.delete(sessionId);
+        release();
+      }
+    });
+  }
+
   private async confirmClaudeUsageLimitMenu(
     session: Pick<SessionRecord, "id" | "project" | "tmuxSession">,
   ): Promise<void> {
@@ -6970,6 +7637,242 @@ export class SessionService {
       sessionId: session.id,
       restrictWrites: resolveRestrictWrites(session),
     });
+  }
+
+  async recoverManagedAuthorization(): Promise<void> {
+    await this.authTerminals.sweep(this.authAccounts.read().accounts.map((account) => account.id));
+    await this.authProxy.recover();
+  }
+
+  private readAuthorizationState(): Promise<AuthProxyState> {
+    if (!this.authSnapshot || Date.now() - this.authSnapshot.at >= 500) {
+      const snapshot = { at: Date.now(), run: this.authProxy.getState() };
+      this.authSnapshot = snapshot;
+      void snapshot.run.then(
+        (state) => {
+          // Best effort: a failed identity write must not fail the state read.
+          try {
+            this.authAccounts.recordIdentities(state.accounts);
+          } catch {
+            // The next snapshot retries.
+          }
+        },
+        () => {
+          if (this.authSnapshot === snapshot) this.authSnapshot = undefined;
+        },
+      );
+    }
+    return this.authSnapshot.run;
+  }
+
+  private async prepareSessionAuthorization(
+    sessionId: string,
+    agent: AgentName,
+    project: ProjectConfig,
+    accountId: string | null | undefined,
+    managedBinding: boolean,
+  ): Promise<AuthRegistration | undefined> {
+    if (agent !== "claude" && agent !== "codex") {
+      if (accountId !== undefined && accountId !== null) {
+        throw new AuthorizationError(`Saved authorization is not supported for ${agent}`, 400);
+      }
+      return undefined;
+    }
+    const state = this.authAccounts.read();
+    if (!state.pools[agent] && (accountId === null || accountId === undefined)) return undefined;
+    if (
+      agent === "codex" &&
+      (codexArgsSelectProvider(project.codexArgs ?? []) ||
+        codexUsesCustomProvider(await readCodexUserConfig()))
+    ) {
+      if (accountId !== null && accountId !== undefined) {
+        throw new AuthorizationError(
+          "Saved authorization conflicts with the explicit Codex provider",
+          400,
+        );
+      }
+      return undefined;
+    }
+    if (accountId !== null && accountId !== undefined) {
+      const account = state.accounts.find((entry) => entry.id === accountId);
+      if (!account || account.provider !== agent) {
+        throw new AuthorizationError(`Unknown ${agent} authorization account: ${accountId}`, 400);
+      }
+    } else if (!managedBinding && !(await this.hasReadyAuthorizationAccount(sessionId, agent))) {
+      // No ready managed account: launch with host authorization, as before managed pools.
+      return undefined;
+    }
+    return this.authProxy.registerSession({
+      sessionId,
+      provider: agent,
+      accountId: accountId ?? null,
+    });
+  }
+
+  /** Revokes the routing key and drops host config copies from the session's managed home. */
+  private async revokeManagedAuthorization(sessionId: string): Promise<void> {
+    await this.authProxy.revokeSession(sessionId);
+    scrubManagedClaudeHome(slotToolDir(this.config.dataDir, sessionId));
+  }
+
+  /**
+   * Claim for the one continue ping owed to a session that was rate limited when its effective
+   * account changed. Undefined: nothing owed (no change, not limited, or this key already claimed).
+   * Written with the auth change, so the claim exists before any send and survives a restart.
+   */
+  private authChangePingClaim(
+    current: SessionRecord,
+    next: NonNullable<SessionRecord["auth"]>,
+  ): SessionRecord["authChangePing"] | undefined {
+    if (
+      current.status !== "running" ||
+      !current.auth ||
+      current.auth.effectiveAccountId === next.effectiveAccountId ||
+      !this.isLiveStateRateLimited(current)
+    )
+      return undefined;
+    const key = `${next.generation}:${next.effectiveAccountId}`;
+    return current.authChangePing?.key === key ? undefined : { key, attempts: 0, pinged: false };
+  }
+
+  /**
+   * Under the lifecycle lock: applies `update` to the unsent claim for `key` on a running session.
+   * Returns false, writing nothing, when the claim is gone or sent, the session is not running,
+   * or `update` returns null.
+   */
+  private async updateAuthChangePing(
+    sessionId: string,
+    key: string,
+    update: (
+      claim: NonNullable<SessionRecord["authChangePing"]>,
+    ) => SessionRecord["authChangePing"] | null,
+  ): Promise<boolean> {
+    return this.withSessionLifecycleLock(sessionId, async () => {
+      const current = readSession(this.config.dataDir, sessionId);
+      const claim = current?.authChangePing;
+      if (!current || current.status !== "running" || claim?.key !== key || claim.pinged)
+        return false;
+      const next = update(claim);
+      if (!next) return false;
+      writeSession(this.config.dataDir, { ...current, authChangePing: next });
+      return true;
+    });
+  }
+
+  /**
+   * Sends the one continue ping for a claimed account change, at most AUTH_CHANGE_PING_MAX_ATTEMPTS
+   * tries. Sends only when the forced rate-limit clear succeeds and leaves the agent waiting at its
+   * prompt; any clear error or other state spends the claim without a send.
+   */
+  private async sendAuthChangePing(sessionId: string, key: string): Promise<void> {
+    const spend = () =>
+      this.updateAuthChangePing(sessionId, key, (claim) => ({
+        ...claim,
+        attempts: AUTH_CHANGE_PING_MAX_ATTEMPTS,
+      }));
+    for (let attempt = 0; attempt < AUTH_CHANGE_PING_MAX_ATTEMPTS; attempt += 1) {
+      const counted = await this.updateAuthChangePing(sessionId, key, (claim) =>
+        claim.attempts >= AUTH_CHANGE_PING_MAX_ATTEMPTS
+          ? null
+          : { ...claim, attempts: claim.attempts + 1 },
+      );
+      if (!counted) return;
+      try {
+        const cleared = await this.clearRateLimit(sessionId, true, "auth-change").catch(
+          (error: unknown) => {
+            if (error instanceof RateLimitClearError) return null;
+            throw error;
+          },
+        );
+        if (cleared?.state !== "waiting") {
+          await spend();
+          return;
+        }
+        // Re-checked under the lock: a session paused or stopped during the clear is never sent to.
+        if (!(await this.updateAuthChangePing(sessionId, key, (claim) => claim))) return;
+        await this.send(sessionId, { message: AUTH_CHANGE_PING_MESSAGE });
+        await this.updateAuthChangePing(sessionId, key, (claim) => ({ ...claim, pinged: true }));
+        return;
+      } catch (error) {
+        this.logEvent("session.auth.ping_failed", {
+          level: "warn",
+          sessionId,
+          message: "Could not send the continue ping after the account change",
+          details: { error: error instanceof Error ? error.message : String(error), attempt },
+        });
+      }
+    }
+  }
+
+  /** Persists a companion-reported effective-account change and logs it once. */
+  private async recordAuthRotation(rotation: AuthRotation): Promise<void> {
+    this.authSnapshot = undefined;
+    const matches = (
+      record: SessionRecord | null | undefined,
+    ): record is SessionRecord & { auth: NonNullable<SessionRecord["auth"]> } =>
+      record?.auth?.generation === rotation.generation &&
+      record.auth.effectiveAccountId !== rotation.toAccountId;
+    if (!matches(readSession(this.config.dataDir, rotation.sessionId))) return;
+    let pingKey: string | undefined;
+    try {
+      const project = await this.withSessionLifecycleLock(rotation.sessionId, async () => {
+        const current = readSession(this.config.dataDir, rotation.sessionId);
+        if (!matches(current)) return null;
+        const auth = { ...current.auth, effectiveAccountId: rotation.toAccountId };
+        const authChangePing = this.authChangePingClaim(current, auth);
+        writeSession(this.config.dataDir, {
+          ...current,
+          auth,
+          ...(authChangePing ? { authChangePing } : {}),
+          updatedAt: nowIso(),
+        });
+        this.stateCache.delete(rotation.sessionId);
+        if (authChangePing) pingKey = authChangePing.key;
+        return current.project;
+      });
+      if (project === null) return;
+      if (pingKey) void this.sendAuthChangePing(rotation.sessionId, pingKey);
+      this.logEvent("session.auth.rotated", {
+        level: "info",
+        sessionId: rotation.sessionId,
+        projectId: project,
+        message: `Switched ${rotation.provider} authorization to another account`,
+        details: {
+          fromAccountId: rotation.fromAccountId,
+          toAccountId: rotation.toAccountId,
+          generation: rotation.generation,
+        },
+      });
+    } catch (error) {
+      this.logEvent("session.auth.rotated", {
+        level: "warn",
+        sessionId: rotation.sessionId,
+        message: "Could not record authorization account change",
+        details: { error: error instanceof Error ? error.message : String(error) },
+      });
+    }
+  }
+
+  private async hasReadyAuthorizationAccount(
+    sessionId: string,
+    provider: AuthProvider,
+  ): Promise<boolean> {
+    if (!this.authAccounts.read().accounts.some((account) => account.provider === provider)) {
+      return false;
+    }
+    try {
+      return (await this.readAuthorizationState()).accounts.some(
+        (account) => account.provider === provider && account.status === "ready",
+      );
+    } catch (error) {
+      this.logEvent("session.auth.direct", {
+        level: "warn",
+        sessionId,
+        message: `Managed ${provider} authorization unavailable; launching with host authorization`,
+        details: { error: error instanceof Error ? error.message : String(error) },
+      });
+      return false;
+    }
   }
 
   private resolveClaudeAuthPlanOptions(
@@ -7626,10 +8529,11 @@ export class SessionService {
       // risk of being evicted on this same pass.
       const liveIds = new Set(liveSessions.map((session) => session.id));
       this.pruneSessionScopedState(liveIds);
-      const claudeAccounts = this.computeClaudeAccountsView();
+      const claudeAccounts = await this.computeClaudeAccountsView();
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         if (this.isDeliveryStopped()) return;
+        this.refreshSessionToolsOnce(session);
         try {
           this.warnIfTokenBudgetUnenforced(session);
           const { view, classified, detectionOnlyError } = await this.enrichWithClassified(
@@ -7651,7 +8555,7 @@ export class SessionService {
             }
             continue;
           }
-          await this.checkPrForSession(session, view.state);
+          await this.checkPrForSession(session, classified.state);
           if (this.isDeliveryStopped()) return;
           if (detectionOnlyError) {
             const previousAttention = this.attentionStates.get(view.id);
@@ -7683,7 +8587,7 @@ export class SessionService {
             shouldParkForStale(
               {
                 status: view.status,
-                state: view.state,
+                state: classified.state,
                 lastActivityAt: parkActivityAt.toISOString(),
               },
               this.resolveStaleAfterMs(session),
@@ -7697,7 +8601,7 @@ export class SessionService {
             view.state === "waiting" &&
             !this.isInRestoreWarmup(session.id)
           ) {
-            this.scheduleTodoNudge(session);
+            this.scheduleTodoNudge(session, classified.agentActivityAt);
           }
           const attention: AttentionState | null =
             view.state === "needs_input"
@@ -7770,6 +8674,9 @@ export class SessionService {
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
     this.codexRateLimitPoller.prune(liveIds);
+    for (const sessionId of this.rateLimitClearRevisions.keys()) {
+      if (!liveIds.has(sessionId)) this.rateLimitClearRevisions.delete(sessionId);
+    }
     for (const sessionId of this.scheduledWakeClaims.keys()) {
       if (!liveIds.has(sessionId)) this.scheduledWakeClaims.delete(sessionId);
     }
@@ -7787,6 +8694,24 @@ export class SessionService {
     }
     for (const sessionId of this.todoNudgeBackoff.keys()) {
       if (!liveIds.has(sessionId)) this.todoNudgeBackoff.delete(sessionId);
+    }
+    for (const sessionId of this.snapshotCorruptLogged.keys()) {
+      if (!liveIds.has(sessionId)) this.snapshotCorruptLogged.delete(sessionId);
+    }
+    for (const sessionId of this.snapshotWorkCache.keys()) {
+      if (!liveIds.has(sessionId)) this.snapshotWorkCache.delete(sessionId);
+    }
+    for (const sessionId of this.firstWorkCache.keys()) {
+      if (!liveIds.has(sessionId)) this.firstWorkCache.delete(sessionId);
+    }
+    for (const sessionId of this.toolsRefreshed) {
+      if (!liveIds.has(sessionId)) this.toolsRefreshed.delete(sessionId);
+    }
+    for (const sessionId of this.toolsRefreshFailedLogged) {
+      if (!liveIds.has(sessionId)) this.toolsRefreshFailedLogged.delete(sessionId);
+    }
+    for (const sessionId of this.snapshotFailureLogged) {
+      if (!liveIds.has(sessionId)) this.snapshotFailureLogged.delete(sessionId);
     }
     // Keyed `${sessionId}\0${sidecarName}`, unlike every other map here —
     // test only the first \0-split segment against liveIds.
@@ -7874,11 +8799,6 @@ export class SessionService {
     for (const sessionId of this.usageMenuConfirmedAt.keys()) {
       if (!liveIds.has(sessionId)) {
         this.usageMenuConfirmedAt.delete(sessionId);
-      }
-    }
-    for (const sessionId of this.claudeRotationEpisode.keys()) {
-      if (!liveIds.has(sessionId)) {
-        this.claudeRotationEpisode.delete(sessionId);
       }
     }
     for (const sessionId of this.queuedMessageDeliveryLastFailure.keys()) {
@@ -8368,6 +9288,7 @@ export class SessionService {
       void this.runSessionGcSweep();
       void this.runDiskBudgetSweep();
       this.runArtifactRetentionSweep();
+      this.runCloseoutRetentionSweep();
       void this.runTelegramTopicGcSweep();
     }, SESSION_GC_TICK_MS);
     this.sessionGcTimer.unref();
@@ -9220,6 +10141,45 @@ export class SessionService {
     });
   }
 
+  /** Once per (owner, trigger): the claim is persisted before the send, so a restart never repeats it. */
+  noticeBlockedTrigger(sessionId: string, triggerId: string): void {
+    const record = readSession(this.config.dataDir, sessionId);
+    if (
+      !record ||
+      record.closeoutOwner !== true ||
+      record.blockedTriggerNotices?.includes(triggerId)
+    ) {
+      return;
+    }
+    writeSession(this.config.dataDir, {
+      ...record,
+      blockedTriggerNotices: [...(record.blockedTriggerNotices ?? []), triggerId],
+    });
+    this.stateCache.delete(sessionId);
+    const telegram = this.resolveTelegramNotice(sessionId) !== null;
+    this.logEvent("trigger.send.blocked_notice", {
+      level: "warn",
+      sessionId,
+      projectId: record.project,
+      message: `${sessionId} owns closeout but allowedTriggers blocks ${triggerId}`,
+      details: { triggerId, telegram },
+    });
+    if (telegram) void this.sendBlockedTriggerNotice(sessionId, triggerId);
+  }
+
+  private async sendBlockedTriggerNotice(sessionId: string, triggerId: string): Promise<void> {
+    try {
+      const view = await this.get(sessionId);
+      await this.pushTelegramNotice(
+        sessionId,
+        view,
+        `${telegramSessionLabel(view)} owns closeout; allowedTriggers blocks ${triggerId}, alert dropped. Fix: spur pause ${sessionId}, then spawn with reuseWorkspaceSessionId and allowedTriggers omitted.`,
+      );
+    } catch (error) {
+      this.logTelegramNoticeFailure(sessionId, "blocked-trigger notice", error);
+    }
+  }
+
   private async pushTelegramNotice(
     sessionId: string,
     topicSession: Pick<SessionView, "id" | "agent" | "state" | "slots">,
@@ -9438,7 +10398,7 @@ export class SessionService {
   // a reminder never queues behind (or ahead of) a user send, and one pane's
   // ack wait never stalls the sweep for every other session. A skipped tick
   // is retried by the next sweep; attempts stay bounded by todoNudge.
-  private scheduleTodoNudge(session: SessionRecord): void {
+  private scheduleTodoNudge(session: SessionRecord, agentActivityAt: Date | null): void {
     if (
       this.todoNudgesInFlight.has(session.id) ||
       this.sessionLifecycleLocks.has(session.id) ||
@@ -9447,7 +10407,7 @@ export class SessionService {
       return;
     }
     this.todoNudgesInFlight.add(session.id);
-    void this.maybeNudgeTodo(session, { detached: true })
+    void this.maybeNudgeTodo(session, { detached: true, agentActivityAt })
       .catch(() => {})
       .finally(() => {
         this.todoNudgesInFlight.delete(session.id);
@@ -9456,7 +10416,7 @@ export class SessionService {
 
   private async maybeNudgeTodo(
     session: SessionRecord,
-    options?: { detached?: boolean },
+    options?: { detached?: boolean; agentActivityAt?: Date | null },
   ): Promise<void> {
     if (
       this.isInRestoreWarmup(session.id) ||
@@ -9473,11 +10433,17 @@ export class SessionService {
     const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
     if (Date.now() - lastSuccessful < 60_000) return;
     try {
+      let workAt: Date | null = null;
+      try {
+        workAt = await this.snapshotWorkAt(session, options?.agentActivityAt ?? null);
+      } catch (error) {
+        this.logSnapshotFailureOnce(session, error);
+      }
       await this.withPaneWriteLock(session.tmuxSession, async () => {
         const lifecycleIds = this.lifecycleIdsFor(session);
         const prepared = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
           if (options?.detached && this.deliveryStopped) return null;
-          return this.maybeNudgeTodoLocked(session, lifecycleIds);
+          return this.maybeNudgeTodoLocked(session, lifecycleIds, workAt);
         });
         if (!prepared) return;
 
@@ -9557,6 +10523,7 @@ export class SessionService {
   private async maybeNudgeTodoLocked(
     session: SessionRecord,
     lifecycleIds: string[],
+    workAt: Date | null,
   ): Promise<PreparedTodoNudge | null> {
     const current = readSession(this.config.dataDir, session.id);
     if (
@@ -9579,6 +10546,25 @@ export class SessionService {
     )
       return null;
     session = current;
+    const snapshotRequest = this.prepareSnapshotRequest(session, workAt);
+    // Rewrites the tools first: an older session may lack the wrapper, and a failed write
+    // must not burn one of the request attempts. Failure skips the request, not the ToDo nudge.
+    const command = snapshotRequest ? this.snapshotRequestCommand(session) : null;
+    if (snapshotRequest && command !== null) {
+      session = { ...session, snapshotNudge: snapshotRequest };
+      writeSession(this.config.dataDir, session);
+      return {
+        sessionId: session.id,
+        workspaceId: workspaceIdOf(session),
+        lifecycleIds,
+        generation: await this.capturePaneGeneration(session),
+        stamp: this.lifecycleStamp(session),
+        slot: "snapshotNudge",
+        ...snapshotRequest,
+        session,
+        message: snapshotRequestMessage(command),
+      };
+    }
     const projection = ensureTodoLedger(this.config.dataDir, session);
     const ledgerSession = readSession(this.config.dataDir, session.id);
     if (!ledgerSession) return null;
@@ -9665,11 +10651,145 @@ export class SessionService {
       lifecycleIds,
       generation,
       stamp: this.lifecycleStamp(session),
+      slot: "todoNudge",
       fingerprint,
       attempts,
       session,
       message,
     };
+  }
+
+  private snapshotRequestCommand(session: SessionRecord): string | null {
+    try {
+      return shellEscape(
+        join(
+          this.prepareSessionTools(session.id, session.agent, session.project),
+          SNAPSHOT_TOOL_NAME,
+        ),
+      );
+    } catch (error) {
+      this.logSnapshotFailureOnce(session, error);
+      return null;
+    }
+  }
+
+  // Snapshot logic never blocks the ToDo nudge; logged once per session per process.
+  private logSnapshotFailureOnce(session: SessionRecord, error: unknown): void {
+    if (this.snapshotFailureLogged.has(session.id)) return;
+    this.snapshotFailureLogged.add(session.id);
+    this.logEvent("session.snapshot.request_skipped", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Snapshot request skipped for ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+      details: { kind: "snapshot_failed" },
+    });
+  }
+
+  /**
+   * Instant of the newest agent work that makes a snapshot due, else null. Transcript mtime
+   * (activityAt) only bounds it: Spur's own reminders and the agent's replies bump the mtime
+   * without being work, so due sessions read their transcript entries.
+   */
+  private async snapshotWorkAt(
+    session: SessionRecord,
+    activityAt: Date | null,
+  ): Promise<Date | null> {
+    const settings = snapshotSettings(this.resolveProjectForSession(session));
+    if (!settings.enabled || activityAt === null) return null;
+    let latest;
+    try {
+      latest = readSnapshotVersion(this.config.dataDir, session, "latest", "live");
+    } catch (error) {
+      // prepareSnapshotRequest logs the corrupt snapshot.
+      if (error instanceof SnapshotCorruptError) return activityAt;
+      throw error;
+    }
+    const freshnessMs = settings.freshnessMinutes * 60_000;
+    if (
+      !snapshotDue({
+        latestAt: latest?.at ?? null,
+        sessionCreatedAt: session.createdAt,
+        activityAt,
+        freshnessMs,
+      })
+    ) {
+      return null;
+    }
+    const floorMs = Date.parse(latest?.at ?? session.createdAt) + freshnessMs;
+    const activityMs = activityAt.getTime();
+    const cached = this.snapshotWorkCache.get(session.id);
+    if (cached?.activityMs === activityMs && cached.floorMs === floorMs) {
+      return cached.workMs === null ? null : new Date(cached.workMs);
+    }
+    const options = { untimedActivityMs: activityMs, floorMs };
+    let result: { workMs: number | null; complete: boolean } = { workMs: null, complete: true };
+    if (session.agent === "claude" || session.agent === "codex") {
+      const tail =
+        session.agent === "claude"
+          ? await this.readConversationSerialized(session)
+          : await this.readCodexConversationSerialized(session);
+      if (tail) {
+        result = lastAgentWorkMs(tail.entries, { ...options, atStart: tail.startIndex === 0 });
+        if (!result.complete) {
+          result = lastAgentWorkMs(await this.readFullConversationEntries(session), {
+            ...options,
+            atStart: true,
+          });
+        }
+      }
+    } else {
+      result = lastAgentWorkMs(await this.readFullConversationEntries(session), {
+        ...options,
+        atStart: true,
+      });
+    }
+    this.snapshotWorkCache.set(session.id, { activityMs, floorMs, workMs: result.workMs });
+    return result.workMs === null ? null : new Date(result.workMs);
+  }
+
+  /** Next snapshotNudge slot value when a snapshot request is due and budgeted, else null. */
+  private prepareSnapshotRequest(
+    session: SessionRecord,
+    workAt: Date | null,
+  ): { fingerprint: string; attempts: number } | null {
+    if (workAt === null) return null;
+    let latest;
+    try {
+      latest = readSnapshotVersion(this.config.dataDir, session, "latest", "live");
+    } catch (error) {
+      if (!(error instanceof SnapshotCorruptError)) throw error;
+      if (this.snapshotCorruptLogged.get(session.id) !== error.version) {
+        this.snapshotCorruptLogged.set(session.id, error.version);
+        this.logEvent("session.snapshot.request_skipped", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Snapshot request skipped for ${session.id}: ${error.message}`,
+          details: { kind: "snapshot_corrupt", version: error.version },
+        });
+      }
+      return null;
+    }
+    const freshnessMs =
+      snapshotSettings(this.resolveProjectForSession(session)).freshnessMinutes * 60_000;
+    if (
+      !snapshotDue({
+        latestAt: latest?.at ?? null,
+        sessionCreatedAt: session.createdAt,
+        activityAt: workAt,
+        freshnessMs,
+      })
+    ) {
+      return null;
+    }
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify(["snapshot", latest?.version ?? 0]))
+      .digest("hex");
+    const priorAttempts =
+      session.snapshotNudge?.fingerprint === fingerprint ? session.snapshotNudge.attempts : 0;
+    if (priorAttempts >= AUTOMATIC_REMINDER_MAX_ATTEMPTS) return null;
+    return { fingerprint, attempts: priorAttempts + 1 };
   }
 
   private async todoNudgeMatches(prepared: PreparedTodoNudge): Promise<boolean> {
@@ -9684,8 +10804,8 @@ export class SessionService {
       current.pipeline?.status !== "running" &&
       !submitPending(current) &&
       !hasPendingTelegramSend(this.config.dataDir, current.id) &&
-      current.todoNudge?.fingerprint === prepared.fingerprint &&
-      current.todoNudge.attempts === prepared.attempts &&
+      current[prepared.slot]?.fingerprint === prepared.fingerprint &&
+      current[prepared.slot]?.attempts === prepared.attempts &&
       this.lifecycleStampMatches(current, prepared.stamp) &&
       (await this.paneGenerationMatches(current, prepared.generation))
     );
@@ -11142,6 +12262,32 @@ export class SessionService {
     return links.length === slots.links.length ? slots : { ...slots, links };
   }
 
+  private displaySlotsForSession(
+    session: SessionRecord,
+    workspaceState?: Pick<SessionRecord, "slots" | "pr">,
+  ): SessionSlots | undefined {
+    const captured =
+      session.terminalSlotsCaptured === true &&
+      (isTerminalSessionStatus(session.status) ||
+        !readWorkspaceState(this.config.dataDir, workspaceIdOf(session)));
+    const state = captured
+      ? session
+      : (workspaceState ?? resolveWorkspaceState(this.config.dataDir, session));
+    return this.projectSidecarSlots(session, deriveSessionSlots(state));
+  }
+
+  private captureTerminalSlots(session: SessionRecord): SessionSlots | undefined {
+    const slots = this.displaySlotsForSession(session);
+    const record: SessionRecord = {
+      ...(readSession(this.config.dataDir, session.id) ?? session),
+      terminalSlotsCaptured: true,
+    };
+    if (slots) record.slots = slots;
+    else delete record.slots;
+    writeSession(this.config.dataDir, record);
+    return slots;
+  }
+
   private pruneLegacySidecarLinks(
     session: SessionRecord,
     names: ReadonlySet<string>,
@@ -11656,6 +12802,7 @@ export class SessionService {
   async list(options?: {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
+    links?: readonly { label: string; url?: string }[];
     signal?: AbortSignal | undefined;
   }): Promise<SessionListView[]> {
     const allSessions = listSessions(this.config.dataDir);
@@ -11666,6 +12813,8 @@ export class SessionService {
         this.lifecycle.snapshot(view.id).operation,
         options?.includeCompleted === true,
       );
+    const matchesLinks = (view: { slots?: SessionSlots }) =>
+      matchesSessionLinks(view.slots?.links ?? [], options?.links);
     if (options?.view === "dashboard") {
       if (this.dashboardCacheReady) {
         await this.dashboardCacheReady;
@@ -11708,12 +12857,12 @@ export class SessionService {
         { includePending: true, onExhausted: "lastBuild", signal: options.signal },
       );
       for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
-      return views.filter(included);
+      return views.filter((view) => included(view) && matchesLinks(view));
     }
     const sessions = allSessions.filter(included);
     // Compute the claude accounts snapshot once for the whole batch instead of
-    // per-session inside enrich (N listAccounts reads + N×M existsSync).
-    const claudeAccounts = this.computeClaudeAccountsView();
+    // per-session inside enrich.
+    const claudeAccounts = await this.computeClaudeAccountsView();
     const rows = await Promise.all(
       sessions.map(async (session) => {
         const receipt = this.lifecycle.snapshot(session.id);
@@ -11742,7 +12891,90 @@ export class SessionService {
       { includePending: true, onExhausted: "lastBuild", signal: options?.signal },
     );
     for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
-    return views.filter(included);
+    return views.filter((view) => included(view) && matchesLinks(view));
+  }
+
+  async listSessionTransitions(
+    query: SessionTransitionsQuery = {},
+  ): Promise<SessionTransitionsResponse> {
+    const binding = this.transitionsBinding;
+    if (!binding) throw new Error("Session transitions service is disposed");
+    const assertCurrent = () => {
+      if (this.transitionsBinding !== binding)
+        throw new Error("Session transitions data directory changed; retry poll");
+    };
+    let refresh = this.transitionsRefresh;
+    if (!refresh || refresh.binding !== binding) {
+      const run = withSessionWriteGuard(assertCurrent, () =>
+        this.refreshSessionTransitions(binding, assertCurrent),
+      );
+      refresh = { binding, run };
+      this.transitionsRefresh = refresh;
+    }
+    try {
+      await refresh.run;
+    } finally {
+      if (this.transitionsRefresh === refresh) this.transitionsRefresh = undefined;
+    }
+    assertCurrent();
+    return binding.store.query(query);
+  }
+
+  private async refreshSessionTransitions(
+    binding: NonNullable<SessionService["transitionsBinding"]>,
+    assertCurrent: () => void,
+  ): Promise<void> {
+    assertCurrent();
+    binding.store.flushPending();
+    const accounts = await this.computeClaudeAccountsView();
+    const seen = new Set<string>();
+    const rows: {
+      view: Omit<SessionListItemView, "lifecycle">;
+      source: SessionRecord | null;
+      receipt: SessionLifecycleSnapshot;
+    }[] = [];
+    for (let pass = 0; pass < LIFECYCLE_REBUILD_PASSES; pass += 1) {
+      assertCurrent();
+      const records = listSessions(binding.dataDir);
+      for (const record of records) {
+        binding.store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
+        if (seen.has(record.id)) continue;
+        const receipt = this.lifecycle.snapshot(record.id);
+        try {
+          const { view, source } = await this.enrichWithClassified(
+            record,
+            accounts,
+            records,
+            assertCurrent,
+          );
+          assertCurrent();
+          rows.push({ view, source, receipt });
+          seen.add(record.id);
+        } catch (error) {
+          assertCurrent();
+          if (
+            error instanceof SessionResourceNotFoundError &&
+            !readSession(binding.dataDir, record.id)
+          )
+            continue;
+          throw error;
+        }
+      }
+      await this.finalizeLifecycleRows(
+        rows,
+        (record, listing) => this.enrichWithClassified(record, accounts, listing, assertCurrent),
+        { includePending: true, onExhausted: "refuse" },
+      );
+      assertCurrent();
+      const current = listSessions(binding.dataDir);
+      if (current.every((record) => seen.has(record.id))) {
+        // No await between final reconciliation and caller's high-water snapshot.
+        for (const record of current)
+          binding.store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
+        return;
+      }
+    }
+    throw new Error("Session set changed during transitions refresh; retry poll");
   }
 
   getSessionIdentity(sessionId: string): Pick<SessionRecord, "id" | "agent"> {
@@ -12042,6 +13274,18 @@ export class SessionService {
     return artifact;
   }
 
+  private async readFullConversationEntries(session: SessionRecord): Promise<TranscriptEntry[]> {
+    const result = await readAgentConversation(session.agent, {
+      worktreePath: session.worktreePath,
+      ...(session.agent === "codex" ? { codexSessionsDir: this.codexSessionsDir(session.id) } : {}),
+      ...(session.agent === "cursor"
+        ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+        : {}),
+      ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+    });
+    return result ?? [];
+  }
+
   async getConversation(
     sessionId: string,
     options?: { from?: number; preserveEnd?: boolean },
@@ -12051,18 +13295,8 @@ export class SessionService {
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
     const from = options?.from;
 
-    const readFullEntries = async (): Promise<TranscriptEntry[]> => {
-      return readAgentConversation(session.agent, {
-        worktreePath: session.worktreePath,
-        ...(session.agent === "codex"
-          ? { codexSessionsDir: this.codexSessionsDir(session.id) }
-          : {}),
-        ...(session.agent === "cursor"
-          ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
-          : {}),
-        ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-      }).then((result) => result ?? []);
-    };
+    const readFullEntries = (): Promise<TranscriptEntry[]> =>
+      this.readFullConversationEntries(session);
 
     if (session.agent === "claude") {
       // Classification always comes from the tail reader, on every request
@@ -13089,7 +14323,9 @@ export class SessionService {
   //   that text confirms it; a busy turn's own records never do. The agent
   //   back at its prompt, quiet past the queued-send grace, with no ack: the
   //   text goes back to the queue head once (submitRequeuedMessage); a second
-  //   miss for the same text releases the hold (session.submit.released).
+  //   miss for the same text releases the hold (session.submit.released). A
+  //   typed hold older than SUBMIT_HOLD_CEILING_MS with the agent waiting
+  //   releases at once, without a re-queue.
   private async settleSubmitHold(
     session: SessionRecord,
     state: SessionState,
@@ -13101,11 +14337,15 @@ export class SessionService {
     const typed = session.queuedMessageTyped;
     const strictCodex = session.agent === "codex" && typed?.ackBaseline?.agent === "codex";
     const qualifiedObservation = ackOnly || strictCodex;
-    if (
-      !holdAt ||
-      (!qualifiedObservation &&
-        (!agentActivityAt || agentActivityAt.getTime() < Date.parse(holdAt)))
-    ) {
+    if (!holdAt) return session;
+    const ceilingReached =
+      mode === "normal" &&
+      state === "waiting" &&
+      typed?.typedAt === holdAt &&
+      Date.now() - Date.parse(holdAt) >= SUBMIT_HOLD_CEILING_MS;
+    const activityAfterHold =
+      agentActivityAt !== null && agentActivityAt.getTime() >= Date.parse(holdAt);
+    if (!qualifiedObservation && !activityAfterHold && !ceilingReached) {
       return session;
     }
     if (!typed?.ackBaseline) {
@@ -13113,6 +14353,9 @@ export class SessionService {
       const latest = readSession(this.config.dataDir, session.id);
       if (!latest || latest.submitUnconfirmedAt !== holdAt) {
         return latest ?? session;
+      }
+      if (ceilingReached && !activityAfterHold) {
+        return this.releaseUnconfirmedSubmit(latest, typed.message, "ceiling");
       }
       return this.confirmSubmitHold(latest, "activity");
     }
@@ -13164,6 +14407,7 @@ export class SessionService {
         session.agent,
         {
           ...this.submitAckContext(session),
+          ackNotBeforeMs: Date.parse(originalTyped.typedAt),
           ...(qualifiedObservation ? { codexAckScope: "current-native-baseline" as const } : {}),
         },
         originalTyped.ackBaseline,
@@ -13192,6 +14436,8 @@ export class SessionService {
     if (acked) {
       return this.confirmSubmitHold(latest, "ack");
     }
+    // Past the ceiling the text is never typed again, whatever else holds.
+    if (ceilingReached) return this.releaseUnconfirmedSubmit(latest, typed.message, "ceiling");
     if (
       ackOnly ||
       (strictCodex && !qualifiedNoMatch) ||
@@ -13236,6 +14482,40 @@ export class SessionService {
     return confirmed;
   }
 
+  // Never silent: the view shows the text with Retry and Dismiss. Never types
+  // or re-queues the text; only the user's Retry puts it back.
+  private releaseUnconfirmedSubmit(
+    latest: SessionRecord,
+    message: string,
+    reason: "requeue_exhausted" | "ceiling",
+  ): SessionRecord {
+    const {
+      submitUnconfirmedAt: _held,
+      queuedMessageTyped: _typed,
+      submitRequeuedMessage: requeued,
+      ...base
+    } = latest;
+    const failed: SessionRecord = {
+      ...base,
+      ...(requeued !== undefined && requeued !== message
+        ? { submitRequeuedMessage: requeued }
+        : {}),
+      submitFailedMessage: { message, at: nowIso() },
+    };
+    writeSession(this.config.dataDir, failed);
+    this.logEvent("session.submit.released", {
+      level: "warn",
+      sessionId: latest.id,
+      projectId: latest.project,
+      message:
+        reason === "ceiling"
+          ? `Released the unconfirmed prompt hold for ${latest.id}: no ack of it after ${SUBMIT_HOLD_CEILING_MS / 60_000} min with the agent at its prompt`
+          : `Released the unconfirmed prompt hold for ${latest.id}: the agent took no ack of it after one re-queue`,
+      details: { messageLength: message.length, reason },
+    });
+    return failed;
+  }
+
   private requeueUnconfirmedSubmit(latest: SessionRecord, message: string): SessionRecord {
     const {
       submitUnconfirmedAt: _held,
@@ -13244,20 +14524,7 @@ export class SessionService {
       ...base
     } = latest;
     if (requeued === message) {
-      // Never silent: the view shows the text with Retry and Dismiss.
-      const failed: SessionRecord = {
-        ...base,
-        submitFailedMessage: { message, at: nowIso() },
-      };
-      writeSession(this.config.dataDir, failed);
-      this.logEvent("session.submit.released", {
-        level: "warn",
-        sessionId: latest.id,
-        projectId: latest.project,
-        message: `Released the unconfirmed prompt hold for ${latest.id}: the agent took no ack of it after one re-queue`,
-        details: { messageLength: message.length },
-      });
-      return failed;
+      return this.releaseUnconfirmedSubmit(latest, message, "requeue_exhausted");
     }
     const record = withQueuedMessages(
       { ...base, submitRequeuedMessage: message, updatedAt: nowIso() },
@@ -13297,43 +14564,74 @@ export class SessionService {
     return carried;
   }
 
-  private assertSpawnAccountReady(accountId?: string): void {
-    if (!accountId) return;
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account || !isAccountReady(account)) {
-      throw new Error(
-        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
-      );
-    }
-  }
-
   async spawn(request: SpawnSessionRequest, options?: SessionSpawnOptions): Promise<SessionView> {
     if (options?.triggerBirthKey) {
       const key = options.triggerBirthKey;
-      const pending = this.triggerBirthsInFlight.get(key);
-      if (pending) {
-        if (!isDeepStrictEqual(pending.request, request)) {
-          throw new Error("Trigger birth key already belongs to a different spawn request");
-        }
-        return pending.result;
-      }
-      const existing = this.findPersistedTriggerBirth(request.project, key, request);
-      if (existing) return this.get(existing.id);
-      const original = structuredClone(request);
-      // Defer execution until the identity is registered, before the first await.
-      const result = Promise.resolve().then(() =>
-        this.spawnOnce(original, { ...options, triggerBirthKey: key }),
+      const { session } = await this.spawnWithBirthKey(key, request, () =>
+        this.spawnOnce(structuredClone(request), { ...options, triggerBirthKey: key }),
       );
-      this.triggerBirthsInFlight.set(key, { request: original, result });
-      try {
-        return await result;
-      } finally {
-        if (this.triggerBirthsInFlight.get(key)?.result === result) {
-          this.triggerBirthsInFlight.delete(key);
-        }
-      }
+      return session;
     }
     return this.spawnOnce(request, options);
+  }
+
+  // HTTP entry: an idempotencyKey makes the spawn replayable under the "api:" birth namespace.
+  async spawnFromRequest(
+    request: SpawnSessionRequest,
+    delivery: "foreground" | "background",
+  ): Promise<SpawnSessionResponse> {
+    const { idempotencyKey, ...rest } = request;
+    if (idempotencyKey === undefined) {
+      return delivery === "foreground"
+        ? this.spawn(rest, { acceptQueued: true })
+        : this.spawnInBackground(rest);
+    }
+    const triggerBirthKey = `api:${parseIdempotencyKey(idempotencyKey)}`;
+    const { session, replayed } = await this.spawnWithBirthKey(
+      triggerBirthKey,
+      rest,
+      (fingerprint) =>
+        delivery === "foreground"
+          ? this.spawnOnce(rest, { acceptQueued: true, triggerBirthKey })
+          : this.acceptBackgroundSpawn(rest, {
+              triggerBirthKey,
+              triggerBirthRequest: fingerprint,
+            }).then(({ session: accepted }) => accepted),
+    );
+    return replayed ? { ...session, replayed: true } : session;
+  }
+
+  // The only spawn dedup decision: in-flight join first (the keyed placeholder is written before
+  // launch, so a record alone does not mean the launch succeeded), then record lookup.
+  private async spawnWithBirthKey(
+    key: string,
+    request: SpawnSessionRequest,
+    run: (fingerprint: SpawnSessionRequest) => Promise<SessionView>,
+  ): Promise<{ session: SessionView; replayed: boolean }> {
+    const fingerprint = birthFingerprint(request);
+    const pending = this.triggerBirthsInFlight.get(key);
+    if (pending) {
+      const joined = await joinInFlight(pending, fingerprint);
+      return joined
+        ? { session: joined.value, replayed: true }
+        : this.spawnWithBirthKey(key, request, run);
+    }
+    const existing = this.findPersistedTriggerBirth(
+      request.project,
+      key,
+      request,
+      key.startsWith("api:") ? "active" : "complete",
+    );
+    if (existing) {
+      return { session: await this.get(existing.id), replayed: true };
+    }
+    const session = await runInFlight(
+      this.triggerBirthsInFlight,
+      key,
+      { request: fingerprint },
+      () => run(fingerprint),
+    );
+    return { session, replayed: false };
   }
 
   getTriggerBirth(
@@ -13351,18 +14649,32 @@ export class SessionService {
     projectId: string,
     key: string,
     request?: SpawnSessionRequest,
+    inventory: "active" | "complete" = "complete",
   ): SessionRecord | undefined {
     const candidates = listSessions(this.config.dataDir).filter(
       (session) => session.triggerBirthKey === key,
     );
-    if (candidates.length > 1) throw new Error("Trigger birth identity is ambiguous");
+    if (inventory === "complete" && candidates.length > 1)
+      throw new Error("Trigger birth identity is ambiguous");
     const existing = candidates[0];
     if (existing && existing.project !== projectId) {
-      throw new Error("Trigger birth key already belongs to a different project");
+      throw new IdempotencyKeyConflictError(
+        "Trigger birth key already belongs to a different project",
+        existing.id,
+      );
     }
-    if (existing && request && !isDeepStrictEqual(existing.triggerBirthRequest, request)) {
-      throw new Error("Trigger birth key already belongs to a different spawn request");
+    if (
+      existing &&
+      request &&
+      !isDeepStrictEqual(existing.triggerBirthRequest, birthFingerprint(request))
+    ) {
+      throw new IdempotencyKeyConflictError(
+        "Trigger birth key already belongs to a different spawn request",
+        existing.id,
+      );
     }
+    // API keys expire when gc archives their session; trigger ownership needs complete absence.
+    if (inventory === "active") return existing;
     for (const store of ["sessions", "sessions-archive"]) {
       const root = join(this.config.dataDir, store);
       if (!existsSync(root)) continue;
@@ -13392,7 +14704,7 @@ export class SessionService {
     request: SpawnSessionRequest,
     options?: SessionSpawnOptions,
   ): Promise<SessionView> {
-    const triggerBirthRequest = options?.triggerBirthKey ? structuredClone(request) : undefined;
+    const triggerBirthRequest = options?.triggerBirthKey ? birthFingerprint(request) : undefined;
     request = normalizeShepherdSpawnRequest(request);
     let admissionReservation = options?.admissionReservation;
     let admissionReserved = admissionReservation !== undefined;
@@ -13404,11 +14716,15 @@ export class SessionService {
     let workspacePath = "";
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
+    let closeoutTakenFrom: string[] | null = null;
     const placeholderState = { written: false };
     let prAlertReservation: string | undefined;
     let prAlertLaunchStarted = false;
     let prAlertBirthConfirmed = false;
+    let inheritedWritten = false;
     let launchedRecord: SessionRecord | undefined;
+    let authRegistration: AuthRegistration | undefined;
+    let authorizationRollbackWarning: string | undefined;
     let launchCandidate: SessionRecord | undefined;
     let resolvedModel: string | undefined;
     let launchSelection: AgentLaunchSelection;
@@ -13458,7 +14774,6 @@ export class SessionService {
           this.config.models.codexHome,
         ));
       resolvedModel = launchSelection.model;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       if (request.branch && !reuseCtx) {
         await resolveSpawnBranch({
           repoPath: project.path,
@@ -13539,10 +14854,20 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      authRegistration = await this.prepareSessionAuthorization(
+        sessionId,
+        agent,
+        project,
+        requestedAuthAccount(request, agent),
+        false,
+      );
       preflightTokenUsage = preflightBatchId
         ? await this.preflightUsageStore.claim(preflightBatchId, request.project, sessionId)
         : aggregatePreflightAttempts([]);
       this.spawnsInFlight.add(sessionId);
+      if (options?.replacingSessionId) {
+        this.handoffSuccessors.set(sessionId, options.replacingSessionId);
+      }
       if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -13645,6 +14970,7 @@ export class SessionService {
         ...(restrictWrites ? { restrictWrites: true } : {}),
         closeoutOwner,
         ...(options?.prAlertOwnerTransfer ? { prAlertTransfer: options.prAlertOwnerTransfer } : {}),
+        ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
@@ -13668,11 +14994,22 @@ export class SessionService {
         originalTaskPrompt,
       };
       this.assertReuseAnchorPresent(reuseCtx);
-      await this.persistSpawnPlaceholder(placeholder, request.prAlertOwner === true, () => {
-        placeholderState.written = true;
-      });
+      await this.persistSpawnPlaceholder(
+        placeholder,
+        request.prAlertOwner === true,
+        reuseCtx,
+        !restrictWrites && worktree && options?.closeoutOwnerTransfer === undefined,
+        (takenFrom) => {
+          placeholderState.written = true;
+          closeoutTakenFrom = takenFrom;
+        },
+      );
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
+      if (options?.inheritedTodo?.length) {
+        inheritedWritten = true;
+        inheritTodo(this.config.dataDir, placeholder, options.inheritedTodo);
+      }
       // Before the launch prompt exists: an agent that replies ahead of the
       // source's own bind step must answer the chat that asked for it.
       if (options?.telegramOrigin) {
@@ -13806,6 +15143,7 @@ export class SessionService {
         sessionToolDir,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
+        ...(authRegistration ? { managedAuth: true } : {}),
         ...launchSelection,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
@@ -13827,14 +15165,14 @@ export class SessionService {
       // sharing one worktree bind to their own transcript instead of guessing
       // by newest mtime.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchOptions = {
         ...planOptions,
-        ...this.resolveClaudeAuthPlanOptions({
-          id: sessionId,
-          agent,
-          ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
-        }),
+        ...managedAuthLaunch(
+          authRegistration,
+          sessionToolDir,
+          planOptions.codexArgs,
+          workspacePath,
+        ),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -13863,7 +15201,6 @@ export class SessionService {
         launchCommand: launchPlan.launchCommand,
         agentLaunchId,
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
-        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         status: "running",
         updatedAt: nowIso(),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -13887,7 +15224,10 @@ export class SessionService {
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
         agentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        extraEnv: {
+          ...sessionAgentConfig.env,
+          ...managedAuthLaunch(authRegistration, sessionToolDir).env,
+        },
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -13903,6 +15243,10 @@ export class SessionService {
         );
         launchCandidate = runningRecord;
         prAlertLaunchStarted = true;
+        // The prompt leaves with the process start when it rides the launch command, so the
+        // launch evidence (`agentLaunchId`, read by handoff recovery) must be durable first.
+        if (promptDeliveredOnLaunch)
+          this.writeSpawnRecord({ ...runningRecord, status: "spawning" });
         await createTmuxSession({
           sessionName: tmuxSession,
           cwd: workspacePath,
@@ -13919,6 +15263,8 @@ export class SessionService {
           runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
         }
         launchedRecord = runningRecord;
+        // This write persists `agentLaunchId` before the launch prompt is sent: handoff recovery
+        // reads it as the evidence that the successor began its launch and owns its ToDo copies.
         this.writeSpawnRecord({ ...runningRecord, status: "spawning" });
         this.logEvent("session.spawn.tmux_created", {
           level: "info",
@@ -14076,6 +15422,46 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
+      if (authRegistration && sessionId && agent && !placeholderState.written) {
+        authorizationRollbackWarning =
+          "Saved authorization retained: process exit or revocation could not be confirmed";
+        try {
+          const processes = await findForeignAgentProcessesForSession({
+            sessionId,
+            processMatchers: sessionProcessMatchers({ agent, launchCommand: "" }),
+            excludePanePids: [],
+          });
+          if (processes.status === "ok" && processes.pids.length === 0) {
+            await this.revokeManagedAuthorization(sessionId);
+            authorizationRollbackWarning = undefined;
+          }
+        } catch {
+          // Preserve the registration when cleanup cannot confirm ownership or revoke it.
+        }
+      }
+      // Handoff copies must not outlive a failed successor: the source keeps the open items.
+      const inheritedItems = options?.inheritedTodo;
+      const failedLifecycleIds = (failedId: string): string[] =>
+        this.lifecycleIdsFor({
+          id: failedId,
+          workspaceId: reuseCtx?.workspaceId ?? failedId,
+          ...(options?.prAlertOwnerTransfer
+            ? { prAlertTransfer: options.prAlertOwnerTransfer }
+            : {}),
+        });
+      let rolledBack = false;
+      const rollbackInherited = (failedId: string, failedProject: string): void => {
+        if (!inheritedWritten || rolledBack || !inheritedItems) return;
+        rolledBack = true;
+        this.rollbackInheritedTodoLocked({ id: failedId, project: failedProject }, inheritedItems);
+      };
+      const rollbackInheritedLocking = async (): Promise<void> => {
+        if (!inheritedWritten || !sessionId) return;
+        const failedId = sessionId;
+        await this.withSessionLifecycleLocks(failedLifecycleIds(failedId), async () =>
+          rollbackInherited(failedId, request.project),
+        );
+      };
       if (error instanceof SpawnAdmissionCancelledError) throw error;
       const failureReceipt = options?.receiptToken
         ? this.foregroundSpawnReceipts.get(options.receiptToken)
@@ -14094,7 +15480,10 @@ export class SessionService {
       }
       if (launchedRecord && !failureReceipt && !(sessionId && this.spawnWasKilled(sessionId))) {
         const retained = await this.retainLaunchedError(launchedRecord, error);
-        if (!isTerminalSessionStatus(retained.status)) throw error;
+        if (!isTerminalSessionStatus(retained.status)) {
+          await rollbackInheritedLocking();
+          throw error;
+        }
       }
       if (sessionId && project && placeholderState.written && agent) {
         const failedSessionId = sessionId;
@@ -14122,6 +15511,7 @@ export class SessionService {
             },
             { failOnSurvivors: false },
           );
+          rollbackInherited(sessionId, request.project);
           await this.terminateDetachedSessionProcesses({ id: sessionId });
           // Non-mcp project sidecars are desk-shared: a sibling can already be
           // attached to this still-spawning anchor (or, for a failing sibling,
@@ -14169,6 +15559,14 @@ export class SessionService {
           const erroredRecord: SessionRecord = {
             id: sessionId,
             project: request.project,
+            ...(authRegistration
+              ? {
+                  auth:
+                    readSession(this.config.dataDir, sessionId)?.auth ??
+                    publicAuthSession(authRegistration),
+                }
+              : {}),
+            ...(closeoutTakenFrom ? { closeoutOwner: true } : {}),
             ...(options?.prAlertOwnerTransfer
               ? { prAlertTransfer: options.prAlertOwnerTransfer }
               : {}),
@@ -14201,6 +15599,14 @@ export class SessionService {
           const persistedFailure = killed ? null : this.carrySpawnQueue(settledFailure);
           if (persistedFailure) {
             writeSession(this.config.dataDir, persistedFailure);
+          }
+          if (
+            closeoutTakenFrom &&
+            !prAlertBirthConfirmed &&
+            (!prAlertLaunchStarted ||
+              (launchCandidate && !(await this.launchResourcesMayRemain(launchCandidate))))
+          ) {
+            this.returnTakenCloseout(sessionId, closeoutTakenFrom);
           }
 
           this.logEvent("session.spawn.failed", {
@@ -14237,6 +15643,7 @@ export class SessionService {
                   workspaceIdOf(latest) !== failureReceipt.workspaceId ||
                   !(await this.paneGenerationMatches(latest, failureReceipt.generation))
                 ) {
+                  rollbackInherited(failureReceipt.sessionId, request.project);
                   const message = error instanceof Error ? error.message : String(error);
                   throw new Error(
                     `Failed to spawn ${sessionId}: ${message}; successor generation changed before cleanup`,
@@ -14249,13 +15656,7 @@ export class SessionService {
           );
         }
         return await this.withSessionLifecycleLocks(
-          this.lifecycleIdsFor({
-            id: sessionId,
-            workspaceId: reuseCtx?.workspaceId ?? sessionId,
-            ...(options?.prAlertOwnerTransfer
-              ? { prAlertTransfer: options.prAlertOwnerTransfer }
-              : {}),
-          }),
+          failedLifecycleIds(sessionId),
           cleanupFailedSpawn,
         );
       }
@@ -14279,6 +15680,7 @@ export class SessionService {
         details: {
           stage,
           requestedAgent: request.agent ?? null,
+          ...(authorizationRollbackWarning ? { authorizationRollbackWarning } : {}),
         },
       });
       throw error;
@@ -14289,6 +15691,7 @@ export class SessionService {
       }
       if (sessionId) {
         this.spawnsInFlight.delete(sessionId);
+        this.settleCloseoutTake(sessionId);
       }
     }
   }
@@ -14477,7 +15880,13 @@ export class SessionService {
         id: classified.session.id,
         agent: classified.session.agent,
         status: classified.session.status,
-        state: this.stabilizeState(classified.session.id, classified.state),
+        state: projectTaskStatus(
+          classified.session,
+          classified.state,
+          this.stabilizeState(classified.session.id, classified.state),
+          classified.runtime.runtimeAlive,
+          classified.workspacePresent,
+        ),
         runtimeAlive: classified.runtime.runtimeAlive,
       });
     }
@@ -14572,11 +15981,20 @@ export class SessionService {
   private async persistSpawnPlaceholder(
     record: SessionRecord,
     alertsRequested: boolean,
-    onWritten: () => void,
+    reuseCtx: { workspaceId: string } | null,
+    takeAllowed: boolean,
+    onWritten: (takenFrom: string[] | null) => void,
   ): Promise<void> {
+    const launchRecord = record;
+    const writePlaceholder = (): void => {
+      this.applyCloseoutTake(record, reuseCtx, takeAllowed, (takenFrom) => {
+        if (record.closeoutOwner !== undefined) launchRecord.closeoutOwner = record.closeoutOwner;
+        if (record.spawnIntent) launchRecord.spawnIntent = record.spawnIntent;
+        onWritten(takenFrom);
+      });
+    };
     if (!alertsRequested && !record.prAlertTransfer) {
-      writeSession(this.config.dataDir, record);
-      onWritten();
+      writePlaceholder();
       return;
     }
     record = normalizeSessionPrBinding(record);
@@ -14617,8 +16035,7 @@ export class SessionService {
           this.writePrAlertRoleLocked(record, { state: "owned", sessionId: record.id });
         }
       }
-      writeSession(this.config.dataDir, record);
-      onWritten();
+      writePlaceholder();
       if (transfer?.kind !== "suppressed") this.claimPrAlertsLocked(record, "birth");
     });
   }
@@ -14837,6 +16254,11 @@ export class SessionService {
     if (!owner) {
       return null;
     }
+    // A terminal owner's record is its own frozen snapshot. Active siblings
+    // still read the workspace file written above.
+    if (isTerminalSessionStatus(owner.status) && owner.terminalSlotsCaptured === true) {
+      return owner;
+    }
     const mirrored: SessionRecord = {
       ...owner,
       ...(options?.touchUpdatedAt ? { updatedAt: nowIso() } : {}),
@@ -14913,7 +16335,11 @@ export class SessionService {
     let agent: SessionRecord["agent"] | undefined;
     let worktree = false;
     let createdAt: string | undefined;
-    const placeholderState = { written: false };
+    const placeholderState: { written: boolean; closeoutTakenFrom: string[] | null } = {
+      written: false,
+      closeoutTakenFrom: null,
+    };
+    let preparationSucceeded = false;
     let ownedClaimBatchId: string | undefined;
     let prAlertReservation: string | undefined;
     let prompt = "";
@@ -14925,6 +16351,7 @@ export class SessionService {
     let selfDestruct: SelfDestructConfig | undefined;
     let resolvedModel: string | undefined;
     let launchSelection: AgentLaunchSelection;
+    let authRegistration: AuthRegistration | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -14958,7 +16385,6 @@ export class SessionService {
           this.config.models.codexHome,
         ));
       resolvedModel = launchSelection.model;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       if (worktree && request.branch && !reuseCtx) {
         await resolveSpawnBranch({
           repoPath: project.path,
@@ -14975,6 +16401,13 @@ export class SessionService {
         project.sessionPrefix,
       );
       this.spawnsPreparing.add(sessionId);
+      authRegistration = await this.prepareSessionAuthorization(
+        sessionId,
+        agent,
+        project,
+        requestedAuthAccount(request, agent),
+        false,
+      );
       const preflightBatchId = await this.preflightUsageStore.resolve(
         request.project,
         request.preflightBatchId,
@@ -15025,7 +16458,6 @@ export class SessionService {
         ...(options.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
-        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(request.reasoningEffort !== undefined
           ? { reasoningEffort: request.reasoningEffort }
@@ -15041,6 +16473,7 @@ export class SessionService {
         ...(placeholderBranchSource ? { branchSource: placeholderBranchSource } : {}),
         worktree,
         worktreePath: placeholderWorktreePath,
+        ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
         tmuxSession: sessionId,
         launchCommand: "",
         status: "spawning",
@@ -15093,9 +16526,16 @@ export class SessionService {
       if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
       this.pendingSpawnIds.add(sessionId);
       this.spawnsInFlight.add(sessionId);
-      await this.persistSpawnPlaceholder(placeholder, request.prAlertOwner === true, () => {
-        placeholderState.written = true;
-      });
+      await this.persistSpawnPlaceholder(
+        placeholder,
+        request.prAlertOwner === true,
+        reuseCtx,
+        !restrictWrites && worktree,
+        (takenFrom) => {
+          placeholderState.written = true;
+          placeholderState.closeoutTakenFrom = takenFrom;
+        },
+      );
       ownedClaimBatchId = undefined;
       if (options.telegramOrigin) {
         writeTelegramReplyTarget(this.config.dataDir, {
@@ -15128,6 +16568,7 @@ export class SessionService {
         attachments: startupAttachments,
       });
 
+      preparationSucceeded = true;
       return {
         request,
         launchSelection,
@@ -15145,6 +16586,9 @@ export class SessionService {
         sessionId,
         ...(resolvedBranch ? { resolvedBranch } : {}),
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
+        ...(placeholderState.closeoutTakenFrom
+          ? { closeoutTakenFrom: placeholderState.closeoutTakenFrom }
+          : {}),
         placeholder,
         startupAttachments,
         preflightBatchId,
@@ -15185,6 +16629,9 @@ export class SessionService {
           ...(options.prAlertOwnerTransfer
             ? { prAlertTransfer: options.prAlertOwnerTransfer }
             : {}),
+          ...(options.triggerBirthKey && triggerBirthRequest
+            ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
+            : {}),
           workspaceId: erroredWorkspaceId,
           agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
           prompt,
@@ -15210,6 +16657,8 @@ export class SessionService {
             this.config.dataDir,
             this.settlePrAlertTransferLocked(failedRecord, "rollback"),
           );
+          if (placeholderState.closeoutTakenFrom)
+            this.returnTakenCloseout(failedRecord.id, placeholderState.closeoutTakenFrom);
         });
       }
       this.logEvent("session.spawn.failed", {
@@ -15227,7 +16676,10 @@ export class SessionService {
       throw error;
     } finally {
       if (prAlertReservation) this.prAlertReservations.delete(prAlertReservation);
-      if (sessionId) this.spawnsPreparing.delete(sessionId);
+      if (sessionId) {
+        this.spawnsPreparing.delete(sessionId);
+        if (!preparationSucceeded) this.settleCloseoutTake(sessionId);
+      }
     }
   }
 
@@ -15503,12 +16955,28 @@ export class SessionService {
         { ...spawnPlaceholder, worktreePath: workspacePath },
         project,
       );
+      const authRegistration = await this.prepareSessionAuthorization(
+        sessionId,
+        agent,
+        project,
+        prepared.placeholder.auth
+          ? prepared.placeholder.auth.accountId
+          : requestedAuthAccount(request, agent),
+        prepared.placeholder.auth !== undefined,
+      );
+      const managedLaunch = managedAuthLaunch(
+        authRegistration,
+        sessionToolDir,
+        project.codexArgs,
+        workspacePath,
+      );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
         sessionId,
         worktreePath: workspacePath,
         sessionToolDir,
+        ...(authRegistration ? { managedAuth: true } : {}),
         ...prepared.launchSelection,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
@@ -15522,7 +16990,6 @@ export class SessionService {
       });
       // Fresh native identity per attempt avoids reusing an existing transcript.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(
           withProjectAgentOptions(project, {
@@ -15532,7 +16999,7 @@ export class SessionService {
           }),
           { planMode, restrictWrites },
         ),
-        ...this.resolveClaudeAuthPlanOptions(prepared.placeholder),
+        ...managedLaunch,
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -15553,6 +17020,7 @@ export class SessionService {
       const agentLaunchId = newAgentLaunchId();
       let runningRecord: SessionRecord = {
         ...sessionForMcp,
+        ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
         planMode,
         restrictWrites,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -15581,7 +17049,9 @@ export class SessionService {
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
         agentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        ...(sessionAgentConfig.env || managedLaunch.env
+          ? { extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env } }
+          : {}),
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -15932,10 +17402,23 @@ export class SessionService {
               : this.prAlertBirthUnlaunched(current) || launchProvenAbsent
                 ? "rollback"
                 : null;
+          const takenFrom = current.spawnIntent?.closeoutTakenFrom ?? prepared.closeoutTakenFrom;
+          if (takenFrom && outcome === null) {
+            this.holdDurableSpawn(sessionId, message);
+            return;
+          }
           this.retireDurableSpawn(
             outcome ? this.settlePrAlertTransferLocked(failure, outcome) : failure,
           );
+          if (takenFrom && outcome === "rollback") {
+            this.returnTakenCloseout(sessionId, takenFrom);
+          }
         });
+      } else if (
+        prepared.closeoutTakenFrom &&
+        (!launchCandidate || !(await this.launchResourcesMayRemain(launchCandidate)))
+      ) {
+        this.returnTakenCloseout(sessionId, prepared.closeoutTakenFrom);
       }
       this.logEvent("session.spawn.failed", {
         level: "error",
@@ -16038,6 +17521,7 @@ export class SessionService {
             }
           } finally {
             this.durableSpawnRuns.delete(prepared.sessionId);
+            this.settleCloseoutTake(prepared.sessionId);
             const current = readSession(this.config.dataDir, prepared.sessionId);
             if (!current?.spawnIntent) {
               this.durableSpawnIds.delete(prepared.sessionId);
@@ -16083,8 +17567,10 @@ export class SessionService {
     }
   }
 
-  private protectDurableSpawns(): void {
-    for (const record of listSessions(this.config.dataDir).sort((a, b) =>
+  private protectDurableSpawns(
+    sessions: readonly SessionRecord[] = listSessions(this.config.dataDir),
+  ): void {
+    for (const record of [...sessions].sort((a, b) =>
       (a.spawnReceipt?.acceptedAt ?? a.createdAt).localeCompare(
         b.spawnReceipt?.acceptedAt ?? b.createdAt,
       ),
@@ -16125,7 +17611,6 @@ export class SessionService {
         assertPrAlertRoutes(project, record.allowedTriggers);
       this.claimPrAlertsLocked(record, "resume");
     }
-    this.assertSpawnAccountReady(record.claudeAccountId);
     const startupAttachments = intent.startupAttachments.map(({ id, name }) => {
       const artifact = readSessionArtifact(this.config.dataDir, workspaceIdOf(record), id);
       if (!artifact) throw new Error(`Missing startup artifact ${id} for ${record.id}`);
@@ -16173,6 +17658,7 @@ export class SessionService {
       placeholder: record,
       startupAttachments,
       preflightBatchId: intent.preflightBatchId,
+      ...(intent.closeoutTakenFrom ? { closeoutTakenFrom: intent.closeoutTakenFrom } : {}),
     };
   }
 
@@ -16811,7 +18297,7 @@ export class SessionService {
     });
     try {
       await this.send(session.id, {
-        message: this.formatIntervalWakeMessage(
+        message: formatIntervalWakeMessage(
           session.id,
           intervalWake.message,
           intervalWake.stopCondition,
@@ -16907,11 +18393,7 @@ export class SessionService {
     });
     try {
       await this.send(session.id, {
-        message: this.formatDailyWakeMessage(
-          session.id,
-          dailyWake.message,
-          dailyWake.stopCondition,
-        ),
+        message: formatDailyWakeMessage(session.id, dailyWake.message, dailyWake.stopCondition),
         queue: false,
       });
       this.logEvent("session.wake.daily_sent", {
@@ -17622,6 +19104,8 @@ export class SessionService {
     request: SendMessageRequest,
     wakeClaim?: ScheduledWakeClaim,
   ): Promise<{ view: SessionView; attempt: Promise<boolean> | null }> {
+    const interruptRequestedAt =
+      request.queue === false && request.interrupt === true ? Date.now() : undefined;
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -17652,6 +19136,7 @@ export class SessionService {
     if (request.queue === false) {
       const view = await this.deliverPrepared(sessionId, finalMessage, {
         interrupt: request.interrupt === true,
+        ...(interruptRequestedAt !== undefined ? { interruptRequestedAt } : {}),
         entryPoint: "send",
         hasAttachments: (request.attachments?.length ?? 0) > 0,
         ...(wakeClaim
@@ -17887,7 +19372,16 @@ export class SessionService {
       return record;
     }
     const record = withQueuedMessages(
-      { ...acceptedBase, updatedAt: nowIso() },
+      {
+        ...clearTaskStatus(
+          {
+            ...acceptedBase,
+            taskStatusRevision: latest.taskStatusRevision ?? 0,
+          },
+          true,
+        ),
+        updatedAt: nowIso(),
+      },
       [...latestQueued, message],
       awaitingPrompt,
     );
@@ -18233,8 +19727,11 @@ export class SessionService {
     if (intent.kind !== "queued-drain" && submitPending(current)) {
       const held = (await this.classifySessionRecord(current)).session;
       if (submitPending(held)) {
+        const typedHold = held.queuedMessageTyped?.typedAt === held.submitUnconfirmedAt;
         throw new LaunchPromptPendingError(
-          `Agent has not confirmed the last prompt: ${sessionId}. Submit it first.`,
+          typedHold
+            ? `Agent has not confirmed the last prompt: ${sessionId}. Waiting for its transcript ack; an unacked send moves to Retry/Dismiss in the web view after ${SUBMIT_HOLD_CEILING_MS / 60_000} min at the prompt. Pause and restore the session to clear it now.`
+            : `Agent has not confirmed the last prompt: ${sessionId}. Waiting for its transcript activity. Pause and restore the session to clear it now.`,
           held.submitUnconfirmedAt,
         );
       }
@@ -18355,6 +19852,7 @@ export class SessionService {
     intent: DeliveryIntent,
     options?: {
       interrupt?: boolean;
+      interruptRequestedAt?: number;
       recoverOnLiveAckTimeout?: boolean;
       interactive?: boolean;
       /** Message text never persists: no queue entry, typed marker, or requeue. */
@@ -18367,6 +19865,7 @@ export class SessionService {
     record: SessionRecord | null;
     recovered: SubmitAckTimeoutError | null;
     queuedAhead?: boolean;
+    sendOutcome?: SessionView["sendOutcome"];
   }> {
     if (options?.sensitive && (options.interactive || intent.kind !== "direct")) {
       throw new Error("Sensitive messages are delivered directly, never queued");
@@ -18377,11 +19876,74 @@ export class SessionService {
     const result = await this.withPaneWriteLock(hint.tmuxSession, async () => {
       if (options?.allowDelivery?.() === false) return { record: null, recovered: null };
       const lifecycleIds = this.lifecycleIdsFor(hint);
-      const prepared = await this.withSessionLifecycleLocks(lifecycleIds, () =>
-        options?.allowDelivery?.() === false
-          ? Promise.resolve(null)
-          : this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent, options?.wakeClaim),
-      );
+      const lastInterruptAt = this.explicitInterruptAt.get(sessionId);
+      const guardedRequest =
+        options?.interruptRequestedAt !== undefined &&
+        lastInterruptAt !== undefined &&
+        options.interruptRequestedAt - lastInterruptAt < SEND_INTERRUPT_GUARD_MS;
+      const queueGuardedInterrupt = async (
+        target: Pick<PreparedDelivery, "session" | "lifecycleIds" | "stamp" | "generation">,
+      ) => {
+        const record = await this.withSessionLifecycleLocks(target.lifecycleIds, async () => {
+          const current = readSession(this.config.dataDir, sessionId);
+          if (
+            options?.allowDelivery?.() === false ||
+            !current ||
+            !this.lifecycleStateMatches(current, target.stamp) ||
+            !(await this.paneGenerationMatches(current, target.generation))
+          ) {
+            throw new Error(`Session ${sessionId} changed during message delivery`);
+          }
+          if (options?.allowDelivery?.() === false) {
+            throw new Error(`Session ${sessionId} changed during message delivery`);
+          }
+          const queued = this.appendQueuedMessage(current, message, true, options?.wakeClaim);
+          options?.observeDelivery?.("accepted");
+          this.scheduleDeliveryRunner(sessionId);
+          return queued;
+        });
+        return {
+          record,
+          recovered: null,
+          sendOutcome: { kind: "queued" as const, reason: "interrupt_guard" as const },
+        };
+      };
+      let prepared: PreparedDelivery | null;
+      try {
+        prepared = await this.withSessionLifecycleLocks(lifecycleIds, () =>
+          options?.allowDelivery?.() === false
+            ? Promise.resolve(null)
+            : this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent, options?.wakeClaim),
+        );
+      } catch (error) {
+        if (!(error instanceof LaunchPromptPendingError) || !guardedRequest) throw error;
+        const held = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
+          const current = readSession(this.config.dataDir, sessionId);
+          if (
+            !current ||
+            current.status !== "running" ||
+            !submitPending(current) ||
+            this.lifecycle.snapshot(sessionId).revision !== deliveryRevision ||
+            !this.lifecycleStateMatches(current, this.lifecycleStamp(hint)) ||
+            !sameSessionRuntimeOwner(current, hint) ||
+            current.agentLaunchId !== hint.agentLaunchId ||
+            agentInterruptKeys(current.agent).length === 0
+          ) {
+            throw error;
+          }
+          this.assertTokenBudgetAllowsActivation(current);
+          if (this.isLiveStateRateLimited(current)) {
+            throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
+          }
+          return {
+            session: current,
+            lifecycleIds,
+            stamp: this.lifecycleStamp(current),
+            generation: await this.capturePaneGeneration(current),
+          };
+        });
+        return queueGuardedInterrupt(held);
+      }
       if (!prepared) return { record: null, recovered: null };
 
       if (
@@ -18405,6 +19967,9 @@ export class SessionService {
             record: readSession(this.config.dataDir, sessionId),
             recovered: null,
             queuedAhead: true,
+            ...(options.interruptRequestedAt !== undefined
+              ? { sendOutcome: { kind: "queued" as const, reason: "no_interrupt" as const } }
+              : {}),
           };
       }
 
@@ -18513,8 +20078,9 @@ export class SessionService {
               const native = await this.classifyCodexState(current);
               const paneText = await captureTmuxPane(current.tmuxSession, 200, { fresh: true });
               if (paneText === null) throw new Error(uncertainInput);
+              const nativeLimit = this.fencedStructuredRateLimit(current, native.rateLimit);
               const permission =
-                native.state === "waiting" && native.rateLimit?.limited
+                native.state === "waiting" && nativeLimit?.limited
                   ? this.codexRateLimitPoller.permission(
                       sessionId,
                       codexHookHomePath(join(this.config.dataDir, "session-tools", sessionId)),
@@ -18522,12 +20088,12 @@ export class SessionService {
                     )
                   : null;
               if (
-                (permission !== true && rateLimitActive(native.rateLimit, Date.now())) ||
+                (permission !== true && rateLimitActive(nativeLimit, Date.now())) ||
                 rateLimitActive(
                   this.codexPaneRateLimit(
                     sessionId,
                     paneText,
-                    permission === true ? { limited: false, reason: "" } : native.rateLimit,
+                    permission === true ? { limited: false, reason: "" } : nativeLimit,
                     native.activityMs,
                   ),
                   Date.now(),
@@ -18554,6 +20120,10 @@ export class SessionService {
           })) === true;
       }
 
+      if (interrupt && guardedRequest && agentInterruptKeys(prepared.session.agent).length > 0) {
+        return queueGuardedInterrupt(prepared);
+      }
+
       const generationStillMatches = () =>
         this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           const current = readSession(this.config.dataDir, sessionId);
@@ -18563,6 +20133,13 @@ export class SessionService {
             (await this.paneGenerationMatches(current, prepared.generation)),
           );
         });
+      let taskRevisionRetired = false;
+      const retireTaskRevision = (current: SessionRecord): void => {
+        if (taskRevisionRetired) return;
+        writeSession(this.config.dataDir, clearTaskStatus(current, true));
+        this.dashboardCache.delete(sessionId);
+        taskRevisionRetired = true;
+      };
       const authorizeGenerationResend = (send: () => Promise<void>) =>
         this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           const current = readSession(this.config.dataDir, sessionId);
@@ -18574,11 +20151,13 @@ export class SessionService {
             return false;
           }
           if (options?.allowDelivery?.() === false) return false;
+          retireTaskRevision(current);
           options?.observeDelivery?.("input-started");
           await send();
           return true;
         });
       let recovered: SubmitAckTimeoutError | null = null;
+      let interrupted = false;
       const pane: {
         typed: NonNullable<SessionRecord["queuedMessageTyped"]> | null;
         written: boolean;
@@ -18586,6 +20165,14 @@ export class SessionService {
       try {
         const submission = await this.beginAgentMessage(prepared.session, message, {
           interrupt,
+          ...(options?.interruptRequestedAt !== undefined
+            ? {
+                onInterrupt: () => {
+                  this.explicitInterruptAt.set(sessionId, Date.now());
+                  interrupted = true;
+                },
+              }
+            : {}),
           interactive: options?.interactive === true,
           ...(options?.sensitive ? { sensitive: true as const } : {}),
           onPaneWritten: (ackBaseline, pastedAt) => {
@@ -18629,6 +20216,7 @@ export class SessionService {
                 return false;
               }
               if (options?.allowDelivery?.() === false) return false;
+              retireTaskRevision(current);
               options?.observeDelivery?.("input-started");
               await send();
               return true;
@@ -18709,7 +20297,13 @@ export class SessionService {
         recovered,
         options?.allowDelivery,
       );
-      return { record, recovered };
+      return {
+        record,
+        recovered,
+        ...(options?.interruptRequestedAt !== undefined
+          ? { sendOutcome: { kind: "sent" as const, interrupted } }
+          : {}),
+      };
     });
     if (result.record && options?.allowDelivery?.() !== false) {
       await this.captureAgentSessionId(
@@ -18725,8 +20319,8 @@ export class SessionService {
 
   // An unacked write on a live agent may still sit in the composer: hold every
   // pane writer until the agent acks the typed text (settleSubmitHold); the
-  // banner's submit (Enter only) is the escape. The typed marker carries the
-  // text and its ack baseline for that scan.
+  // SUBMIT_HOLD_CEILING_MS bounds a typed send's hold. The typed marker
+  // carries the text and its ack baseline for that scan.
   private withSubmitUnconfirmed(
     record: SessionRecord,
     typed: NonNullable<SessionRecord["queuedMessageTyped"]>,
@@ -18751,7 +20345,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const latest = readSession(this.config.dataDir, readySession.id) ?? readySession;
     const record = withQueuedMessages(
-      { ...readySession, status: "running", updatedAt: nowIso() },
+      { ...clearTaskStatus(latest, true), status: "running", updatedAt: nowIso() },
       [message, ...removeFirstOccurrence(queuedMessages(latest), message)],
       true,
     );
@@ -18778,6 +20372,7 @@ export class SessionService {
     message: string,
     options: {
       interrupt?: boolean;
+      interruptRequestedAt?: number;
       sensitive?: true;
       entryPoint: "send" | "deliver" | "flush";
       hasAttachments?: boolean;
@@ -18816,6 +20411,9 @@ export class SessionService {
         { kind: "direct" },
         {
           ...(options.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+          ...(options.interruptRequestedAt !== undefined
+            ? { interruptRequestedAt: options.interruptRequestedAt }
+            : {}),
           recoverOnLiveAckTimeout: true,
           interactive,
           ...(options.sensitive ? { sensitive: true as const } : {}),
@@ -18828,7 +20426,14 @@ export class SessionService {
       if (!persisted) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       if (options.allowDelivery?.() === false) return await this.enrich(persisted);
       if (result.queuedAhead) {
-        return { ...(await this.enrich(persisted)), queuedAheadReason: "no_interrupt" };
+        return {
+          ...(await this.enrich(persisted)),
+          queuedAheadReason: "no_interrupt",
+          ...(result.sendOutcome ? { sendOutcome: result.sendOutcome } : {}),
+        };
+      }
+      if (result.sendOutcome?.kind === "queued") {
+        return { ...(await this.enrich(persisted)), sendOutcome: result.sendOutcome };
       }
       if (result.recovered) {
         this.logEvent("session.message.delivery_recovered", {
@@ -18858,7 +20463,10 @@ export class SessionService {
           },
         });
       }
-      return await this.enrich(persisted);
+      return {
+        ...(await this.enrich(persisted)),
+        ...(result.sendOutcome ? { sendOutcome: result.sendOutcome } : {}),
+      };
     } catch (error) {
       if (options.wakeClaim && !this.scheduledWakeClaimCurrent(options.wakeClaim)) throw error;
       if (initialSession && options.allowDelivery?.() === false) {
@@ -19243,6 +20851,7 @@ export class SessionService {
         interruptState.interrupted = await sendInterruptKeysToTmux(
           session.tmuxSession,
           session.agent,
+          ...(options.onInterrupt ? ([options.onInterrupt] as const) : []),
         );
       };
       if (options.authorizeInput) {
@@ -19607,19 +21216,278 @@ export class SessionService {
     sessionId: string,
     request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean; todoActor?: TodoActor },
-  ): Promise<SessionView> {
-    return this.runLifecycle("complete", [sessionId], request.operationId, () =>
-      this.withWorkspaceLifecycleLocks(sessionId, () =>
-        this.applyManualStatusLocked(sessionId, "completed", request, options),
+  ): Promise<CompleteSessionResult> {
+    const report: CloseoutReport = { unverified: 0 };
+    const view = await this.runLifecycle("complete", [sessionId], request.operationId, () =>
+      this.withCloseoutHeads([sessionId], (heads) =>
+        this.withWorkspaceLifecycleLocks(sessionId, () =>
+          this.applyManualStatusLocked(sessionId, "completed", request, {
+            ...options,
+            closeoutHeadSha: heads.get(sessionId) ?? null,
+            closeoutReport: report,
+          }),
+        ),
       ),
     );
+    return report.unverified > 0 ? { ...view, closeout: { unverified: report.unverified } } : view;
   }
 
   async readTodo(sessionId: string): Promise<TodoProjection> {
+    if (
+      !readSession(this.config.dataDir, sessionId) &&
+      readArchivedSession(this.config.dataDir, sessionId)
+    ) {
+      const archived = readTodoIfPresent(this.config.dataDir, sessionId);
+      if (!archived) {
+        throw new SessionResourceNotFoundError(`Session ${sessionId} has no ToDo ledger`);
+      }
+      return archived;
+    }
     return this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       return ensureTodoLedger(this.config.dataDir, session);
+    });
+  }
+
+  // Own worktree only: a worktree:false record points at the shared main checkout. Read outside
+  // the lifecycle lock, like writeSnapshot: git timeouts must not block complete. Runs `run`
+  // without a yield when no head needs reading, so callers keep their synchronous lock order.
+  private withCloseoutHeads<T>(
+    sessionIds: readonly string[],
+    run: (heads: ReadonlyMap<string, string | null>) => Promise<T>,
+  ): Promise<T> {
+    const heads = new Map<string, string | null>();
+    const reads: Promise<void>[] = [];
+    for (const id of sessionIds) {
+      heads.set(id, null);
+      const session = readSession(this.config.dataDir, id);
+      if (
+        session &&
+        this.closeoutOwnWorktree(session) &&
+        this.closeoutSettingsFor(session).enabled
+      ) {
+        reads.push(
+          readWorktreeHead(session.worktreePath).then((head) => {
+            heads.set(id, head.headSha);
+          }),
+        );
+      }
+    }
+    return reads.length === 0 ? run(heads) : Promise.all(reads).then(() => run(heads));
+  }
+
+  private closeoutSettingsFor(session: SessionRecord): ReturnType<typeof closeoutSettings> {
+    return closeoutSettings(this.resolveProjectForSession(session));
+  }
+
+  private closeoutOwnWorktree(session: SessionRecord): boolean {
+    return session.worktree && session.worktreePath.trim().length > 0;
+  }
+
+  // Never throws: complete must not fail or change result because the archive failed. Sync on
+  // purpose: one yield here delays complete's record write, so a queued durable spawn registers its
+  // admission waiter first and nothing drains it (only the 1s shed tick and spawns do).
+  private archiveCloseout(
+    session: SessionRecord,
+    links: SessionLink[],
+    headSha: string | null | undefined,
+  ): number {
+    try {
+      const settings = this.closeoutSettingsFor(session);
+      if (!settings.enabled) return 0;
+      const artifacts = sessionArtifactsDir(this.config.dataDir, workspaceIdOf(session));
+      const manifest = writeCloseoutArchive({
+        sessionDir: join(this.config.dataDir, "sessions", session.id),
+        sessionId: session.id,
+        project: session.project,
+        completedAt: nowIso(),
+        links,
+        snapshotVersion:
+          readSnapshotVersion(this.config.dataDir, session, "latest", "live")?.version ?? null,
+        headSha: headSha ?? null,
+        roots: {
+          artifacts,
+          work: join(artifacts, SESSION_WORK_DIR),
+          workspace: this.closeoutOwnWorktree(session) ? session.worktreePath : null,
+        },
+        include: settings.include,
+        maxBytes: settings.maxBytes,
+      });
+      if (manifest.error) this.logCloseoutArchiveFailure(session, manifest.error);
+      const unverified = manifest.skipped.filter((file) => file.reason === "unverified").length;
+      if (unverified > 0) {
+        this.logEvent("session.closeout_archive.unverified", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Closeout archive for ${session.id} listed ${unverified} unverified file(s)`,
+          details: { count: unverified },
+        });
+      }
+      return unverified;
+    } catch (error) {
+      this.logCloseoutArchiveFailure(
+        session,
+        error instanceof Error ? error.message : String(error),
+      );
+      return 0;
+    }
+  }
+
+  private logCloseoutArchiveFailure(session: SessionRecord, error: string): void {
+    this.logEvent("session.closeout_archive.failed", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Closeout archive failed for ${session.id}: ${error}`,
+      details: { error },
+    });
+  }
+
+  readCloseout(sessionId: string, version?: number): CloseoutManifestView {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    const manifest = readCloseoutManifest(
+      closeoutDirAt(this.config.dataDir, session, location),
+      sessionId,
+      version,
+    );
+    if (!manifest) {
+      throw new SessionResourceNotFoundError(
+        version === undefined
+          ? `Session ${sessionId} has no closeout archive`
+          : `Closeout version ${version} not found for session ${sessionId}`,
+      );
+    }
+    return manifest;
+  }
+
+  readCloseoutFile(
+    sessionId: string,
+    rootAndPath: string,
+    version?: number,
+  ): { path: string; size: number; name: string } {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    const file = resolveCloseoutFile(
+      closeoutDirAt(this.config.dataDir, session, location),
+      rootAndPath,
+      version,
+    );
+    if (!file) {
+      throw new SessionResourceNotFoundError(
+        `Closeout file not found for ${sessionId}: ${rootAndPath}`,
+      );
+    }
+    return file;
+  }
+
+  /** One entry per session matching every link that has an archive (latest version), newest first. */
+  closeoutsByLink(links: readonly SessionLinkFilter[]): CloseoutEntry[] {
+    const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
+      ...listSessions(this.config.dataDir).map((session) => ({
+        session,
+        location: "live" as const,
+      })),
+      ...listArchivedSessions(this.config.dataDir, (project, id) =>
+        existsSync(closeoutDirAt(this.config.dataDir, { id, project }, "archived")),
+      ).map((session) => ({ session, location: "archived" as const })),
+    ];
+    const entries: CloseoutEntry[] = [];
+    for (const { session, location } of candidates) {
+      if (!matchesSessionLinks(this.displaySlotsForSession(session)?.links ?? [], links)) continue;
+      const manifest = readCloseoutManifest(
+        closeoutDirAt(this.config.dataDir, session, location),
+        session.id,
+      );
+      if (manifest) entries.push({ sessionId: session.id, status: session.status, manifest });
+    }
+    return entries.sort(
+      (a, b) => Date.parse(b.manifest.completedAt) - Date.parse(a.manifest.completedAt),
+    );
+  }
+
+  // Rides the session-gc tick like the artifact retention sweep, throttled to hourly. Only
+  // projects with closeout.retentionDays set are touched.
+  private runCloseoutRetentionSweep(): void {
+    if (Date.now() - this.lastCloseoutRetentionSweepAt < CLOSEOUT_RETENTION_INTERVAL_MS) return;
+    this.lastCloseoutRetentionSweepAt = Date.now();
+    const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
+      ...listSessions(this.config.dataDir).map((session) => ({
+        session,
+        location: "live" as const,
+      })),
+      ...listArchivedSessions(this.config.dataDir, (project, id) =>
+        existsSync(closeoutDirAt(this.config.dataDir, { id, project }, "archived")),
+      ).map((session) => ({ session, location: "archived" as const })),
+    ];
+    let expired = 0;
+    let errors = 0;
+    for (const { session, location } of candidates) {
+      try {
+        const days = this.closeoutSettingsFor(session).retentionDays;
+        if (days === null) continue;
+        expired += expireCloseout(
+          closeoutDirAt(this.config.dataDir, session, location),
+          session.id,
+          days,
+          Date.now(),
+        );
+      } catch {
+        errors += 1;
+      }
+    }
+    if (expired > 0 || errors > 0) {
+      this.logEvent("session.closeout_archive.expired", {
+        level: "info",
+        message: `Closeout retention expired ${expired} archive version(s), ${errors} error(s)`,
+        details: { expired, errors },
+      });
+    }
+  }
+
+  async readTaskStatus(sessionId: string): Promise<TaskStatusView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      return taskStatusView(session);
+    });
+  }
+
+  async writeTaskStatus(sessionId: string, request: TaskStatusRequest): Promise<TaskStatusView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      let session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (
+        session.status !== "running" ||
+        session.agentLaunchId !== request.agentLaunchId ||
+        (session.taskStatusRevision ?? 0) !== request.revision
+      ) {
+        throw new TaskStatusError("Task or agent launch changed", 409, "stale_task_status");
+      }
+      if (request.state === "completed") {
+        const projection = ensureTodoLedger(this.config.dataDir, session);
+        const block = todoLedgerBlock(projection);
+        if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
+        if (block) throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
+        // ensureTodoLedger can install its version marker; retain that write.
+        session = readSession(this.config.dataDir, sessionId) ?? session;
+      }
+      const record =
+        request.state === "clear"
+          ? clearTaskStatus(session)
+          : {
+              ...session,
+              taskStatus: {
+                state: request.state,
+                revision: request.revision,
+                agentLaunchId: request.agentLaunchId,
+                updatedAt: nowIso(),
+              },
+            };
+      writeSession(this.config.dataDir, record);
+      this.dashboardCache.delete(sessionId);
+      await this.refreshDashboardCacheEntry(record);
+      return taskStatusView(record);
     });
   }
 
@@ -19638,26 +21506,313 @@ export class SessionService {
           "Session handoff is already in progress",
         );
       }
-      return applyTodoMutation(this.config.dataDir, session, request, actor);
+      const projection = applyTodoMutation(this.config.dataDir, session, request, actor);
+      if (request.action === "add" || request.action === "resume") {
+        const latest = readSession(this.config.dataDir, sessionId) ?? session;
+        writeSession(this.config.dataDir, clearTaskStatus(latest));
+        this.dashboardCache.delete(sessionId);
+      }
+      return projection;
     });
+  }
+
+  // Snapshot reads take no lock and never touch the pane or the record: versions are write-once,
+  // and the owner location is resolved per call (live record first, then the archive).
+  private readSnapshotOwner(sessionId: string): {
+    session: SessionRecord;
+    location: SnapshotLocation;
+  } {
+    const live = readSession(this.config.dataDir, sessionId);
+    if (live) return { session: live, location: "live" };
+    const archived = readArchivedSession(this.config.dataDir, sessionId);
+    if (archived) return { session: archived, location: "archived" };
+    throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+  }
+
+  readSnapshots(sessionId: string, query: SnapshotListQuery): WorkSnapshotMeta[] {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    return listSnapshots(this.config.dataDir, session, location, query);
+  }
+
+  async readSnapshot(
+    sessionId: string,
+    version: number | "latest",
+    options: { includeDone: boolean },
+  ): Promise<WorkSnapshotRead> {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    const snapshot = readSnapshotVersion(this.config.dataDir, session, version, location);
+    if (!snapshot) {
+      throw new SessionResourceNotFoundError(
+        version === "latest"
+          ? `Session ${sessionId} has no snapshots`
+          : `Snapshot ${version} not found for session ${sessionId}`,
+      );
+    }
+    const read = await this.withFreshness(session, location, snapshot);
+    return options.includeDone ? { ...read, done: this.doneItems(session.id) } : read;
+  }
+
+  /** One entry per session matching every link, its latest snapshot, newest first. */
+  async latestSnapshotsByLink(
+    links: readonly SessionLinkFilter[],
+    options: { includeDone: boolean },
+  ): Promise<LatestSnapshotEntry[]> {
+    const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
+      ...listSessions(this.config.dataDir).map((session) => ({
+        session,
+        location: "live" as const,
+      })),
+      ...listArchivedSessions(this.config.dataDir, (project, id) =>
+        existsSync(snapshotDirAt(this.config.dataDir, { id, project }, "archived")),
+      ).map((session) => ({ session, location: "archived" as const })),
+    ];
+    const gate = createConcurrencyGate(SNAPSHOT_READ_CONCURRENCY);
+    const entries = await Promise.all(
+      candidates
+        .filter(({ session }) =>
+          matchesSessionLinks(this.displaySlotsForSession(session)?.links ?? [], links),
+        )
+        .map(({ session, location }) =>
+          gate.run(async (): Promise<LatestSnapshotEntry | null> => {
+            const snapshot = readSnapshotVersion(this.config.dataDir, session, "latest", location);
+            if (!snapshot) return null;
+            const read = await this.withFreshness(session, location, snapshot);
+            return {
+              sessionId: session.id,
+              status: session.status,
+              state: this.transitionsBinding?.store.observedState(session.id) ?? null,
+              snapshot: options.includeDone
+                ? { ...read, done: this.tolerantDoneItems(session.id) }
+                : read,
+            };
+          }),
+        ),
+    );
+    return entries
+      .filter((entry): entry is LatestSnapshotEntry => entry !== null)
+      .sort((a, b) => Date.parse(b.snapshot.at) - Date.parse(a.snapshot.at));
+  }
+
+  private doneItems(sessionId: string): TodoItemProjection[] {
+    const projection = readTodoIfPresent(this.config.dataDir, sessionId);
+    return projection?.items.filter((item) => item.status === "completed") ?? [];
+  }
+
+  // A damaged ledger costs its own entry the done list, not the whole response.
+  private tolerantDoneItems(sessionId: string): TodoItemProjection[] | null {
+    try {
+      return this.doneItems(sessionId);
+    } catch (error) {
+      if (error instanceof TodoLedgerCorruptError) return null;
+      throw error;
+    }
+  }
+
+  private async withFreshness(
+    session: SessionRecord,
+    location: SnapshotLocation,
+    snapshot: WorkSnapshot,
+  ): Promise<WorkSnapshotRead> {
+    const freshnessMs =
+      snapshotSettings(this.resolveProjectForSession(session)).freshnessMinutes * 60_000;
+    const [activity, commitsSince] = await Promise.all([
+      this.snapshotActivity(session, location, snapshot, freshnessMs),
+      countCommitsSince(session.worktreePath, snapshot.headSha, snapshot.branch),
+    ]);
+    const freshness: WorkSnapshotFreshness = {
+      ageSeconds: snapshotAgeSeconds(snapshot.at, Date.now()),
+      activitySince:
+        activity.firstWorkMs === null ? null : new Date(activity.firstWorkMs).toISOString(),
+      commitsSince,
+      stale: snapshotDue({
+        latestAt: snapshot.at,
+        sessionCreatedAt: session.createdAt,
+        activityAt: activity.newestWorkMs === null ? null : new Date(activity.newestWorkMs),
+        freshnessMs,
+      }),
+    };
+    return { ...snapshot, freshness };
+  }
+
+  /**
+   * First and newest agent work after the snapshot, by the rule that decides snapshot requests.
+   * Transcript write time gates the entry read; Cursor and OpenCode carry no entry times, so
+   * their transcript write time stands in for the work instant.
+   */
+  private async snapshotActivity(
+    session: SessionRecord,
+    location: SnapshotLocation,
+    snapshot: WorkSnapshot,
+    freshnessMs: number,
+  ): Promise<{ firstWorkMs: number | null; newestWorkMs: number | null }> {
+    const none = { firstWorkMs: null, newestWorkMs: null };
+    const floorMs = Date.parse(snapshot.at);
+    const cached = location === "live" ? this.firstWorkCache.get(session.id) : undefined;
+    const cachedFirstMs = cached?.version === snapshot.version ? cached.workMs : null;
+    // Newest work is never earlier than the first, so a late first work already makes it stale.
+    if (cachedFirstMs !== null && cachedFirstMs - floorMs > freshnessMs) {
+      return { firstWorkMs: cachedFirstMs, newestWorkMs: cachedFirstMs };
+    }
+    let slice: { entries: TranscriptEntry[]; startIndex: number } | null = null;
+    let activityMs: number | null;
+    if (session.agent === "claude" || session.agent === "codex") {
+      const tail = await this.readTranscriptTail(session, location);
+      if (!tail) return { firstWorkMs: cachedFirstMs, newestWorkMs: cachedFirstMs };
+      slice = tail;
+      activityMs = tail.mtimeMs;
+    } else {
+      activityMs = await this.untimedTranscriptActivityMs(session);
+    }
+    if (activityMs === null || activityMs <= floorMs) return none;
+    const untimedActivityMs = activityMs;
+    let fullEntries: Promise<TranscriptEntry[]> | undefined;
+    const scan = async (
+      run: (
+        entries: readonly TranscriptEntry[],
+        atStart: boolean,
+      ) => { workMs: number | null; complete: boolean },
+    ): Promise<number | null> => {
+      if (slice) {
+        const result = run(slice.entries, slice.startIndex === 0);
+        if (result.complete) return result.workMs;
+      }
+      fullEntries ??=
+        session.agent === "codex" && session.agentSessionId
+          ? readCodexTranscriptEntries(
+              this.codexSessionsDir(session.id),
+              session.agentSessionId,
+            ).then((entries) => entries ?? [])
+          : this.readFullConversationEntries(session);
+      return run(await fullEntries, true).workMs;
+    };
+    let firstWorkMs = cachedFirstMs;
+    if (firstWorkMs === null) {
+      firstWorkMs = await scan((entries, atStart) =>
+        firstAgentWorkMs(entries, { floorMs, atStart }),
+      );
+      if (firstWorkMs !== null && location === "live") {
+        this.firstWorkCache.set(session.id, { version: snapshot.version, workMs: firstWorkMs });
+      }
+    }
+    const newestWorkMs = await scan((entries, atStart) =>
+      lastAgentWorkMs(entries, { untimedActivityMs, floorMs, atStart }),
+    );
+    return {
+      firstWorkMs: firstWorkMs ?? newestWorkMs,
+      newestWorkMs: newestWorkMs ?? firstWorkMs,
+    };
+  }
+
+  // Live sessions share the incremental reader; archived ones bypass every reader map, which
+  // only eviction at archive time would ever clear.
+  private async readTranscriptTail(
+    session: SessionRecord,
+    location: SnapshotLocation,
+  ): Promise<{ entries: TranscriptEntry[]; startIndex: number; mtimeMs: number } | null> {
+    if (session.agent === "codex") {
+      // Pinned to the owning thread's rollout: the shared reader also follows the newest
+      // rollout in the global dir. It reuses a live cursor but never stores one.
+      if (!session.agentSessionId) return null;
+      const result = await readCodexConversationTail(
+        this.codexSessionsDir(session.id),
+        location === "live" ? this.codexConversationReaders.get(session.id) : undefined,
+        session.agentSessionId,
+      );
+      return result && { ...result, mtimeMs: result.reader.cursor.mtimeMs };
+    }
+    if (location === "live") {
+      const tail = await this.readConversationSerialized(session);
+      // The serialized read leaves its reader in the map; the reader carries the file's write time.
+      const mtimeMs = this.conversationReaders.get(session.id)?.lastMtimeMs;
+      return tail && mtimeMs !== undefined ? { ...tail, mtimeMs } : null;
+    }
+    const result = await readClaudeConversationTail(
+      session.worktreePath,
+      undefined,
+      session.agentSessionId,
+    );
+    return result && { ...result, mtimeMs: result.reader.lastMtimeMs };
+  }
+
+  private async untimedTranscriptActivityMs(session: SessionRecord): Promise<number | null> {
+    if (session.agent === "cursor") {
+      const chatId = await this.cursorTranscriptId(session);
+      const result = chatId
+        ? await readCursorJsonlState(
+            session.worktreePath,
+            undefined,
+            chatId,
+            session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {},
+          )
+        : null;
+      return result?.reader.lastMtimeMs ?? null;
+    }
+    const { state } = await readOpenCodeStructuredState(
+      session.agentSessionId,
+      session.worktreePath,
+      null,
+    );
+    return state?.activityMs ?? null;
+  }
+
+  async writeSnapshot(
+    sessionId: string,
+    request: { content: string; final: boolean },
+  ): Promise<WorkSnapshotMeta> {
+    const initial = readSession(this.config.dataDir, sessionId);
+    if (!initial) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    // Git reads stay outside the lifecycle lock: three 5s timeouts must not block complete.
+    const head = await readWorktreeHead(initial.worktreePath);
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (isTerminalSessionStatus(session.status)) {
+        throw new SnapshotConflictError(
+          `Session ${sessionId} is ${session.status}; snapshots are closed`,
+        );
+      }
+      return storeSnapshot(this.config.dataDir, session, request, {
+        maxBytes: snapshotSettings(this.resolveProjectForSession(session)).maxBytes,
+        ...head,
+        todoRevision: ensureTodoLedger(this.config.dataDir, session).revision,
+        links: this.displaySlotsForSession(session)?.links ?? [],
+      });
+    });
+  }
+
+  // True when the project requires a snapshot the agent has not written since its
+  // last ToDo change. A human actor is exempt; the caller runs it after the ToDo gate.
+  private snapshotGateBlocks(
+    session: SessionRecord,
+    todoRevision: string,
+    require: "final" | "any",
+    actor: TodoActor | undefined,
+  ): boolean {
+    return (
+      actor?.kind !== "human" &&
+      snapshotSettings(this.resolveProjectForSession(session)).requireFinal &&
+      snapshotGateBlock(this.config.dataDir, session, todoRevision, require)
+    );
   }
 
   async selfDestruct(sessionId: string): Promise<SessionView> {
     return this.runLifecycle("complete", [sessionId], undefined, () =>
-      this.withWorkspaceLifecycleLocks(sessionId, () => {
-        const session = readSession(this.config.dataDir, sessionId);
-        if (!session) {
-          throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-        }
-        return this.applyManualStatusLocked(
-          sessionId,
-          "completed",
-          {
-            prAction: "leave_open",
-          },
-          { eventAction: "self_destruct" },
-        );
-      }),
+      this.withCloseoutHeads([sessionId], (heads) =>
+        this.withWorkspaceLifecycleLocks(sessionId, () => {
+          const session = readSession(this.config.dataDir, sessionId);
+          if (!session) {
+            throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+          }
+          return this.applyManualStatusLocked(
+            sessionId,
+            "completed",
+            {
+              prAction: "leave_open",
+            },
+            { eventAction: "self_destruct", closeoutHeadSha: heads.get(sessionId) ?? null },
+          );
+        }),
+      ),
     );
   }
 
@@ -19672,66 +21827,94 @@ export class SessionService {
     }
     const candidates = this.listDeskSessions(session);
 
+    const report: CloseoutReport = { unverified: 0 };
     const work = () =>
-      this.withSessionLifecycleLocks(
-        candidates.flatMap((candidate) => this.lifecycleIdsFor(candidate)),
-        async () => {
-          const emptySessionIds: string[] = [];
-          const unfinishedBlocked: Array<{
-            sessionId: string;
-            openItemIds: string[];
-            heldItemIds: string[];
-          }> = [];
-          for (const candidate of candidates) {
-            const current = readSession(this.config.dataDir, candidate.id);
-            if (!current)
-              throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
-            if (isTerminalSessionStatus(current.status)) continue;
-            const projection = ensureTodoLedger(this.config.dataDir, current);
-            const block = todoLedgerBlock(projection);
-            if (block === "empty") emptySessionIds.push(candidate.id);
-            else if (block === "unfinished") {
-              unfinishedBlocked.push({ sessionId: candidate.id, ...unfinishedTodo(projection) });
-            }
-          }
-          if (options?.todoActor?.kind !== "human") {
-            if (emptySessionIds.length > 0) {
-              const error = new TodoEmptyLedgerError(emptySessionIds);
-              this.logManualStatusFailure(
-                "desk_complete",
-                "completed",
-                sessionId,
-                session.project,
-                error,
-              );
-              throw error;
-            }
-            if (unfinishedBlocked.length > 0) {
-              const error = new TodoOpenWorkError(unfinishedBlocked);
-              this.logManualStatusFailure(
-                "desk_complete",
-                "completed",
-                sessionId,
-                session.project,
-                error,
-              );
-              throw error;
-            }
-          }
-          const completedIds: string[] = [];
-          for (const candidate of candidates) {
-            const current = readSession(this.config.dataDir, candidate.id);
-            if (!current)
-              throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
-            if (isTerminalSessionStatus(current.status)) continue;
-            await this.applyManualStatusLocked(candidate.id, "completed", request, {
-              ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
-              eventAction: "desk_complete",
-            });
-            completedIds.push(candidate.id);
-          }
-          return { completedIds };
-        },
+      this.withCloseoutHeads(
+        candidates.map((candidate) => candidate.id),
+        (closeoutHeads) =>
+          this.withSessionLifecycleLocks(
+            candidates.flatMap((candidate) => this.lifecycleIdsFor(candidate)),
+            async () => {
+              const emptySessionIds: string[] = [];
+              const unfinishedBlocked: Array<{
+                sessionId: string;
+                openItemIds: string[];
+                heldItemIds: string[];
+              }> = [];
+              const snapshotBlockedIds: string[] = [];
+              for (const candidate of candidates) {
+                const current = readSession(this.config.dataDir, candidate.id);
+                if (!current)
+                  throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
+                if (isTerminalSessionStatus(current.status)) continue;
+                const projection = ensureTodoLedger(this.config.dataDir, current);
+                const block = todoLedgerBlock(projection);
+                if (block === "empty") emptySessionIds.push(candidate.id);
+                else if (block === "unfinished") {
+                  unfinishedBlocked.push({
+                    sessionId: candidate.id,
+                    ...unfinishedTodo(projection),
+                  });
+                } else if (
+                  this.snapshotGateBlocks(current, projection.revision, "final", options?.todoActor)
+                ) {
+                  snapshotBlockedIds.push(candidate.id);
+                }
+              }
+              if (options?.todoActor?.kind !== "human") {
+                if (emptySessionIds.length > 0) {
+                  const error = new TodoEmptyLedgerError(emptySessionIds);
+                  this.logManualStatusFailure(
+                    "desk_complete",
+                    "completed",
+                    sessionId,
+                    session.project,
+                    error,
+                  );
+                  throw error;
+                }
+                if (unfinishedBlocked.length > 0) {
+                  const error = new TodoOpenWorkError(unfinishedBlocked);
+                  this.logManualStatusFailure(
+                    "desk_complete",
+                    "completed",
+                    sessionId,
+                    session.project,
+                    error,
+                  );
+                  throw error;
+                }
+                if (snapshotBlockedIds.length > 0) {
+                  const error = new WorkSnapshotRequiredError(snapshotBlockedIds, "final");
+                  this.logManualStatusFailure(
+                    "desk_complete",
+                    "completed",
+                    sessionId,
+                    session.project,
+                    error,
+                  );
+                  throw error;
+                }
+              }
+              const completedIds: string[] = [];
+              for (const candidate of candidates) {
+                const current = readSession(this.config.dataDir, candidate.id);
+                if (!current)
+                  throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
+                if (isTerminalSessionStatus(current.status)) continue;
+                await this.applyManualStatusLocked(candidate.id, "completed", request, {
+                  ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
+                  eventAction: "desk_complete",
+                  closeoutHeadSha: closeoutHeads.get(candidate.id) ?? null,
+                  closeoutReport: report,
+                });
+                completedIds.push(candidate.id);
+              }
+              return report.unverified > 0
+                ? { completedIds, closeout: { unverified: report.unverified } }
+                : { completedIds };
+            },
+          ),
       );
     return this.runLifecycle(
       "complete",
@@ -20397,7 +22580,41 @@ export class SessionService {
       ...(projectId ? { projectId } : {}),
       ...(project?.branchNaming ? { branchNamingRegex: project.branchNaming.regex } : {}),
       agent,
+      ...(agent === "claude"
+        ? {
+            snapshotHook: snapshotSettings(project).enabled
+              ? {
+                  enabled: true as const,
+                  freshnessMinutes: snapshotSettings(project).freshnessMinutes,
+                  // Absent at spawn: the record is written after tool prep, so now is the start.
+                  sessionCreatedAt:
+                    readSession(this.config.dataDir, sessionId)?.createdAt ??
+                    new Date().toISOString(),
+                }
+              : { enabled: false as const },
+          }
+        : {}),
     });
+  }
+
+  // Sessions started by an older Spur keep old tools (and, for Claude, an old hook) until
+  // something rewrites them; rewrite each live session's tools once per daemon process.
+  private refreshSessionToolsOnce(session: SessionRecord): void {
+    if (this.toolsRefreshed.has(session.id)) return;
+    try {
+      this.prepareSessionTools(session.id, session.agent, session.project);
+      this.toolsRefreshed.add(session.id);
+    } catch (error) {
+      // Retried every sweep; logged once per session per process.
+      if (this.toolsRefreshFailedLogged.has(session.id)) return;
+      this.toolsRefreshFailedLogged.add(session.id);
+      this.logEvent("session.tools.refresh_failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Session tool refresh failed for ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
   }
 
   // Session GC archives records without removeSessionArtifacts, so the
@@ -20427,6 +22644,7 @@ export class SessionService {
     this.claudeJsonlReaders.delete(sessionId);
     this.cursorJsonlReaders.delete(sessionId);
     this.cursorPaneReadyOverrides.delete(sessionId);
+    this.explicitInterruptAt.delete(sessionId);
     const anchorId = workspaceIdOf(session);
     // A desk sibling's own session-tools dir is per-session, so it goes now.
     // The anchor's doubles as the tool dir of the desk's shared sidecars, so
@@ -20785,8 +23003,8 @@ export class SessionService {
     );
   }
 
-  // Classifies a manual-status-gate refusal for the failure event. A ToDo
-  // cause (empty ledger or unfinished work) demotes to `warn` with
+  // Classifies a manual-status-gate refusal for the failure event. A gate
+  // cause (empty ledger, unfinished work, missing snapshot) demotes to `warn` with
   // `details.kind`, because the gate rejected before any teardown and the
   // session is untouched. Every other cause stays `error` with no `details`.
   private logManualStatusFailure(
@@ -20797,11 +23015,15 @@ export class SessionService {
     error: unknown,
   ): void {
     const message = error instanceof Error ? error.message : String(error);
-    const isTodoCause = error instanceof TodoEmptyLedgerError || error instanceof TodoOpenWorkError;
-    const level = isTodoCause ? "warn" : "error";
-    const details = isTodoCause
-      ? { kind: error instanceof TodoEmptyLedgerError ? "todo_ledger_empty" : "todo_open_work" }
-      : undefined;
+    const gateError =
+      error instanceof TodoEmptyLedgerError ||
+      error instanceof TodoOpenWorkError ||
+      error instanceof HandoffTargetNotStalledError ||
+      error instanceof WorkSnapshotRequiredError
+        ? error
+        : undefined;
+    const level = gateError ? "warn" : "error";
+    const details = gateError ? { kind: gateError.code } : undefined;
     this.logEvent(`session.${action}.failed`, {
       level,
       sessionId,
@@ -20821,6 +23043,8 @@ export class SessionService {
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
+      closeoutHeadSha?: string | null;
+      closeoutReport?: CloseoutReport;
     },
   ): Promise<void>;
   private async applyManualStatusLocked(
@@ -20831,9 +23055,13 @@ export class SessionService {
       retainInList?: boolean;
       skipEnrichment?: false;
       todoActor?: TodoActor;
+      handoffDetails?: HandoffEventDetails;
+      handoffReceipt?: HandoffIdempotencyReceipt;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
+      closeoutHeadSha?: string | null;
+      closeoutReport?: CloseoutReport;
     },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
@@ -20844,9 +23072,13 @@ export class SessionService {
       retainInList?: boolean;
       skipEnrichment?: boolean;
       todoActor?: TodoActor;
+      handoffDetails?: HandoffEventDetails;
+      handoffReceipt?: HandoffIdempotencyReceipt;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
+      closeoutHeadSha?: string | null;
+      closeoutReport?: CloseoutReport;
     },
   ): Promise<SessionView | void> {
     const reopenClaim = this.reopensInFlight.get(sessionId);
@@ -20904,6 +23136,7 @@ export class SessionService {
     const eventAction: ManualStatusAction =
       options?.eventAction ?? (targetStatus === "stopped" ? "pause" : "complete");
     let startupAttachmentsCleaned = false;
+    let terminalSlots: SessionSlots | undefined;
 
     try {
       if (targetStatus === "completed" && eventAction !== "handoff") {
@@ -20914,6 +23147,9 @@ export class SessionService {
         if (block && options?.todoActor?.kind !== "human") {
           if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
           throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
+        }
+        if (this.snapshotGateBlocks(session, projection.revision, "final", options?.todoActor)) {
+          throw new WorkSnapshotRequiredError([sessionId], "final");
         }
       }
       if (targetStatus === "completed" && !request.skipPrCheck) {
@@ -20934,6 +23170,8 @@ export class SessionService {
               ...session,
               status: targetStatus,
               updatedAt: nowIso(),
+              // This write marks the source completed first; the receipt must land with it.
+              ...(options?.handoffReceipt ? { handoffIdempotency: options.handoffReceipt } : {}),
             },
             [],
             false,
@@ -20949,8 +23187,18 @@ export class SessionService {
           ...(options?.restoreOperation ? { operation: options.restoreOperation } : {}),
         });
         await this.cleanupSessionServices(session);
+        if (targetStatus === "completed" && session.auth) {
+          await this.revokeManagedAuthorization(session.id);
+        }
       }
       if (targetStatus === "completed") {
+        terminalSlots = this.captureTerminalSlots(session);
+        const unverified = this.archiveCloseout(
+          session,
+          terminalSlots?.links ?? [],
+          options?.closeoutHeadSha,
+        );
+        if (options?.closeoutReport) options.closeoutReport.unverified += unverified;
         const { ranCleanup } = this.removeSessionArtifacts(session, {
           preserveAgentHistory: true,
         });
@@ -20977,6 +23225,11 @@ export class SessionService {
       updatedAt: nowIso(),
       ...(options?.retainInList ? { retainInList: true } : {}),
     };
+    if (targetStatus === "completed") {
+      record.terminalSlotsCaptured = true;
+      if (terminalSlots) record.slots = terminalSlots;
+      else delete record.slots;
+    }
     if (targetStatus !== "stopped") {
       delete record.stopReason;
     }
@@ -20990,6 +23243,7 @@ export class SessionService {
     if (startupAttachmentsCleaned) {
       delete record.startupAttachmentIds;
     }
+    if (options?.handoffReceipt) record.handoffIdempotency = options.handoffReceipt;
     writeSession(this.config.dataDir, record);
     if (targetStatus === "completed") await this.terminateDetachedSessionProcesses(record);
     if (targetStatus === "completed") await this.cleanupTerminalTelegram(record);
@@ -21006,6 +23260,7 @@ export class SessionService {
       message: `${targetStatus === "stopped" ? "Stopped" : "Completed"} ${sessionId}`,
       details: {
         worktree: session.worktree,
+        ...(eventAction === "handoff" && options?.handoffDetails ? options.handoffDetails : {}),
       },
     });
     return options?.skipEnrichment ? undefined : this.enrich(record);
@@ -21049,6 +23304,8 @@ export class SessionService {
 
     await this.ensureKillDirtyWorktreeAllowed(session, request.force === true);
 
+    let terminalSlots: SessionSlots | undefined;
+
     try {
       if (session.status !== "killed" && !request.skipPrCheck) {
         if (session.worktree && session.worktreePath && !workspaceExists(session.worktreePath)) {
@@ -21063,6 +23320,11 @@ export class SessionService {
         }
       }
       this.cancelWaitingHandoff(sessionId);
+      const closeoutRecord = readSession(this.config.dataDir, sessionId);
+      const closeoutTakenFrom =
+        closeoutRecord && this.prAlertBirthUnlaunched(closeoutRecord)
+          ? closeoutRecord.spawnIntent?.closeoutTakenFrom
+          : undefined;
       if (session.prAlertTransfer && this.prAlertBirthUnlaunched(session)) {
         session = this.settlePrAlertTransferLocked(session, "rollback");
         writeSession(this.config.dataDir, session);
@@ -21078,7 +23340,13 @@ export class SessionService {
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.terminateDetachedSessionProcesses(session);
       await this.cleanupSessionServices(session);
+      if (session.auth) await this.revokeManagedAuthorization(session.id);
+      if (currentSession.status !== "killed") terminalSlots = this.captureTerminalSlots(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
+      if (closeoutTakenFrom) {
+        this.returnTakenCloseout(sessionId, closeoutTakenFrom);
+        session.closeoutOwner = false;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
@@ -21115,6 +23383,9 @@ export class SessionService {
       [],
       false,
     );
+    record.terminalSlotsCaptured = true;
+    if (terminalSlots) record.slots = terminalSlots;
+    else delete record.slots;
     delete record.retainInList;
     delete record.submitUnconfirmedAt;
     delete record.queuedMessageTyped;
@@ -21526,6 +23797,16 @@ export class SessionService {
       );
     }
 
+    // Caller holds this session's lifecycle lock, so waiting on the take would
+    // deadlock against the taking spawn; refuse before anything destructive.
+    const closeoutTake = this.closeoutTakeFrom(session.id);
+    if (closeoutTake) {
+      throw new SessionStartingError(
+        `Session ${session.id} closeout is moving to ${closeoutTake.takerId}; retry after it launches or kill ${closeoutTake.takerId}`,
+      );
+    }
+    this.assertNoHeldCloseoutTake(session.id);
+
     const project = this.getProject(session.project);
     // Same restore-warmup protection as restore() above: relaunchSessionInPlace
     // starts the MCP sidecar before this session's status is guaranteed
@@ -21537,9 +23818,15 @@ export class SessionService {
     // "working" the way a genuine post-restore warmup intentionally does.
     this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
     this.launchesInFlight.add(session.id);
+    // The caller's record predates the awaits above; a reuse spawn can have
+    // taken closeout since, and env plus record writes must carry the flag.
+    const relaunchTarget: SessionRecord = {
+      ...session,
+      closeoutOwner: readSession(this.config.dataDir, session.id)?.closeoutOwner === true,
+    };
     let recovered: ReadySessionForSend;
     try {
-      recovered = await this.relaunchSessionInPlace(session, project, {
+      recovered = await this.relaunchSessionInPlace(relaunchTarget, project, {
         ...options,
         paneAlreadyOwned: options?.paneAlreadyOwned === true,
         ...(operation ? { operation } : {}),
@@ -21652,6 +23939,21 @@ export class SessionService {
     assertActive();
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
+    const authRegistration = session.auth
+      ? await this.prepareSessionAuthorization(
+          session.id,
+          session.agent,
+          project,
+          session.auth.accountId,
+          true,
+        )
+      : undefined;
+    const managedLaunch = managedAuthLaunch(
+      authRegistration,
+      sessionToolDir,
+      project.codexArgs,
+      session.worktreePath,
+    );
     const { session: mcpSidecarUpdate, mcpBindings } = await this.startMcpSidecars(
       session,
       project,
@@ -21711,7 +24013,7 @@ export class SessionService {
         }),
         { planMode, restrictWrites },
       ),
-      ...this.resolveClaudeAuthPlanOptions(session),
+      ...(authRegistration ? managedLaunch : this.resolveClaudeAuthPlanOptions(session)),
     };
     const baseLaunchPlan = buildAgentLaunchPlan(
       session.agent,
@@ -21758,7 +24060,7 @@ export class SessionService {
         symlinks: this.getProject(session.project).symlinks,
         closeoutOwner: session.closeoutOwner === true,
         agentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env },
       });
     let agentLaunchId = newAgentLaunchId();
     let env = buildLaunchEnv(agentLaunchId);
@@ -22162,6 +24464,12 @@ export class SessionService {
     request: RestoreSessionRequest,
     operation?: RestoreOperationContext,
   ): Promise<SessionView> {
+    // No lock held here. A failed taking spawn gives closeout back before it
+    // settles, so the launch below reads the final flag.
+    // Persisted background takes refuse now; only foreground takes wait.
+    this.assertNoHeldCloseoutTake(sessionId);
+    await this.waitForCloseoutTakeFrom(sessionId, operation);
+    this.assertNoHeldCloseoutTake(sessionId);
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     return this.withPaneWriteLock(
@@ -22455,6 +24763,19 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
+      const authRegistration = await this.prepareSessionAuthorization(
+        current.id,
+        current.agent,
+        restoreProjectConfig,
+        current.auth ? current.auth.accountId : current.claudeAccountId,
+        current.auth !== undefined,
+      );
+      const managedLaunch = managedAuthLaunch(
+        authRegistration,
+        sessionToolDir,
+        restoreProjectConfig.codexArgs,
+        current.worktreePath,
+      );
       operation?.assertActive();
       const mcpStart = await this.startMcpSidecars(current, restoreProjectConfig, operation);
       operation?.assertActive();
@@ -22467,6 +24788,7 @@ export class SessionService {
         sessionId: current.id,
         worktreePath: current.worktreePath,
         sessionToolDir,
+        ...(authRegistration ? { managedAuth: true } : {}),
         restrictWrites: resolveRestrictWrites(current),
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
@@ -22522,7 +24844,7 @@ export class SessionService {
           }),
           { planMode, restrictWrites },
         ),
-        ...this.resolveClaudeAuthPlanOptions(current),
+        ...(authRegistration ? managedLaunch : this.resolveClaudeAuthPlanOptions(current)),
       };
       const resolvedModel = launchSelection.model;
       const launchPlanOptions = {
@@ -22641,7 +24963,7 @@ export class SessionService {
         symlinks: this.getProject(current.project).symlinks,
         closeoutOwner: current.closeoutOwner === true,
         agentLaunchId: restoreAgentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env },
       });
 
       await createTmuxSession({
@@ -22672,6 +24994,7 @@ export class SessionService {
             ...latest,
             status: "running",
             launchCommand: restoredLaunchCommand,
+            ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
             ...(restoreAgentLaunchId ? { agentLaunchId: restoreAgentLaunchId } : {}),
             updatedAt: nowIso(),
           },
@@ -23080,6 +25403,11 @@ export class SessionService {
     sessionId: string,
     request: RestoreSessionRequest,
   ): Promise<SessionView> {
+    // Before the claim: awaiting between the has-check and the set would race.
+    // Persisted background takes refuse now; only foreground takes wait.
+    this.assertNoHeldCloseoutTake(sessionId);
+    await this.waitForCloseoutTakeFrom(sessionId);
+    this.assertNoHeldCloseoutTake(sessionId);
     // Refuse a second concurrent reopen outright instead of narrowing the
     // read-check-then-write window: two overlapping calls that both pass the
     // `status !== "completed"` guard would otherwise race into restore() for
@@ -23253,7 +25581,7 @@ export class SessionService {
 
   async switchAuth(
     sessionId: string,
-    accountId: string,
+    accountId: string | null,
     opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
   ): Promise<SessionView> {
     const hint = readSession(this.config.dataDir, sessionId);
@@ -23272,7 +25600,7 @@ export class SessionService {
 
   private async switchAuthLocked(
     sessionId: string,
-    accountId: string,
+    accountId: string | null,
     opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
     claim: SessionLifecycleStamp,
   ): Promise<SessionView> {
@@ -23283,300 +25611,348 @@ export class SessionService {
     if (!this.lifecycleStampMatches(session, claim)) {
       throw new Error(`Session ${sessionId} changed before auth migration`);
     }
-    if (session.agent !== "claude") {
-      throw new Error(
-        `switch-auth is only supported for claude sessions (session ${sessionId} runs ${session.agent})`,
+    if (!session.auth) {
+      throw new AuthorizationError(
+        "Direct authorization cannot switch in place; restore or respawn with a managed account",
       );
     }
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
-    if (!isAccountReady(account)) {
-      throw new Error(
-        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
-      );
-    }
-
-    const force = opts.force === true;
-    let activeClaim = claim;
-    if (!force) {
-      const state = await this.classifySessionState(session);
-      if (state === "working") {
-        throw new Error(
-          `Session ${sessionId} is working; retry when idle or pass force to switch auth`,
+    if (accountId !== null) {
+      const account = this.authAccounts.read().accounts.find((entry) => entry.id === accountId);
+      if (!account || account.provider !== session.agent) {
+        throw new AuthorizationError(
+          `Unknown ${session.agent} authorization account: ${accountId}`,
+          400,
         );
       }
-      activeClaim = await this.withSessionLifecycleLocks(
-        this.lifecycleIdsFor(session),
-        async () => {
-          const latest = readSession(this.config.dataDir, sessionId);
-          if (!latest) {
-            throw new Error(`Session ${sessionId} changed during auth migration`);
-          }
-          const reconciledDeadRuntime =
-            (claim.status === "running" || claim.status === "spawning") &&
-            (latest.status === "stopped" || latest.status === "errored") &&
-            latest.stopReason === undefined;
-          if (!this.lifecycleStateMatches(latest, claim) && !reconciledDeadRuntime) {
-            throw new Error(`Session ${sessionId} changed during auth migration`);
-          }
-          return this.lifecycleStamp(latest);
-        },
-      );
     }
-    const sessionToolDir = join(this.config.dataDir, "session-tools", sessionId);
-    const sessionHome = sessionClaudeHome(sessionToolDir);
-    const usesSessionHome = session.launchCommand.startsWith(
-      `CLAUDE_CONFIG_DIR=${shellEscape(sessionHome)} `,
-    );
-
-    if (usesSessionHome) {
-      return this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
-        const latest = readSession(this.config.dataDir, sessionId);
-        if (!latest || !this.lifecycleStampMatches(latest, activeClaim)) {
-          throw new Error(`Session ${sessionId} changed during auth migration`);
-        }
-        const updated: SessionRecord = {
-          ...latest,
-          claudeAccountId: accountId,
-          updatedAt: nowIso(),
-        };
-        swapSessionCredentials(sessionHome, account);
-        writeSession(this.config.dataDir, updated);
-        touchAccountUsed(this.config.dataDir, accountId);
-        this.logEvent("session.auth.switched", {
-          level: "info",
-          sessionId,
-          projectId: latest.project,
-          message: `Switched claude account for ${sessionId} to ${accountId}`,
-          details: { accountId, reason: opts.reason, forced: force, method: "in_place" },
-        });
-        return this.enrich(updated);
-      });
-    }
-
-    await this.ensureKillDirtyWorktreeAllowed(session, force);
-    // Install target credentials before persisting the record or killing the pane.
-    // If the swap throws, the persisted account and running pane remain old.
-    const prepared = await this.withSessionLifecycleLocks(
+    let pingKey: string | undefined;
+    const updated = await this.withSessionLifecycleLocks(
       this.lifecycleIdsFor(session),
       async () => {
-        const latest = readSession(this.config.dataDir, sessionId);
-        if (!latest || !this.lifecycleStampMatches(latest, activeClaim)) {
-          throw new Error(`Session ${sessionId} changed during auth migration`);
+        const current = readSession(this.config.dataDir, sessionId);
+        if (!current || !this.lifecycleStampMatches(current, claim)) {
+          throw new Error(`Session ${sessionId} changed during auth selection`);
         }
-        const updated: SessionRecord = {
-          ...latest,
-          claudeAccountId: accountId,
+        const registration = await this.authProxy.switchSession(sessionId, accountId);
+        this.authSnapshot = undefined;
+        const { claudeAccountId: _legacyAccountId, ...base } = current;
+        const auth = publicAuthSession(registration);
+        const authChangePing = this.authChangePingClaim(current, auth);
+        pingKey = authChangePing?.key;
+        const next: SessionRecord = {
+          ...base,
+          auth,
+          ...(authChangePing ? { authChangePing } : {}),
           updatedAt: nowIso(),
         };
-        mkdirSync(sessionHome, { recursive: true });
-        swapSessionCredentials(sessionHome, account);
-        writeSession(this.config.dataDir, updated);
-        touchAccountUsed(this.config.dataDir, accountId);
-        await this.killAgentPaneAndConfirmExit(updated, { failOnSurvivors: true });
-        const relaunched = await this.ensureSessionReadyForSend(updated, {
-          paneAlreadyConfirmedGone: true,
-          paneAlreadyOwned: true,
-        });
-        const generation = await this.capturePaneGeneration(relaunched.session);
-        const persisted = readSession(this.config.dataDir, sessionId);
-        if (!persisted || !(await this.paneGenerationMatches(persisted, generation))) {
-          throw new Error(`Session ${sessionId} changed during auth migration`);
-        }
-        return {
-          relaunched,
-          generation,
-          stamp: this.lifecycleStamp(persisted),
-        };
+        writeSession(this.config.dataDir, next);
+        this.stateCache.delete(sessionId);
+        return next;
       },
     );
-    const { relaunched, generation } = prepared;
-    if (relaunched.recoveryMessage) {
-      const submission = await this.beginAgentMessage(
-        relaunched.recoveryMessage.session,
-        relaunched.recoveryMessage.message,
-        {
-          ...relaunched.recoveryMessage.options,
-          authorizeInput: (send) =>
-            this.withWorkspaceLifecycleLocks(sessionId, async () => {
-              const current = readSession(this.config.dataDir, sessionId);
-              if (
-                !current ||
-                !this.lifecycleStampMatches(current, prepared.stamp) ||
-                !(await this.paneGenerationMatches(current, generation))
-              ) {
-                return false;
-              }
-              await send();
-              return true;
-            }),
-        },
-      );
-      const outcome = await this.completeAgentMessage(submission, {
-        authorizeResend: (send) =>
-          this.withWorkspaceLifecycleLocks(sessionId, async () => {
-            const current = readSession(this.config.dataDir, sessionId);
-            if (
-              !current ||
-              !this.lifecycleStampMatches(current, prepared.stamp) ||
-              !(await this.paneGenerationMatches(current, generation))
-            ) {
-              return false;
-            }
-            await send();
-            return true;
-          }),
-        recoveryGenerationMatches: () =>
-          this.withWorkspaceLifecycleLocks(sessionId, async () => {
-            const current = readSession(this.config.dataDir, sessionId);
-            return Boolean(
-              current &&
-              this.lifecycleStampMatches(current, prepared.stamp) &&
-              (await this.paneGenerationMatches(current, generation)),
-            );
-          }),
-      });
-      if (outcome === "stale") {
-        throw new Error(`Session ${sessionId} changed during auth migration`);
-      }
-    }
-    const current = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
-      const latest = readSession(this.config.dataDir, sessionId);
-      if (
-        !latest ||
-        !this.lifecycleStampMatches(latest, prepared.stamp) ||
-        !(await this.paneGenerationMatches(latest, generation))
-      ) {
-        return null;
-      }
-      return latest;
-    });
-    if (!current) throw new Error(`Session ${sessionId} changed during auth migration`);
+    if (pingKey) void this.sendAuthChangePing(sessionId, pingKey);
     this.logEvent("session.auth.switched", {
       level: "info",
       sessionId,
       projectId: session.project,
-      message: `Switched claude account for ${sessionId} to ${accountId}`,
-      details: { accountId, reason: opts.reason, forced: force, method: "relaunch" },
+      message: `Selected ${session.agent} authorization for the next request`,
+      details: { accountId, reason: opts.reason, method: "proxy" },
     });
-    return this.enrich(current);
+    return this.enrich(updated);
   }
 
-  // Rotate a rate-limited claude session onto the next ready account.
-  // Returns true when a rotation happened; false when disabled, capped, or no
-  // fresh candidate exists (caller then falls through to the reactivation nudge).
-  private async tryAutoRotateClaudeAccount(session: SessionRecord): Promise<boolean> {
-    if (!this.config.authRotation.autoRotateOnRateLimit || session.agent !== "claude") {
-      return false;
-    }
-    const now = Date.now();
-    const cooldownMs = this.config.authRotation.cooldownMinutes * 60_000;
-    // Mark the current account rate-limited so later rotations skip it until it
-    // is likely reset. The usage-limit menu does not expose a reset time, so use
-    // the configured cooldown.
-    if (session.claudeAccountId) {
-      this.claudeAccountRateLimit.set(session.claudeAccountId, now + cooldownMs);
-    }
-    const episode = String(session.rateLimitedAt);
-    const tracker = this.claudeRotationEpisode.get(session.id);
-    const count = tracker?.episode === episode ? tracker.count : 0;
-    if (count >= this.config.authRotation.maxRotationsPerEpisode) {
-      return false;
-    }
-    const next = listAccounts(this.config.dataDir).find((account) => {
-      if (account.id === session.claudeAccountId) return false;
-      if (!isAccountReady(account)) return false;
-      const limitedUntil = this.claudeAccountRateLimit.get(account.id);
-      return limitedUntil === undefined || limitedUntil <= now;
+  /**
+   * Managed accounts with status, identity and display name. Quota rides only on opts.quota: it is
+   * read from the cache and never waits on a provider, and session list paths must not start usage reads.
+   */
+  async listAuthorizationAccounts(
+    provider?: AuthProvider,
+    opts?: { quota?: boolean },
+  ): Promise<{
+    accounts: AuthAccountSummary[];
+    pools: ReturnType<AuthAccounts["read"]>["pools"];
+  }> {
+    const state = this.authAccounts.read();
+    const statuses =
+      state.accounts.length > 0 ? (await this.readAuthorizationState()).accounts : [];
+    const identified = withCompanionIdentity(state.accounts, statuses);
+    const names = authDisplayNames(identified);
+    const all = identified.map((account): AuthAccountSummary => {
+      const entry = statuses.find((candidate) => candidate.id === account.id);
+      const status = entry?.status ?? "sign-in-required";
+      return {
+        ...account,
+        displayName: names.get(account.id) ?? account.id,
+        limited: entry?.cooldownUntil !== undefined,
+        ...(entry?.cooldownUntil ? { cooldownUntil: entry.cooldownUntil } : {}),
+        ...(entry?.credential ? { credential: entry.credential } : {}),
+        authenticated: status === "ready",
+        status:
+          status === "sign-in-required"
+            ? "sign_in_required"
+            : status === "failed"
+              ? "error"
+              : status,
+      };
     });
-    if (!next) {
-      return false;
+    // The cache sees every store account: pruning against a provider subset would drop the others.
+    const quotas = opts?.quota
+      ? this.authQuota.read(
+          all.map((account) => ({
+            id: account.id,
+            provider: account.provider,
+            status: account.status,
+            ...(account.credential ? { credential: account.credential } : {}),
+          })),
+        )
+      : undefined;
+    const quotaErrors = quotas ? this.authQuota.lastErrors() : undefined;
+    return {
+      accounts: all
+        .filter((account) => !provider || account.provider === provider)
+        .map((account) => {
+          const quota = quotas?.get(account.id);
+          if (quota) return { ...account, quota };
+          const quotaError = quotaErrors?.get(account.id);
+          return quotaError ? { ...account, quotaError } : account;
+        }),
+      pools: state.pools,
+    };
+  }
+
+  async addAuthorizationAccount(provider: AuthProvider) {
+    const account = this.authAccounts.add(provider);
+    await this.authProxy.configure();
+    this.authSnapshot = undefined;
+    return account;
+  }
+
+  async updateAuthorizationPool(
+    provider: AuthProvider,
+    update: { defaultAccountId?: string | null; autoRotate?: boolean },
+  ) {
+    if (update.defaultAccountId !== null && update.defaultAccountId !== undefined) {
+      const { accounts } = await this.listAuthorizationAccounts(provider);
+      if (
+        !accounts.some((account) => account.id === update.defaultAccountId && account.authenticated)
+      ) {
+        throw new AuthorizationError(
+          "Default authorization account must be ready and match the provider",
+          400,
+        );
+      }
     }
-    await this.switchAuth(session.id, next.id, { reason: "auto_rate_limit" });
-    this.claudeRotationEpisode.set(session.id, { episode, count: count + 1 });
-    this.logEvent("session.auth.auto_rotated", {
-      level: "info",
-      sessionId: session.id,
-      projectId: session.project,
-      message: `Auto-rotated ${session.id} to claude account ${next.id} after rate limit`,
-      details: {
-        ...(session.claudeAccountId ? { fromAccountId: session.claudeAccountId } : {}),
-        toAccountId: next.id,
-        episode,
+    const pool = this.authAccounts.updatePool(provider, update);
+    await this.authProxy.configure();
+    this.authSnapshot = undefined;
+    return pool;
+  }
+
+  async removeAuthorizationAccount(accountId: string): Promise<void> {
+    const proxyState = await this.authProxy.getState();
+    const bindings = proxyState.sessions;
+    const readyIds = new Set(
+      proxyState.accounts.filter((entry) => entry.status === "ready").map((entry) => entry.id),
+    );
+    const boundIds = new Set(
+      bindings
+        .filter(
+          (binding) => binding.accountId === accountId || binding.effectiveAccountId === accountId,
+        )
+        .map((binding) => binding.sessionId),
+    );
+    const hints = listSessions(this.config.dataDir).filter(
+      (session) =>
+        boundIds.has(session.id) ||
+        session.auth?.accountId === accountId ||
+        session.auth?.effectiveAccountId === accountId ||
+        session.claudeAccountId === accountId,
+    );
+    await this.withSessionLifecycleLocks(
+      hints.flatMap((session) => this.lifecycleIdsFor(session)),
+      async () => {
+        const sessions: SessionRecord[] = [];
+        for (const hint of hints) {
+          const session = readSession(this.config.dataDir, hint.id);
+          if (
+            session &&
+            !boundIds.has(session.id) &&
+            session.auth?.accountId !== accountId &&
+            session.auth?.effectiveAccountId !== accountId &&
+            session.claudeAccountId !== accountId
+          )
+            continue;
+          if (
+            !session ||
+            (!isTerminalSessionStatus(session.status) && session.status !== "errored")
+          ) {
+            throw new AuthorizationError(
+              `Cannot remove account ${accountId}: in use by a running session`,
+            );
+          }
+          const runtime = await this.readRuntimeSnapshot(session, { fresh: true });
+          if (runtime.processAlive || runtime.probeUnresponsive) {
+            throw new AuthorizationError(
+              `Cannot remove account ${accountId}: session runtime is live or unconfirmed`,
+            );
+          }
+          const processes = await findForeignAgentProcessesForSession({
+            sessionId: session.id,
+            processMatchers: sessionProcessMatchers(session),
+            excludePanePids: [],
+          });
+          if (processes.status !== "ok" || processes.pids.length > 0) {
+            throw new AuthorizationError(
+              `Cannot remove account ${accountId}: session process exit is unconfirmed`,
+            );
+          }
+          sessions.push(session);
+        }
+        for (const session of sessions) {
+          if (session.auth) await this.revokeManagedAuthorization(session.id);
+        }
+        await this.authProxy.removeAccount(accountId);
+        for (const session of sessions) {
+          const { auth: _auth, claudeAccountId: _legacyAccountId, ...base } = session;
+          writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+        }
+        this.authAccounts.remove(accountId, (id) => readyIds.has(id));
+        await this.authProxy.configure();
+        this.authSnapshot = undefined;
       },
-    });
-    return true;
+    );
   }
 
-  listClaudeAccounts(): {
-    id: string;
-    label?: string;
-    authenticated: boolean;
-    lastUsedAt?: string;
-  }[] {
-    ensureDefaultAccount(this.config.dataDir);
-    return listAccounts(this.config.dataDir).map((account) => ({
+  startAuthorizationLogin(accountId: string, method?: AuthLoginMethod): Promise<AuthLogin> {
+    this.authSnapshot = undefined;
+    const account = this.requireAuthorizationAccount(accountId);
+    const allowed: readonly [AuthLoginMethod, ...AuthLoginMethod[]] =
+      account.provider === "claude" ? ["oauth"] : ["device", "browser"];
+    const chosen = method ?? allowed[0];
+    if (!allowed.includes(chosen)) {
+      throw new AuthorizationError(
+        `Sign-in method ${chosen} is not available for ${account.provider}`,
+        400,
+      );
+    }
+    return this.authProxy.login(accountId, account.provider, chosen);
+  }
+
+  async setAuthorizationApiKey(accountId: string, apiKey: string): Promise<AuthLogin> {
+    this.authSnapshot = undefined;
+    const account = this.requireAuthorizationAccount(accountId);
+    return this.authProxy.setApiKey(accountId, account.provider, apiKey);
+  }
+
+  private requireAuthorizationAccount(accountId: string) {
+    const account = this.authAccounts.read().accounts.find((entry) => entry.id === accountId);
+    if (!account) throw new AuthorizationError(`Unknown authorization account: ${accountId}`, 404);
+    return account;
+  }
+
+  authorizationLoginInput(accountId: string, input: string | null): Promise<AuthLogin> {
+    this.authSnapshot = undefined;
+    return input === null
+      ? this.authProxy.cancelLogin(accountId)
+      : this.authProxy.loginInput(accountId, input);
+  }
+
+  authorizationLoginStatus(accountId: string): Promise<AuthLogin> {
+    return this.authProxy.loginStatus(accountId);
+  }
+
+  async listAuthAlerts(): Promise<{ alerts: AuthAlert[] }> {
+    const { alerts } = await this.authAlerts.evaluate(() => this.readAuthAlertInputs(), new Date());
+    return { alerts };
+  }
+
+  private async readAuthAlertInputs(): Promise<AlertEvaluationInput> {
+    const state = this.authAccounts.read();
+    let managed: ManagedBreakage[] | null = [];
+    if (state.accounts.length > 0) {
+      try {
+        const statuses = (await this.readAuthorizationState()).accounts;
+        const names = authDisplayNames(withCompanionIdentity(state.accounts, statuses));
+        managed = statuses.flatMap((entry) => {
+          const account = state.accounts.find((candidate) => candidate.id === entry.id);
+          return entry.brokenAt && account
+            ? [
+                {
+                  accountId: account.id,
+                  provider: account.provider,
+                  label: names.get(account.id) ?? account.id,
+                  brokenAt: entry.brokenAt,
+                },
+              ]
+            : [];
+        });
+      } catch {
+        managed = null;
+      }
+    }
+    const host = (await readHostCredentialSources(this.usageReportDeps())).map((source) => ({
+      provider: source.provider,
+      observation: observeHostSource(source),
+    }));
+    return { managed, host, sessions: listSessions(this.config.dataDir) };
+  }
+
+  startTerminalLogin(
+    target: { accountId: string } | { host: AuthProvider },
+  ): Promise<TerminalLogin> {
+    this.authSnapshot = undefined;
+    return this.authTerminals.start(target);
+  }
+
+  getTerminalLogin(id: string): TerminalLogin {
+    return this.authTerminals.get(id);
+  }
+
+  async stopTerminalLogin(id: string): Promise<void> {
+    this.authSnapshot = undefined;
+    await this.authTerminals.stop(id);
+  }
+
+  /** Legacy Claude shape: the display name rides as label; identity and quota stay out. */
+  async listClaudeAccounts() {
+    return (await this.listAuthorizationAccounts("claude")).accounts.map((account) => ({
       id: account.id,
-      ...(account.label ? { label: account.label } : {}),
-      authenticated: isAccountAuthenticated(account),
-      ...(account.lastUsedAt ? { lastUsedAt: account.lastUsedAt } : {}),
+      provider: account.provider,
+      label: account.displayName,
+      createdAt: account.createdAt,
+      authenticated: account.authenticated,
+      status: account.status,
+      limited: account.limited,
+      ...(account.cooldownUntil ? { cooldownUntil: account.cooldownUntil } : {}),
+      ...(account.credential ? { credential: account.credential } : {}),
     }));
   }
 
-  addClaudeAccount(opts: { label?: string }): ClaudeAccount {
-    return addAccount(this.config.dataDir, opts);
+  /** A new account has no identity yet, so its label is the placeholder display name. */
+  async addClaudeAccount() {
+    const account = await this.addAuthorizationAccount("claude");
+    return { id: account.id, label: authDisplayNames([account]).get(account.id) ?? account.id };
   }
 
-  removeClaudeAccount(accountId: string): void {
-    // removeAccount rmSync's the account's CLAUDE_CONFIG_DIR. Guard against
-    // deleting creds out from under a live claude process bound to it: a
-    // non-terminal session still has its claude process alive in tmux.
-    const bound = listSessions(this.config.dataDir).filter(
-      (session) => session.claudeAccountId === accountId,
-    );
-    const live = bound.filter((session) => !isTerminalSessionStatus(session.status));
-    if (live.length > 0) {
-      throw new Error(
-        `Cannot remove account ${accountId}: in use by ${live.length} running session(s)`,
-      );
-    }
-    // Terminal sessions keep no live process, but leaving the ref dangling would
-    // point at a deleted account; clear it before removing the store entry.
-    for (const session of bound) {
-      const { claudeAccountId: _claudeAccountId, ...base } = session;
-      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
-    }
-    removeAccount(this.config.dataDir, accountId);
+  removeClaudeAccount(accountId: string): Promise<void> {
+    return this.removeAuthorizationAccount(accountId);
   }
 
-  // Host an interactive OAuth login pane for an account in an isolated
-  // CLAUDE_CONFIG_DIR. The UI attaches to the returned tmux session and the
-  // operator completes the browser sign-in there; finishAccountLogin tears it
-  // down once .credentials.json lands.
   async startAccountLogin(accountId: string): Promise<{ loginTmuxSession: string }> {
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
+    await this.startAuthorizationLogin(accountId);
     const loginTmuxSession = `claude-login-${accountId}`;
     await killTmuxSession(loginTmuxSession);
     await createTmuxCommandSession({
       sessionName: loginTmuxSession,
       cwd: userInfo().homedir,
-      launchCommand: claudeCommand(),
-      env: { CLAUDE_CONFIG_DIR: account.configDir },
+      launchCommand: `${shellEscape(process.execPath)} ${shellEscape(fileURLToPath(new URL("./cli.js", import.meta.url)))} --config ${shellEscape(this.config.configPath)} auth login ${shellEscape(accountId)}`,
     });
     return { loginTmuxSession };
   }
 
   async finishAccountLogin(accountId: string): Promise<{ authenticated: boolean }> {
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
-    const authenticated = isAccountAuthenticated(account);
+    const authenticated = (await this.authorizationLoginStatus(accountId)).status === "ready";
+    if (!authenticated) await this.authProxy.cancelLogin(accountId);
     await killTmuxSession(`claude-login-${accountId}`);
     return { authenticated };
   }
@@ -23584,12 +25960,11 @@ export class SessionService {
   async getAccountLoginStatus(
     accountId: string,
   ): Promise<{ authenticated: boolean; loginActive: boolean }> {
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
     const loginActive = await tmuxSessionExists(`claude-login-${accountId}`);
-    return { authenticated: isAccountAuthenticated(account), loginActive };
+    return {
+      authenticated: (await this.authorizationLoginStatus(accountId)).status === "ready",
+      loginActive,
+    };
   }
 
   private clearCloseoutOwner(sessionId: string): void {
@@ -23597,6 +25972,146 @@ export class SessionService {
     if (session?.closeoutOwner !== true) return;
     writeSession(this.config.dataDir, { ...session, closeoutOwner: false, updatedAt: nowIso() });
     this.stateCache.delete(sessionId);
+  }
+
+  private holdsCloseout(record: SessionRecord): boolean {
+    return (
+      record.closeoutOwner === true &&
+      (!isReleasedCloseoutStatus(record) ||
+        this.launchesInFlight.has(record.id) ||
+        this.handoffsInFlight.has(record.id) ||
+        this.lifecycle.snapshot(record.id).operation?.phase === "pending")
+    );
+  }
+
+  // Pure read: ids of the workspace's closeout owners when every one is
+  // released, null when nothing is takeable.
+  private takeReleasedCloseout(workspaceId: string, newSessionId: string): string[] | null {
+    const anchor = readSession(this.config.dataDir, workspaceId);
+    if (!anchor) return null;
+    const owners = this.listWorkspaceRuntimeMembers(
+      anchor,
+      listSessions(this.config.dataDir),
+    ).filter((member) => member.id !== newSessionId && member.closeoutOwner === true);
+    if (owners.length === 0 || owners.some((owner) => this.holdsCloseout(owner))) return null;
+    return owners.map((owner) => owner.id);
+  }
+
+  // Runs in the same sync span as the placeholder write; the old owners are
+  // cleared only after the write succeeded.
+  private applyCloseoutTake(
+    placeholder: SessionRecord,
+    reuseCtx: { workspaceId: string } | null,
+    takeAllowed: boolean,
+    onWritten: (takenFrom: string[] | null) => void,
+  ): string[] | null {
+    const takenFrom =
+      reuseCtx && takeAllowed
+        ? this.takeReleasedCloseout(reuseCtx.workspaceId, placeholder.id)
+        : null;
+    if (takenFrom) {
+      placeholder.closeoutOwner = true;
+      // Durable: a restart-resumed queued launch still gives back on final failure.
+      if (placeholder.spawnIntent) {
+        placeholder.spawnIntent = { ...placeholder.spawnIntent, closeoutTakenFrom: takenFrom };
+      }
+    }
+    writeSession(this.config.dataDir, placeholder);
+    onWritten(takenFrom);
+    if (!takenFrom || !reuseCtx) return takenFrom;
+    for (const id of takenFrom) this.clearCloseoutOwner(id);
+    let settle = (): void => undefined;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.closeoutTakesInFlight.set(placeholder.id, { from: takenFrom, settled, settle });
+    this.logEvent("session.closeout.taken", {
+      level: "info",
+      sessionId: placeholder.id,
+      projectId: placeholder.project,
+      message: `${placeholder.id} took closeout from ${takenFrom.join(", ")}`,
+      details: { workspaceId: reuseCtx.workspaceId, fromSessionIds: takenFrom },
+    });
+    return takenFrom;
+  }
+
+  private settleCloseoutTake(takerId: string): void {
+    this.closeoutTakesInFlight.get(takerId)?.settle();
+    this.closeoutTakesInFlight.delete(takerId);
+  }
+
+  private closeoutTakeFrom(
+    sessionId: string,
+  ): { takerId: string; settled: Promise<void> } | undefined {
+    for (const [takerId, take] of this.closeoutTakesInFlight) {
+      if (take.from.includes(sessionId)) return { takerId, settled: take.settled };
+    }
+    return undefined;
+  }
+
+  // Loops: a new take cannot start from a pending session, but the loop keeps
+  // the wait correct if one was already registered. Hold no lock while waiting.
+  private async waitForCloseoutTakeFrom(
+    sessionId: string,
+    operation?: RestoreOperationContext,
+  ): Promise<void> {
+    for (
+      let take = this.closeoutTakeFrom(sessionId);
+      take;
+      take = this.closeoutTakeFrom(sessionId)
+    ) {
+      await (operation ? operation.wait(take.settled) : take.settled);
+    }
+  }
+
+  // The in-memory wait covers a take that is running. A held or restart-queued
+  // taker keeps its persisted intent but has no in-flight entry, and may still
+  // fail and give closeout back to this session. Restoring or handing it off
+  // now would launch a helper that the later give-back skips. Persisted record
+  // only, read-only, no lock.
+  private assertNoHeldCloseoutTake(sessionId: string): void {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) return;
+    const taker = this.listWorkspaceRuntimeMembers(session, listSessions(this.config.dataDir)).find(
+      (member) =>
+        member.id !== sessionId &&
+        !isTerminalSessionStatus(member.status) &&
+        member.spawnIntent?.closeoutTakenFrom?.includes(sessionId) === true,
+    );
+    if (taker) {
+      throw new SessionStartingError(
+        `Session ${sessionId} closeout is moving to ${taker.id}; retry after it launches or kill ${taker.id}`,
+      );
+    }
+  }
+
+  // Sync with the failed-record write. A live launch retained by the failure
+  // path never reaches here.
+  private returnTakenCloseout(failedSessionId: string, takenFrom: readonly string[]): void {
+    const failed = readSession(this.config.dataDir, failedSessionId);
+    if (failed?.closeoutOwner === true) {
+      writeSession(this.config.dataDir, { ...failed, closeoutOwner: false });
+      this.stateCache.delete(failedSessionId);
+    }
+    if (!failed) return;
+    const members = this.listWorkspaceRuntimeMembers(failed, listSessions(this.config.dataDir));
+    for (const id of takenFrom) {
+      const record = members.find((member) => member.id === id);
+      if (
+        !record ||
+        record.closeoutOwner === true ||
+        !isReleasedCloseoutStatus(record) ||
+        this.launchesInFlight.has(id) ||
+        members.some(
+          (member) =>
+            member.id !== failedSessionId && member.id !== id && member.closeoutOwner === true,
+        )
+      ) {
+        continue;
+      }
+      writeSession(this.config.dataDir, { ...record, closeoutOwner: true });
+      this.stateCache.delete(id);
+    }
   }
 
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
@@ -23610,12 +26125,17 @@ export class SessionService {
       );
     }
 
+    const sourceSlots = this.displaySlotsForSession(session);
+    const knownTags = new Set(this.config.tags.map((tag) => tag.name));
+    const carryTags = (sourceSlots?.tags ?? []).filter((tag) => knownTags.has(tag));
+
     const forceKillSource = request.forceKillSource === true;
     const prAlertOwnerTransfer = this.prAlertTransferFrom(session, "respawn");
     if (prAlertOwnerTransfer?.kind === "owner")
       assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
     const bootstrap = this.isUnconfiguredProjectId(session.project);
     const respawnRequest = resolveRespawnRequest(session, {
+      ...(sourceSlots?.links.length ? { links: sourceSlots.links } : {}),
       ...(bootstrap ? { bootstrap: true } : {}),
       ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
@@ -23675,6 +26195,7 @@ export class SessionService {
     // already succeeded — so admission never counts the source twice.
     const spawned = await this.spawn(
       resolveRespawnRequest(session, {
+        ...(sourceSlots?.links.length ? { links: sourceSlots.links } : {}),
         ...(bootstrap ? { bootstrap: true } : {}),
         ...(!bootstrap && request.prompt !== undefined ? { prompt: request.prompt } : {}),
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
@@ -23692,25 +26213,89 @@ export class SessionService {
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
     );
+    this.transitionsBinding?.store.observeStatus(
+      readSession(this.config.dataDir, session.id) ?? session,
+      sourceSlots?.links ?? [],
+      spawned.id,
+    );
+    if (carryTags.length > 0) {
+      const successor = readSession(this.config.dataDir, spawned.id);
+      if (!successor) throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
+      const workspaceState = resolveWorkspaceState(this.config.dataDir, successor);
+      const slots = applySlotsUpdate(workspaceState.slots, { tags: carryTags });
+      this.writeWorkspaceStateWithLegacyMirror(successor, {
+        ...workspaceState,
+        ...(slots ? { slots } : {}),
+      });
+    }
     this.clearCloseoutOwner(session.id);
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
-    return spawned;
+    return carryTags.length > 0 ? this.get(spawned.id) : spawned;
   }
 
   async handoff(
     sessionId: string,
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
-  ): Promise<SessionView> {
+  ): Promise<HandoffSessionResponse> {
+    const { idempotencyKey, ...base } = request;
+    if (idempotencyKey === undefined) return this.handoffOnce(sessionId, base, options);
+    const key = parseIdempotencyKey(idempotencyKey);
+    const fingerprint: HandoffIdempotency["request"] = {
+      agent: base.agent,
+      ...(base.model !== undefined ? { model: base.model } : {}),
+      ...(base.reasoningEffort !== undefined ? { reasoningEffort: base.reasoningEffort } : {}),
+      ...(base.notes !== undefined ? { notes: base.notes } : {}),
+    };
+    const receipt = readSession(this.config.dataDir, sessionId)?.handoffIdempotency;
+    if (receipt?.key === key) {
+      if (!isDeepStrictEqual(receipt.request, fingerprint)) {
+        throw new IdempotencyKeyConflictError(
+          "Idempotency key already belongs to a different handoff request",
+          receipt.successorId,
+        );
+      }
+      return {
+        ...(await this.get(receipt.successorId)),
+        movedTodoItems: receipt.movedTodoItems,
+        replayed: true,
+      };
+    }
+    const pending = this.keyedHandoffsInFlight.get(sessionId);
+    if (pending?.key === key) {
+      const joined = await joinInFlight(pending, fingerprint);
+      return joined
+        ? { ...joined.value, replayed: true }
+        : this.handoff(sessionId, request, options);
+    }
+    const idempotency = { key, request: fingerprint };
+    // Another key already in flight: handoffOnce refuses with "already in flight".
+    if (pending) return this.handoffOnce(sessionId, base, options, idempotency);
+    return runInFlight(this.keyedHandoffsInFlight, sessionId, idempotency, () =>
+      this.handoffOnce(sessionId, base, options, idempotency),
+    );
+  }
+
+  private async handoffOnce(
+    sessionId: string,
+    request: HandoffSessionRequest,
+    options?: { todoActor?: TodoActor },
+    idempotency?: HandoffIdempotency,
+  ): Promise<HandoffSessionResponse> {
+    // Refuse before queueing for admission; handoffTransaction rechecks after the wait.
+    this.assertNoHeldCloseoutTake(sessionId);
     const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
-      const session = this.validateHandoffSource(sessionId, options);
-      if (this.prAlertTransferFrom(session, "handoff")?.kind === "owner")
-        assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
-      if (this.handoffsInFlight.has(sessionId)) {
+      // Before validation: validation reconciles ToDo, which a handoff in flight must own.
+      if (this.handoffsInFlight.has(sessionId) || this.handoffSuccessors.has(sessionId)) {
         throw new Error(`Handoff already in flight for ${sessionId}`);
       }
+      const { session } = this.validateHandoffSource(sessionId, options);
+      // A take may have landed while this call waited on the lock.
+      this.assertNoHeldCloseoutTake(sessionId);
+      if (this.prAlertTransferFrom(session, "handoff")?.kind === "owner")
+        assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
       const agent = parseAgentName(request.agent);
       const token = Symbol(`handoff:${sessionId}`);
       this.handoffsInFlight.set(sessionId, {
@@ -23755,15 +26340,21 @@ export class SessionService {
       claim.phase = "activating";
       const admissionReservation = reservation;
       return await this.runLifecycle("complete", [sessionId], undefined, () =>
-        this.handoffTransaction(sessionId, request, options, {
-          ...waiting,
-          admissionReservation,
-        }),
+        this.handoffTransaction(
+          sessionId,
+          request,
+          options,
+          { ...waiting, admissionReservation },
+          idempotency,
+        ),
       );
     } finally {
       if (reservation !== undefined) this.admissionReservations.delete(reservation);
       if (this.handoffsInFlight.get(sessionId)?.token === waiting.token) {
         this.handoffsInFlight.delete(sessionId);
+        for (const [successorId, sourceId] of this.handoffSuccessors) {
+          if (sourceId === sessionId) this.handoffSuccessors.delete(successorId);
+        }
       }
     }
   }
@@ -23782,76 +26373,160 @@ export class SessionService {
     request: HandoffSessionRequest,
     options: { todoActor?: TodoActor } | undefined,
     waiting: HandoffAdmission,
-  ): Promise<SessionView> {
+    idempotency?: HandoffIdempotency,
+  ): Promise<HandoffSessionResponse> {
+    // Persisted background takes refuse now; only foreground takes wait.
+    this.assertNoHeldCloseoutTake(sessionId);
+    await this.waitForCloseoutTakeFrom(sessionId);
+    this.assertNoHeldCloseoutTake(sessionId);
+    // A failed take gives ownership back during the wait; admit against that.
+    const { closeoutOwner: _stale, ...unowned } = waiting.session;
+    const settledOwner = readSession(this.config.dataDir, sessionId)?.closeoutOwner;
+    const admitted: HandoffAdmission = {
+      ...waiting,
+      session: settledOwner === undefined ? unowned : { ...unowned, closeoutOwner: settledOwner },
+    };
     const prepared = await this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.prepareHandoffLocked(sessionId, request, options, waiting),
+      this.prepareHandoffLocked(sessionId, request, options, admitted),
     );
+    // spawnOnce rolls back its own failures. From here, the successor holds the copies until the
+    // source commit: any earlier failure cancels them, any later one keeps them (successor is live).
+    let successorId: string | undefined;
+    let sourceCommitted = false;
+    let rolledBack = false;
+    const rollbackCopies = (): void => {
+      if (!successorId || sourceCommitted || rolledBack || prepared.inheritedTodo.length === 0) {
+        return;
+      }
+      rolledBack = true;
+      this.rollbackInheritedTodoLocked(
+        { id: successorId, project: prepared.sourceProject },
+        prepared.inheritedTodo,
+      );
+    };
     try {
       const spawned = await this.spawn(prepared.spawnRequest, prepared.spawnOptions);
+      successorId = spawned.id;
       const receipt = this.foregroundSpawnReceipts.get(prepared.receiptToken);
       if (!receipt || receipt.sessionId !== spawned.id) {
         throw new Error(`Handoff successor receipt unavailable for ${spawned.id}`);
       }
+      const source = readSession(this.config.dataDir, sessionId);
+      if (source)
+        this.transitionsBinding?.store.observeStatus(
+          source,
+          this.displaySlotsForSession(source)?.links ?? [],
+          spawned.id,
+        );
+      const closeoutHeadSha = await this.withCloseoutHeads(
+        [sessionId],
+        async (heads) => heads.get(sessionId) ?? null,
+      );
       const finalized = await this.withPaneWriteLock(receipt.generation.tmuxSession, () =>
         this.withSessionLifecycleLocks(
           [...prepared.lifecycleIds, spawned.id],
           async (): Promise<SessionRecord> => {
-            const claim = this.handoffsInFlight.get(sessionId);
-            const source = readSession(this.config.dataDir, sessionId);
-            const successor = readSession(this.config.dataDir, spawned.id);
-            const sourceMatches =
-              source !== null &&
-              source.id === prepared.sourceStamp.id &&
-              workspaceIdOf(source) === prepared.sourceStamp.workspaceId &&
-              source.status === prepared.sourceStamp.status &&
-              source.stopReason === prepared.sourceStamp.stopReason &&
-              source.updatedAt === prepared.sourceStamp.updatedAt &&
-              source.tmuxSession === prepared.sourceStamp.tmuxSession;
-            const successorMatches =
-              successor !== null &&
-              successor.id === receipt.sessionId &&
-              workspaceIdOf(successor) === receipt.workspaceId &&
-              successor.tmuxSession === receipt.generation.tmuxSession &&
-              (await this.paneGenerationMatches(successor, receipt.generation));
-            if (claim?.token !== prepared.token || !sourceMatches || !successorMatches) {
-              throw new Error(`Handoff state changed before finalization for ${sessionId}`);
-            }
+            try {
+              const claim = this.handoffsInFlight.get(sessionId);
+              const source = readSession(this.config.dataDir, sessionId);
+              const successor = readSession(this.config.dataDir, spawned.id);
+              const sourceMatches =
+                source !== null &&
+                source.id === prepared.sourceStamp.id &&
+                workspaceIdOf(source) === prepared.sourceStamp.workspaceId &&
+                source.status === prepared.sourceStamp.status &&
+                source.stopReason === prepared.sourceStamp.stopReason &&
+                source.updatedAt === prepared.sourceStamp.updatedAt &&
+                source.tmuxSession === prepared.sourceStamp.tmuxSession;
+              const successorMatches =
+                successor !== null &&
+                successor.id === receipt.sessionId &&
+                workspaceIdOf(successor) === receipt.workspaceId &&
+                successor.tmuxSession === receipt.generation.tmuxSession &&
+                (await this.paneGenerationMatches(successor, receipt.generation));
+              if (claim?.token !== prepared.token || !sourceMatches || !successorMatches) {
+                throw new Error(`Handoff state changed before finalization for ${sessionId}`);
+              }
 
-            if (prepared.carryTags.length > 0) {
-              const workspaceState = resolveWorkspaceState(this.config.dataDir, successor);
-              const slots = applySlotsUpdate(workspaceState.slots, { tags: prepared.carryTags });
-              this.writeWorkspaceStateWithLegacyMirror(successor, {
-                ...(workspaceState.prAlertOwner
-                  ? { prAlertOwner: workspaceState.prAlertOwner }
-                  : {}),
-                ...(slots ? { slots } : {}),
-                ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
+              if (prepared.carryTags.length > 0) {
+                const workspaceState = resolveWorkspaceState(this.config.dataDir, successor);
+                const slots = applySlotsUpdate(workspaceState.slots, { tags: prepared.carryTags });
+                this.writeWorkspaceStateWithLegacyMirror(successor, {
+                  ...(workspaceState.prAlertOwner
+                    ? { prAlertOwner: workspaceState.prAlertOwner }
+                    : {}),
+                  ...(slots ? { slots } : {}),
+                  ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
+                });
+              }
+              const successorAfterTags = readSession(this.config.dataDir, spawned.id);
+              if (!successorAfterTags) {
+                throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
+              }
+              writeSession(this.config.dataDir, {
+                ...successorAfterTags,
+                ...(prepared.sourcePr ? { pr: prepared.sourcePr } : {}),
+                originalTaskPrompt: prepared.originalTask,
+                updatedAt: nowIso(),
               });
+              if (prepared.inheritedTodo.length > 0) {
+                sourceCommitted = true;
+                closeTodoItems(
+                  this.config.dataDir,
+                  { id: sessionId, project: prepared.sourceProject },
+                  prepared.inheritedTodo.map((item) => ({
+                    itemId: item.from.itemId,
+                    handoffTo: { sessionId: spawned.id, itemId: item.itemId },
+                  })),
+                  `handed off to ${spawned.id}`,
+                );
+              }
+              this.clearCloseoutOwner(sessionId);
+              await this.applyManualStatusLocked(
+                sessionId,
+                "completed",
+                { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+                {
+                  retainInList: true,
+                  eventAction: "handoff",
+                  handoffDetails: prepared.handoffDetails,
+                  closeoutHeadSha,
+                  ...(idempotency
+                    ? {
+                        handoffReceipt: {
+                          ...idempotency,
+                          successorId: spawned.id,
+                          movedTodoItems: prepared.inheritedTodo.length,
+                        },
+                      }
+                    : {}),
+                },
+              );
+              const latest = readSession(this.config.dataDir, spawned.id);
+              if (!latest)
+                throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
+              return latest;
+            } catch (error) {
+              rollbackCopies();
+              throw error;
             }
-            const successorAfterTags = readSession(this.config.dataDir, spawned.id);
-            if (!successorAfterTags) {
-              throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
-            }
-            writeSession(this.config.dataDir, {
-              ...successorAfterTags,
-              ...(prepared.sourcePr ? { pr: prepared.sourcePr } : {}),
-              originalTaskPrompt: prepared.originalTask,
-              updatedAt: nowIso(),
-            });
-            this.clearCloseoutOwner(sessionId);
-            await this.applyManualStatusLocked(
-              sessionId,
-              "completed",
-              { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-              { retainInList: true, eventAction: "handoff" },
-            );
-            const latest = readSession(this.config.dataDir, spawned.id);
-            if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
-            return latest;
           },
         ),
       );
-      return await this.enrich(finalized);
+      return {
+        ...(await this.enrich(finalized)),
+        movedTodoItems: prepared.inheritedTodo.length,
+      };
+    } catch (error) {
+      // rollbackCopies re-checks sourceCommitted and rolledBack; they are set inside closures.
+      if (successorId && prepared.inheritedTodo.length > 0) {
+        const failedSuccessorId = successorId;
+        await this.withSessionLifecycleLocks(
+          [...prepared.lifecycleIds, failedSuccessorId],
+          async () => rollbackCopies(),
+        );
+      }
+      throw error;
     } finally {
       this.foregroundSpawnReceipts.delete(prepared.receiptToken);
     }
@@ -23860,7 +26535,11 @@ export class SessionService {
   private validateHandoffSource(
     sessionId: string,
     options?: { todoActor?: TodoActor },
-  ): SessionRecord {
+  ): {
+    session: SessionRecord;
+    projection: TodoProjection;
+    snapshotGate?: HandoffEventDetails["snapshotGate"];
+  } {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -23869,7 +26548,8 @@ export class SessionService {
       session.status !== "running" &&
       session.status !== "spawning" &&
       session.status !== "paused" &&
-      session.status !== "stopped"
+      session.status !== "stopped" &&
+      session.status !== "errored"
     ) {
       throw new Error(
         `Session ${sessionId} is not eligible for handoff (status: ${session.status})`,
@@ -23878,17 +26558,235 @@ export class SessionService {
     if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
     }
-    const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
-    const handoffBlock = todoLedgerBlock(handoffProjection);
-    if (handoffBlock && options?.todoActor?.kind !== "human") {
-      const error =
-        handoffBlock === "empty"
-          ? new TodoEmptyLedgerError([sessionId])
-          : new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(handoffProjection) }]);
+    const actor = options?.todoActor;
+    const human = actor?.kind === "human";
+    // No actor is an unattributed caller: it keeps the agent gates of its own session.
+    const otherAgent = actor?.kind === "agent" && actor.sessionId !== sessionId;
+    const markerless = !session.rateLimitedAt && !session.serverErrorAt;
+    const stalled =
+      session.status === "stopped" ||
+      session.status === "paused" ||
+      session.status === "errored" ||
+      !markerless;
+    if (otherAgent && !stalled) {
+      const error = new HandoffTargetNotStalledError(sessionId, session.status);
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    return session;
+    this.reconcileHandoffTodoLocked(session, () =>
+      listSessions(this.config.dataDir).filter(
+        (candidate) => workspaceIdOf(candidate) === workspaceIdOf(session),
+      ),
+    );
+    const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
+    if (!human && !otherAgent && todoLedgerBlock(handoffProjection) === "empty") {
+      const error = new TodoEmptyLedgerError([sessionId]);
+      this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
+      throw error;
+    }
+    if (human || !snapshotSettings(this.resolveProjectForSession(session)).requireFinal) {
+      return { session, projection: handoffProjection };
+    }
+    // Only a healthy running source can still write the snapshot the gate asks for.
+    const sourceCanWrite =
+      !otherAgent && (session.status === "running" || session.status === "spawning") && markerless;
+    if (
+      sourceCanWrite &&
+      this.snapshotGateBlocks(session, handoffProjection.revision, "any", actor)
+    ) {
+      const error = new WorkSnapshotRequiredError([sessionId], "any");
+      this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
+      throw error;
+    }
+    return {
+      session,
+      projection: handoffProjection,
+      snapshotGate: sourceCanWrite ? "applied" : "skipped_source_cannot_write",
+    };
+  }
+
+  // A handoff that stopped after the successor went live but before the source cancel leaves open
+  // copies in both ledgers. The successor's `handoffFrom` refs say which source items it holds, so
+  // cancel those. The source session stays stopped: the successor owns the work, and a person or
+  // agent can complete the source. Caller holds the source's workspace lifecycle lock.
+  // A handoff in flight for the source owns its copies (they roll back on failure): never reconcile
+  // against them. `sameWorkspace` is read only when the source still has open or held items.
+  private reconcileHandoffTodoLocked(
+    source: SessionRecord,
+    sameWorkspace: () => readonly SessionRecord[],
+  ): void {
+    if (this.handoffsInFlight.has(source.id)) return;
+    const projection = readTodoIfPresent(this.config.dataDir, source.id);
+    if (!projection || projection.counts.open + projection.counts.held === 0) return;
+    const ledgers: Array<{ sessionId: string; projection: TodoProjection; live: boolean }> = [];
+    for (const candidate of sameWorkspace()) {
+      if (candidate.id === source.id) continue;
+      // Live: not terminal and, while `spawning`, past the start of its launch (`agentLaunchId`).
+      const live =
+        !isTerminalSessionStatus(candidate.status) &&
+        !(candidate.status === "spawning" && !candidate.agentLaunchId);
+      try {
+        const candidateProjection = readTodoIfPresent(this.config.dataDir, candidate.id);
+        if (candidateProjection) {
+          ledgers.push({ sessionId: candidate.id, projection: candidateProjection, live });
+        }
+      } catch (error) {
+        // One damaged sibling ledger must not block the source.
+        if (!(error instanceof TodoLedgerCorruptError)) throw error;
+      }
+    }
+    const planned = planHandoffReconcile(projection, source.id, ledgers);
+    for (const successorId of new Set(planned.map((entry) => entry.successorId))) {
+      const closes = planned.filter((entry) => entry.successorId === successorId);
+      const closed = closeTodoItems(
+        this.config.dataDir,
+        source,
+        closes.map(({ itemId, handoffTo }) => ({ itemId, handoffTo })),
+        `handed off to ${successorId}`,
+      );
+      this.logEvent("session.handoff.todo_reconciled", {
+        level: "info",
+        sessionId: source.id,
+        projectId: source.project,
+        message: `Cancelled ${closed.length} ${source.id} ToDo item(s) already held by ${successorId}`,
+        details: { successorId, itemIds: closed },
+      });
+    }
+  }
+
+  // A successor still `spawning` without `agentLaunchId` never began its launch, so its inherited
+  // copies belong to no agent: cancel them as the failure rollback does, leaving the source items
+  // open for the next handoff.
+  private neutralizeUnlaunchedHandoffCopies(successor: SessionRecord): void {
+    const projection = readTodoIfPresent(this.config.dataDir, successor.id);
+    if (!projection) return;
+    const bySource = new Map<string, string[]>();
+    for (const item of projection.items) {
+      if (!item.handoffFrom || (item.status !== "open" && item.status !== "held")) continue;
+      const ids = bySource.get(item.handoffFrom.sessionId);
+      if (ids) ids.push(item.id);
+      else bySource.set(item.handoffFrom.sessionId, [item.id]);
+    }
+    for (const [sourceId, itemIds] of bySource) {
+      const closed = closeTodoItems(
+        this.config.dataDir,
+        successor,
+        itemIds.map((itemId) => ({ itemId })),
+        `handoff to ${successor.id} failed; item stays open in ${sourceId}`,
+      );
+      this.logEvent("session.handoff.todo_reconciled", {
+        level: "info",
+        sessionId: successor.id,
+        projectId: successor.project,
+        message: `Cancelled ${closed.length} unlaunched handoff ToDo copies in ${successor.id}; ${sourceId} keeps its items`,
+        details: { sourceId, itemIds: closed, rolledBack: true },
+      });
+    }
+  }
+
+  // Runs from applyConfig: at start and on every config reload. Synchronous on purpose: it must
+  // finish before boot reconciliation can flip an unlaunched successor to `stopped`, where it would
+  // pass for a launched owner. `spawnsInFlight` keeps it off spawns this process is running, and
+  // nothing else writes a spawning record's ledger, so no lifecycle lock is needed.
+  private rollbackUnlaunchedHandoffCopies(sessions: readonly SessionRecord[]): void {
+    for (const successor of sessions) {
+      // `agentLaunchId` is persisted before the launch prompt can be delivered: a record carrying
+      // it may own live work, so it keeps its copies (a restorable stopped session after boot).
+      if (
+        successor.status !== "spawning" ||
+        successor.agentLaunchId ||
+        this.spawnsInFlight.has(successor.id)
+      ) {
+        continue;
+      }
+      try {
+        this.neutralizeUnlaunchedHandoffCopies(successor);
+      } catch (error) {
+        this.logEvent("session.handoff.todo_reconcile_failed", {
+          level: "warn",
+          sessionId: successor.id,
+          projectId: successor.project,
+          message: `Could not neutralize handoff ToDo copies of ${successor.id}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+  }
+
+  // `all` is the session list applyConfig already read; records are re-read under the lock.
+  private async recoverHandoffTodo(
+    all: readonly SessionRecord[] = listSessions(this.config.dataDir),
+  ): Promise<void> {
+    const byWorkspace = new Map<string, SessionRecord[]>();
+    // Only a session that some ledger names in `handoffFrom` can be an interrupted handoff's
+    // source: one ledger read per session, no lock or record read for the rest.
+    const referenced = new Set<string>();
+    for (const candidate of all) {
+      const key = workspaceIdOf(candidate);
+      const members = byWorkspace.get(key);
+      if (members) members.push(candidate);
+      else byWorkspace.set(key, [candidate]);
+      try {
+        for (const item of readTodoIfPresent(this.config.dataDir, candidate.id)?.items ?? []) {
+          if (item.handoffFrom) referenced.add(item.handoffFrom.sessionId);
+        }
+      } catch (error) {
+        if (!(error instanceof TodoLedgerCorruptError)) throw error;
+      }
+    }
+    for (const source of all) {
+      if (isTerminalSessionStatus(source.status) || !referenced.has(source.id)) continue;
+      try {
+        await this.withWorkspaceLifecycleLocks(source.id, async () => {
+          const current = readSession(this.config.dataDir, source.id);
+          if (current && !isTerminalSessionStatus(current.status)) {
+            // The grouped list only names candidates; status and workspace are re-read under the
+            // lock, since a successor may have been killed while this waited.
+            const workspaceId = workspaceIdOf(current);
+            this.reconcileHandoffTodoLocked(current, () =>
+              (byWorkspace.get(workspaceId) ?? []).flatMap((candidate) => {
+                const fresh = readSession(this.config.dataDir, candidate.id);
+                return fresh && workspaceIdOf(fresh) === workspaceId ? [fresh] : [];
+              }),
+            );
+          }
+        });
+      } catch (error) {
+        this.logEvent("session.handoff.todo_reconcile_failed", {
+          level: "warn",
+          sessionId: source.id,
+          projectId: source.project,
+          message: `Could not reconcile handoff ToDo for ${source.id}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+  }
+
+  private rollbackInheritedTodoLocked(
+    successor: Pick<SessionRecord, "id" | "project">,
+    items: readonly HandoffTodoItem[],
+  ): void {
+    // Callers pass a non-empty plan from one source ledger.
+    const sourceId = items[0]?.from.sessionId;
+    try {
+      closeTodoItems(
+        this.config.dataDir,
+        successor,
+        items.map((item) => ({ itemId: item.itemId })),
+        `handoff to ${successor.id} failed; item stays open in ${sourceId}`,
+      );
+    } catch (error) {
+      this.logEvent("session.handoff.todo_rollback_failed", {
+        level: "warn",
+        sessionId: successor.id,
+        projectId: successor.project,
+        message: `Could not cancel inherited ToDo copies in ${successor.id} after a failed handoff from ${sourceId}`,
+        details: {
+          successorId: successor.id,
+          sourceId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
   }
 
   private async prepareHandoffLocked(
@@ -23897,7 +26795,7 @@ export class SessionService {
     options: { todoActor?: TodoActor } | undefined,
     waiting: HandoffAdmission,
   ): Promise<PreparedHandoff> {
-    const session = this.validateHandoffSource(sessionId, options);
+    const { session, projection, snapshotGate } = this.validateHandoffSource(sessionId, options);
     const admissionReservation = waiting.admissionReservation;
     if (
       this.handoffsInFlight.get(sessionId)?.token !== waiting.token ||
@@ -23937,9 +26835,55 @@ export class SessionService {
         }
       }
       const model = resolveCarriedSpawnModel(session, agent, request.model);
+      const carriedAccountId = carriedAuthAccountId(session, agent);
+      let handoffAuthAccountId: string | undefined;
+      if (typeof carriedAccountId === "string") {
+        if (
+          this.authAccounts
+            .read()
+            .accounts.some((entry) => entry.id === carriedAccountId && entry.provider === agent)
+        ) {
+          handoffAuthAccountId = carriedAccountId;
+        } else {
+          this.logEvent("session.handoff.auth_account_missing", {
+            level: "warn",
+            sessionId,
+            projectId: session.project,
+            message: `Pinned ${agent} account is gone; handoff of ${sessionId} uses Auto`,
+            details: { accountId: carriedAccountId },
+          });
+        }
+      }
+
+      const inheritedTodo = planHandoffTodo(projection, sessionId);
+      let snapshot: HandoffPromptSnapshot | undefined;
+      let snapshotUnreadable: string | undefined;
+      try {
+        const latest = readSnapshotVersion(this.config.dataDir, session, "latest", "live");
+        if (latest) {
+          const { freshness } = await this.withFreshness(session, "live", latest);
+          snapshot = {
+            version: latest.version,
+            at: latest.at,
+            ageMinutes: Math.floor(freshness.ageSeconds / 60),
+            commitsSince: freshness.commitsSince,
+            stale: freshness.stale,
+            content: latest.content,
+            headSha: latest.headSha,
+          };
+        }
+      } catch (error) {
+        if (!(error instanceof SnapshotCorruptError)) throw error;
+        snapshotUnreadable = error.message;
+      }
 
       let sourceForSpawn = session;
-      if (session.status === "running" || session.status === "spawning") {
+      if (
+        session.status === "running" ||
+        session.status === "spawning" ||
+        session.status === "errored"
+      ) {
+        const observedState = this.stateCache.get(sessionId)?.state;
         const stopped: SessionRecord = {
           ...this.sessionWithReleasedSidecarPorts(session),
           status: "stopped",
@@ -23950,6 +26894,12 @@ export class SessionService {
         writeSession(this.config.dataDir, stopped);
         this.stateCache.delete(sessionId);
         await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+        // The forced stop skips the transition capture: take the tail since the last one.
+        await this.captureStateTransitionArtifact(session, {
+          at: nowIso(),
+          fromState: observedState ?? (session.status === "errored" ? "error" : "working"),
+          toState: "stopped",
+        });
         await this.cleanupSessionServices(stopped);
         sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
       }
@@ -23967,8 +26917,19 @@ export class SessionService {
         ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
         ...(notes ? { notes } : {}),
         ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+        inheritedTodo,
+        ...(snapshot ? { snapshot } : {}),
+        ...(snapshotUnreadable ? { snapshotUnreadable } : {}),
       });
 
+      const todoActor = options?.todoActor;
+      const handoffDetails: HandoffEventDetails = {
+        actor: todoActor ?? null,
+        ...(todoActor?.kind === "agent" ? { callerSessionId: todoActor.sessionId } : {}),
+        movedItems: inheritedTodo.map((item) => ({ from: item.from.itemId, to: item.itemId })),
+        ...(snapshot ? { snapshotVersion: snapshot.version } : {}),
+        ...(snapshotGate ? { snapshotGate } : {}),
+      };
       this.logEvent("session.handoff.started", {
         level: "info",
         sessionId,
@@ -23978,6 +26939,7 @@ export class SessionService {
           sourceAgent: session.agent,
           targetAgent: agent,
           ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+          ...handoffDetails,
         },
       });
 
@@ -23999,6 +26961,8 @@ export class SessionService {
       const continuation = this.prAlertTransferFrom(sourceForSpawn, "handoff");
       const prAlertOwnerTransfer = continuation?.kind === "owner" ? continuation : undefined;
       return {
+        inheritedTodo,
+        handoffDetails,
         token,
         lifecycleIds,
         sourceStamp,
@@ -24018,6 +26982,7 @@ export class SessionService {
           originalTaskPrompt: originalTask,
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
           ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
+          ...(handoffAuthAccountId !== undefined ? { authAccountId: handoffAuthAccountId } : {}),
         }),
         spawnOptions: {
           replacingSessionId: session.id,
@@ -24027,6 +26992,7 @@ export class SessionService {
           ...(prAlertOwnerTransfer ? { prAlertOwnerTransfer } : {}),
           validatedLaunchSelection: launchSelection,
           receiptToken,
+          ...(inheritedTodo.length > 0 ? { inheritedTodo } : {}),
         },
       };
     } catch (error) {
@@ -24422,7 +27388,7 @@ export class SessionService {
       const binding = typed.ackBaseline
         ? await resumeAgentSubmitAckBinding(
             session.agent,
-            this.submitAckContext(session),
+            { ...this.submitAckContext(session), ackNotBeforeMs: Date.parse(typed.typedAt) },
             typed.ackBaseline,
           )
         : null;
@@ -24999,6 +27965,7 @@ export class SessionService {
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
     rateLimitObservedAtMs?: number;
+    rateLimitOrdinals?: Record<string, number>;
     activityMs: number;
     threadId?: string;
     model?: string;
@@ -25074,6 +28041,9 @@ export class SessionService {
       hookState,
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
+      ...(rolloutRead.rateLimitOrdinals
+        ? { rateLimitOrdinals: rolloutRead.rateLimitOrdinals }
+        : {}),
       ...(rolloutRead.rateLimitObservedAtMs !== undefined
         ? { rateLimitObservedAtMs: rolloutRead.rateLimitObservedAtMs }
         : {}),
@@ -25092,6 +28062,8 @@ export class SessionService {
     activityMs: number,
   ): RateLimitDetection | null {
     const hit = scanTmuxRateLimit(paneText, { tailLines: CODEX_RATE_LIMIT_PANE_TAIL_LINES });
+    const session = readSession(this.config.dataDir, sessionId);
+    if (session && this.paneRateLimitFenced(session, paneText, hit)) return null;
     if (!hit) {
       this.codexPaneLimitObservedAt.delete(sessionId);
       return null;
@@ -25579,17 +28551,14 @@ export class SessionService {
   private stabilizeState(sessionId: string, nextState: SessionState): SessionState {
     const cached = this.stateCache.get(sessionId);
     const now = Date.now();
-    if (cached && nextState !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
-      if (
-        nextState !== "needs_input" &&
-        nextState !== "rate_limited" &&
-        nextState !== "stale" &&
-        nextState !== "stopped" &&
-        nextState !== "killed" &&
-        nextState !== "error"
-      ) {
-        return cached.state;
-      }
+    if (
+      cached &&
+      nextState !== cached.state &&
+      now - cached.classifiedAt < STATE_HOLD_MS &&
+      (cached.state === "working" || cached.state === "waiting") &&
+      (nextState === "working" || nextState === "waiting")
+    ) {
+      return cached.state;
     }
     this.stateCache.set(sessionId, { state: nextState, classifiedAt: now });
     return nextState;
@@ -25698,6 +28667,37 @@ export class SessionService {
     }
   }
 
+  private publishSessionTransition(
+    session: Pick<SessionRecord, "id" | "project">,
+    publish: () => void,
+    policy = this.journalWritePolicy,
+  ): void {
+    try {
+      publish();
+    } catch (error) {
+      if (policy === "strict") throw error;
+      this.logEvent("session.transitions.write_failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private writeClassifiedSession(
+    session: SessionRecord,
+    policy: SessionJournalPolicy = "strict",
+  ): void {
+    const previous = this.journalWritePolicy;
+    this.journalWritePolicy = policy;
+    try {
+      writeSession(this.config.dataDir, session);
+    } finally {
+      this.journalWritePolicy = previous;
+    }
+  }
+
   private async updateStateHistory(
     session: SessionRecord,
     state: SessionState,
@@ -25705,17 +28705,65 @@ export class SessionService {
     historySourcePath: string | null,
     serverError: boolean,
     serverErrorEvidence?: "error" | "recovered",
+    rateLimitResetAt?: string,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): Promise<SessionStateTransition[]> {
     if (this.isDeliveryStopped()) return [];
     // Recovery evidence is independent of the displayed state and restore warmup.
     if (serverError && !session.serverErrorAt) {
-      this.writeServerErrorMarker(session.id, nowIso());
+      this.writeServerErrorMarker(session.id, nowIso(), undefined, journalPolicy);
     } else if (serverErrorEvidence === "recovered" && session.serverErrorAt) {
-      this.writeServerErrorMarker(session.id, null, session.serverErrorAt);
+      this.writeServerErrorMarker(session.id, null, session.serverErrorAt, journalPolicy);
     }
 
     const history = this.stateHistory.get(session.id) ?? [];
     const lastEntry = history[history.length - 1];
+    const observedState = this.transitionsBinding?.store.observedState(session.id);
+    const previousState = lastEntry?.state ?? observedState;
+    if (
+      isTerminalSessionStatus(session.status) &&
+      lastEntry?.state === state &&
+      observedState === state &&
+      !session.rateLimitedAt &&
+      !session.rateLimitResetAt
+    )
+      return history;
+    let current = readSession(this.config.dataDir, session.id);
+    if (current) {
+      const limitedAt =
+        state === "rate_limited"
+          ? (current.rateLimitedAt ?? (previousState !== "rate_limited" ? nowIso() : undefined))
+          : undefined;
+      const reset =
+        state === "rate_limited" && limitedAt !== undefined
+          ? (rateLimitResetAt ??
+            (Date.parse(current.rateLimitResetAt ?? "") > Date.now()
+              ? current.rateLimitResetAt
+              : undefined))
+          : undefined;
+      if (current.rateLimitedAt !== limitedAt || current.rateLimitResetAt !== reset) {
+        const { rateLimitedAt: _oldLimit, rateLimitResetAt: _oldReset, ...base } = current;
+        this.writeClassifiedSession(
+          {
+            ...base,
+            ...(limitedAt ? { rateLimitedAt: limitedAt } : {}),
+            ...(reset ? { rateLimitResetAt: reset } : {}),
+            updatedAt: nowIso(),
+          },
+          journalPolicy,
+        );
+        current = readSession(this.config.dataDir, session.id);
+      }
+      if (current) {
+        const observed = current;
+        const links = this.displaySlotsForSession(observed)?.links ?? [];
+        this.publishSessionTransition(
+          observed,
+          () => this.transitionsBinding?.store.observeState(observed, state, links),
+          journalPolicy,
+        );
+      }
+    }
     if (history.length === 0 || lastEntry?.state !== state) {
       const transitionAt = new Date().toISOString();
       history.push({ state, at: transitionAt, source: stateSource });
@@ -25723,21 +28771,6 @@ export class SessionService {
         history.splice(0, history.length - STATE_HISTORY_LIMIT);
       }
       this.stateHistory.set(session.id, history);
-      const current = readSession(this.config.dataDir, session.id);
-      if (current) {
-        if (state === "rate_limited") {
-          if (!current.rateLimitedAt) {
-            writeSession(this.config.dataDir, {
-              ...current,
-              rateLimitedAt: transitionAt,
-              updatedAt: nowIso(),
-            });
-          }
-        } else if (current.rateLimitedAt) {
-          const { rateLimitedAt: _rateLimitedAt, ...base } = current;
-          writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
-        }
-      }
       if (lastEntry) {
         await this.logStateTransition(
           session,
@@ -25766,6 +28799,7 @@ export class SessionService {
     sessionId: string,
     serverErrorAt: string | null,
     observedMarker?: string,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): void {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current) return;
@@ -25775,7 +28809,10 @@ export class SessionService {
       // here can find the marker already armed by another tick, and writing
       // again would restart the 30-minute window for no reason.
       if (current.serverErrorAt) return;
-      writeSession(this.config.dataDir, { ...current, serverErrorAt, updatedAt: nowIso() });
+      this.writeClassifiedSession(
+        { ...current, serverErrorAt, updatedAt: nowIso() },
+        journalPolicy,
+      );
     } else {
       if (!current.serverErrorAt || current.serverErrorAt !== observedMarker) return;
       const {
@@ -25783,7 +28820,7 @@ export class SessionService {
         serverErrorReactivationAttempts: _attempts,
         ...base
       } = current;
-      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+      this.writeClassifiedSession({ ...base, updatedAt: nowIso() }, journalPolicy);
     }
   }
 
@@ -25843,6 +28880,8 @@ export class SessionService {
     reason: "boot" | "runtime_check",
     workspaceMissing: boolean,
     probeRevision = this.lifecycle.snapshot(session.id).revision,
+    journalPolicy: SessionJournalPolicy = "strict",
+    strictErrors = false,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
     if (this.isDeliveryStopped() || this.staleParksInFlight.has(session.id)) {
       return { session, runtime };
@@ -25871,6 +28910,7 @@ export class SessionService {
           runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown",
           "runtime_probe",
           probeRevision,
+          journalPolicy,
         ),
         runtime,
       };
@@ -25888,13 +28928,16 @@ export class SessionService {
         // both reads and mark a genuinely live session stopped.
         try {
           confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
+          if (strictErrors) this.assertClassificationProbe(confirmedRuntime);
         } catch (error) {
+          if (strictErrors) throw error;
           const diagnostic = error instanceof Error ? error.message : String(error);
           const retained = this.retainDetectionError(
             session,
             diagnostic,
             "runtime_probe",
             probeRevision,
+            journalPolicy,
           );
           return {
             session: retained,
@@ -25938,6 +28981,7 @@ export class SessionService {
               return this.stopOrphanedSpawnPane(session, assertCurrent);
             },
           );
+          if (strictErrors) this.assertClassificationProbe(confirmedRuntime);
         } catch (error) {
           if (error !== superseded) throw error;
           return {
@@ -25961,6 +29005,7 @@ export class SessionService {
             "runtime probe (tmux or ps) timed out; runtime state unknown",
           "runtime_probe",
           probeRevision,
+          journalPolicy,
         );
         this.logEvent("session.runtime.probe_unresponsive", {
           level: "warn",
@@ -26012,7 +29057,7 @@ export class SessionService {
         updatedAt,
       };
     }
-    writeSession(this.config.dataDir, updated);
+    this.writeClassifiedSession(updated, journalPolicy);
     this.stateCache.delete(session.id);
     this.logEvent(
       reason === "boot" ? "session.reconcile.drift" : `session.runtime.${updated.status}`,
@@ -26050,6 +29095,7 @@ export class SessionService {
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
     workspaceMissing: boolean,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): SessionRecord {
     // Shepherd is not exempt: its own terminal exits are "completed" (self
     // destruct) or "killed", and it is never stale-parked, so a stopped or
@@ -26091,7 +29137,7 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     delete updated.stopReason;
-    writeSession(this.config.dataDir, updated);
+    this.writeClassifiedSession(updated, journalPolicy);
     this.stateCache.delete(session.id);
     this.logEvent("session.reconcile.running", {
       level: "warn",
@@ -26117,6 +29163,7 @@ export class SessionService {
     workspacePresent: boolean,
     probeRevision: number,
     observePromotion?: (session: SessionRecord) => void,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): SessionRecord {
     // Shepherd included, for the reason spelled out in
     // reconcileStaleStoppedSession above.
@@ -26156,7 +29203,7 @@ export class SessionService {
       delete updated.errorSource;
     }
     delete updated.stopReason;
-    writeSession(this.config.dataDir, updated);
+    this.writeClassifiedSession(updated, journalPolicy);
     observePromotion?.(updated);
     this.stateCache.delete(session.id);
     this.logEvent("session.reconcile.running", {
@@ -26199,10 +29246,10 @@ export class SessionService {
     if (session.agent === "claude") {
       const result = await readClaudeJsonlState(
         session.worktreePath,
-        this.claudeJsonlReaders.get(session.id),
+        this.claudeJsonlReaderFor(session),
         session.agentSessionId,
       ).catch(() => null);
-      if (result) this.claudeJsonlReaders.set(session.id, result.reader);
+      if (result) this.cacheClaudeJsonlReader(session, result.reader);
       return result?.tokenUsage ? { tokenUsage: result.tokenUsage } : {};
     }
     if (session.agent === "codex") {
@@ -26233,25 +29280,69 @@ export class SessionService {
 
   private async classifySessionRecord(
     session: SessionRecord,
-    options?: { scanPane?: boolean; reconcileRuntime?: boolean },
+    options?: {
+      scanPane?: boolean;
+      reconcileRuntime?: boolean;
+      bypassClearBarrier?: boolean;
+      suppressMenuConfirmation?: boolean;
+      strictErrors?: boolean;
+      assertCurrent?: () => void;
+      journalPolicy?: SessionJournalPolicy;
+    },
     observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
-    const probeRevision = this.lifecycle.snapshot(session.id).revision;
-    let observation = session;
-    try {
-      return await this.classifySessionRecordKnown(session, options, (prepared) => {
-        observation = prepared;
-        observePreparation?.(prepared);
-      });
-    } catch (error) {
-      if (
-        error instanceof SessionResourceNotFoundError &&
-        !readSession(this.config.dataDir, session.id)
-      ) {
-        throw error;
+    if (!options?.bypassClearBarrier) {
+      const barrier = this.rateLimitClearBarriers.get(session.id);
+      if (barrier) {
+        await barrier;
+        const current = readSession(this.config.dataDir, session.id);
+        if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+        session = current;
       }
-      return this.classificationErrorResult(observation, error, "other", probeRevision);
     }
+    const run = (async (): Promise<SessionStateResult> => {
+      const probeRevision = this.lifecycle.snapshot(session.id).revision;
+      let observation = session;
+      try {
+        options?.assertCurrent?.();
+        const result = await this.classifySessionRecordKnown(session, options, (prepared) => {
+          observation = prepared;
+          observePreparation?.(prepared);
+        });
+        options?.assertCurrent?.();
+        return result;
+      } catch (error) {
+        options?.assertCurrent?.();
+        if (options?.strictErrors) throw error;
+        if (
+          error instanceof SessionResourceNotFoundError &&
+          !readSession(this.config.dataDir, session.id)
+        ) {
+          throw error;
+        }
+        return this.classificationErrorResult(
+          observation,
+          error,
+          "other",
+          probeRevision,
+          options?.journalPolicy,
+        );
+      }
+    })();
+    if (!options?.bypassClearBarrier) {
+      const inFlight =
+        this.classificationsInFlight.get(session.id) ?? new Set<Promise<SessionStateResult>>();
+      inFlight.add(run);
+      this.classificationsInFlight.set(session.id, inFlight);
+      void run
+        .finally(() => {
+          inFlight.delete(run);
+          if (inFlight.size === 0 && this.classificationsInFlight.get(session.id) === inFlight)
+            this.classificationsInFlight.delete(session.id);
+        })
+        .catch(() => {});
+    }
+    return run;
   }
 
   private classificationErrorResult(
@@ -26259,9 +29350,16 @@ export class SessionService {
     error: unknown,
     errorSource: "runtime_probe" | "other",
     probeRevision: number,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): SessionStateResult {
     const diagnostic = error instanceof Error ? error.message : String(error);
-    const retained = this.retainDetectionError(session, diagnostic, errorSource, probeRevision);
+    const retained = this.retainDetectionError(
+      session,
+      diagnostic,
+      errorSource,
+      probeRevision,
+      journalPolicy,
+    );
     return {
       session: retained,
       runtime: {
@@ -26285,6 +29383,7 @@ export class SessionService {
     diagnostic: string,
     errorSource: "runtime_probe" | "other",
     probeRevision: number,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): SessionRecord {
     const latest = readSession(this.config.dataDir, session.id);
     if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -26306,7 +29405,7 @@ export class SessionService {
       return latest;
     if (latest.error === message) return latest;
     const retained = { ...latest, error: message, errorSource, updatedAt: nowIso() };
-    writeSession(this.config.dataDir, retained);
+    this.writeClassifiedSession(retained, journalPolicy);
     this.stateCache.delete(session.id);
     this.logEvent("session.runtime.probe_unresponsive", {
       level: "error",
@@ -26395,9 +29494,26 @@ export class SessionService {
     }
   }
 
+  private assertClassificationProbe(
+    runtime?: Pick<SessionRuntimeSnapshot, "probeUnresponsive" | "diagnostic">,
+    workspaceDiagnostic?: string,
+  ): void {
+    const diagnostic = runtime?.diagnostic ?? workspaceDiagnostic;
+    if (runtime?.probeUnresponsive || diagnostic || workspaceDiagnostic) {
+      throw new Error(diagnostic ?? "Runtime probe unresponsive");
+    }
+  }
+
   private async classifySessionRecordKnown(
     session: SessionRecord,
-    options?: { scanPane?: boolean; reconcileRuntime?: boolean },
+    options?: {
+      scanPane?: boolean;
+      reconcileRuntime?: boolean;
+      suppressMenuConfirmation?: boolean;
+      strictErrors?: boolean;
+      assertCurrent?: () => void;
+      journalPolicy?: SessionJournalPolicy;
+    },
     observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
     const probeLifecycle = this.lifecycle.snapshot(session.id);
@@ -26427,6 +29543,8 @@ export class SessionService {
       this.isInRestoreWarmup(session.id) &&
       !hasRetainedSessionError(session)
     ) {
+      const workspace = probeWorkspace(session.worktreePath);
+      if (options?.strictErrors) this.assertClassificationProbe(undefined, workspace.diagnostic);
       this.lastClassifiedLogStates.delete(session.id);
       return {
         session,
@@ -26440,7 +29558,7 @@ export class SessionService {
         state: "working",
         source: "status",
         historySourcePath: null,
-        workspacePresent: probeWorkspace(session.worktreePath).exists,
+        workspacePresent: workspace.exists,
         serverError: false,
         agentActivityAt: null,
       };
@@ -26454,13 +29572,19 @@ export class SessionService {
     };
     if (!isTerminalSessionStatus(session.status)) {
       try {
-        runtime = await this.readRuntimeSnapshot(session);
+        runtime = await (options?.strictErrors
+          ? this.readRuntimeSnapshot(session, { fresh: true })
+          : this.readRuntimeSnapshot(session));
+        options?.assertCurrent?.();
       } catch (error) {
+        options?.assertCurrent?.();
+        if (options?.strictErrors) throw error;
         const result = this.classificationErrorResult(
           session,
           error,
           "runtime_probe",
           probeRevision,
+          options?.journalPolicy,
         );
         return {
           ...result,
@@ -26484,6 +29608,7 @@ export class SessionService {
         agentActivityAt: null,
       };
     const workspace = probeWorkspace(session.worktreePath);
+    if (options?.strictErrors) this.assertClassificationProbe(runtime, workspace.diagnostic);
     const observed = readSession(this.config.dataDir, session.id);
     if (
       observed &&
@@ -26528,6 +29653,7 @@ export class SessionService {
           ? "runtime_probe"
           : "other",
         probeRevision,
+        options?.journalPolicy,
       );
     } else if (
       session.status !== "errored" &&
@@ -26554,7 +29680,7 @@ export class SessionService {
       ) {
         const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = latest;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
-        writeSession(this.config.dataDir, effectiveSession);
+        this.writeClassifiedSession(effectiveSession, options?.journalPolicy);
         observePreparation?.(effectiveSession);
         this.stateCache.delete(session.id);
         if (this.shouldRunDelivery(effectiveSession)) this.scheduleDeliveryRunner(session.id);
@@ -26577,12 +29703,13 @@ export class SessionService {
     // agrees with the live scan instead of flapping every cycle.
     let paneReconfirmedLimit = false;
     let rateLimitExpiredAtMs: number | undefined;
+    let activeRateLimitResetAt: string | undefined;
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
     let liveModel: string | undefined;
     let tokenUsage: ProviderTokenUsageSample | undefined;
     let tokenUsages: ProviderTokenUsageSample[] | undefined;
-    let codexProbeRecovery: Awaited<ReturnType<typeof this.classifyCodexState>> | undefined;
+    let codexProbeRecovery: Awaited<ReturnType<SessionService["classifyCodexState"]>> | undefined;
     if (
       options?.reconcileRuntime !== false &&
       (effectiveSession.status === "running" || effectiveSession.status === "spawning")
@@ -26593,6 +29720,8 @@ export class SessionService {
         "runtime_check",
         workspace.missing,
         probeRevision,
+        options?.journalPolicy,
+        options?.strictErrors,
       );
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
@@ -26601,6 +29730,7 @@ export class SessionService {
       effectiveSession,
       runtime,
       workspace.missing,
+      options?.journalPolicy,
     );
     if (!runtimeOwnerChanged) {
       effectiveSession = this.reconcileStaleErroredSession(
@@ -26609,6 +29739,7 @@ export class SessionService {
         workspace.exists,
         probeRevision,
         observePreparation,
+        options?.journalPolicy,
       );
     }
 
@@ -26708,7 +29839,7 @@ export class SessionService {
       ) {
         const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = current;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
-        writeSession(this.config.dataDir, effectiveSession);
+        this.writeClassifiedSession(effectiveSession, options?.journalPolicy);
         this.stateCache.delete(session.id);
         codexProbeRecovery = native;
       }
@@ -26723,7 +29854,7 @@ export class SessionService {
     } else if (codexProbeRecovery) {
       state = codexProbeRecovery.state;
       stateSource = codexProbeRecovery.source;
-      rateLimit = codexProbeRecovery.rateLimit;
+      rateLimit = this.fencedStructuredRateLimit(session, codexProbeRecovery.rateLimit);
       agentActivityAt = activityAtFromMs(codexProbeRecovery.activityMs);
       liveModel = codexProbeRecovery.model;
       tokenUsage = codexProbeRecovery.tokenUsage;
@@ -26752,31 +29883,48 @@ export class SessionService {
         // Independent I/O (tmux exec vs. file read): fetch the pane pid
         // concurrently with the jsonl read so it stays off the critical path.
         const panePidPromise = getTmuxPanePid(session.tmuxSession);
-        const jsonlResult = await readClaudeJsonlState(
+        let jsonlResult = await readClaudeJsonlState(
           session.worktreePath,
-          this.claudeJsonlReaders.get(session.id),
+          this.claudeJsonlReaderFor(session),
           session.agentSessionId,
         );
-        if (jsonlResult) {
-          this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
-          rateLimit = jsonlResult.rateLimit;
-          hasServerErrorRecord = jsonlResult.serverError;
-          hasAuthenticationFailure = hasTrailingClaudeAuthenticationFailure(
-            jsonlResult.reader.tailRecords,
-          );
-          if (jsonlResult.serverError) serverErrorEvidence = "error";
+        const claudeJsonlFields = (result: typeof jsonlResult, record: SessionRecord) => {
+          let evidence: "error" | "recovered" | undefined;
+          if (result?.serverError) evidence = "error";
           else if (
-            session.agentSessionId &&
-            session.serverErrorAt &&
-            hasClaudeRecoveryAfter(jsonlResult.reader.tailRecords, session.serverErrorAt)
+            result &&
+            record.agentSessionId &&
+            record.serverErrorAt &&
+            hasClaudeRecoveryAfter(result.reader.tailRecords, record.serverErrorAt)
           ) {
-            serverErrorEvidence = "recovered";
+            evidence = "recovered";
           }
-          serverErrorJsonlPath = jsonlResult.reader.filePath;
-          // The reader already stat()ed the pinned transcript; reuse its mtime.
-          agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
-          liveModel = jsonlResult.liveModel;
-          tokenUsage = jsonlResult.tokenUsage;
+          return {
+            rateLimit: result ? this.fencedStructuredRateLimit(record, result.rateLimit) : null,
+            hasServerErrorRecord: result?.serverError ?? false,
+            hasAuthenticationFailure: result
+              ? hasTrailingClaudeAuthenticationFailure(result.reader.tailRecords)
+              : false,
+            serverErrorEvidence: evidence,
+            serverErrorJsonlPath: result?.reader.filePath ?? null,
+            // The reader already stat()ed the pinned transcript; reuse its mtime.
+            agentActivityAt: result ? activityAtFromMs(result.reader.lastMtimeMs) : null,
+            liveModel: result?.liveModel,
+            tokenUsage: result?.tokenUsage,
+          };
+        };
+        if (jsonlResult) {
+          this.cacheClaudeJsonlReader(session, jsonlResult.reader);
+          ({
+            rateLimit,
+            hasServerErrorRecord,
+            hasAuthenticationFailure,
+            serverErrorEvidence,
+            serverErrorJsonlPath,
+            agentActivityAt,
+            liveModel,
+            tokenUsage,
+          } = claudeJsonlFields(jsonlResult, session));
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -26785,6 +29933,74 @@ export class SessionService {
           undefined,
           panePid !== null ? { panePid } : {},
         );
+        let rotated: SessionRecord | undefined;
+        if (
+          statusResult?.paneOwned === true &&
+          statusResult.kind === "interactive" &&
+          statusResult.pid !== undefined &&
+          statusResult.sessionId !== undefined &&
+          session.agentSessionId !== undefined &&
+          session.agentLaunchId !== undefined
+        ) {
+          const observed = {
+            pid: statusResult.pid,
+            ...(statusResult.procStart !== undefined ? { procStart: statusResult.procStart } : {}),
+          };
+          if (statusResult.sessionId === session.agentSessionId) {
+            if (!claudeStatusOwnerMatches(session, observed)) {
+              const persisted = this.persistClaudeStatusOwner(
+                session,
+                {
+                  agentLaunchId: session.agentLaunchId,
+                  agentSessionId: session.agentSessionId,
+                  ...observed,
+                },
+                probeRevision,
+              );
+              if (persisted) effectiveSession = persisted;
+            }
+          } else if (claudeStatusOwnerMatches(session, observed)) {
+            rotated = this.rotateClaudeSessionId(
+              session,
+              statusResult.sessionId,
+              observed,
+              probeRevision,
+            );
+          }
+        }
+        if (rotated) {
+          effectiveSession = rotated;
+          // The id is already rebound: a failed read counts as no transcript.
+          jsonlResult = await readClaudeJsonlState(
+            rotated.worktreePath,
+            undefined,
+            rotated.agentSessionId,
+          ).catch(() => null);
+          if (jsonlResult) this.cacheClaudeJsonlReader(rotated, jsonlResult.reader);
+          ({
+            rateLimit,
+            hasServerErrorRecord,
+            hasAuthenticationFailure,
+            serverErrorEvidence,
+            serverErrorJsonlPath,
+            agentActivityAt,
+            liveModel,
+            tokenUsage,
+          } = claudeJsonlFields(jsonlResult, rotated));
+          this.logEvent("session.agent_session_id.rotated", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Claude session ${session.id} switched to a new native session id`,
+            details: {
+              agent: session.agent,
+              pid: statusResult?.pid,
+              previousAgentSessionId: session.agentSessionId,
+              agentSessionId: rotated.agentSessionId,
+              transcriptFound: jsonlResult !== null,
+            },
+          });
+        }
         if (statusResult) {
           state = statusResult.state;
           stateSource = "claude_status";
@@ -26801,6 +30017,7 @@ export class SessionService {
           const statusAt = statusResult.statusUpdatedMs;
           const current = readSession(this.config.dataDir, session.id);
           if (
+            rotated === undefined &&
             hasServerErrorRecord &&
             errorAt !== undefined &&
             statusAt !== undefined &&
@@ -26836,7 +30053,7 @@ export class SessionService {
         const codexState = await this.classifyCodexState(session);
         state = codexState.state;
         stateSource = codexState.source;
-        rateLimit = codexState.rateLimit;
+        rateLimit = this.fencedStructuredRateLimit(session, codexState.rateLimit);
         codexLimitObservedAtMs = codexState.rateLimitObservedAtMs ?? 0;
         if (codexState.state === "waiting" && rateLimit?.limited) {
           codexPermission = this.codexRateLimitPoller.permission(
@@ -26874,7 +30091,7 @@ export class SessionService {
           : null;
         if (jsonlResult) {
           this.cursorJsonlReaders.set(session.id, jsonlResult.reader);
-          rateLimit = jsonlResult.rateLimit;
+          rateLimit = this.fencedStructuredRateLimit(session, jsonlResult.rateLimit);
           state = jsonlResult.state;
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
@@ -26964,14 +30181,21 @@ export class SessionService {
             this.claudeCompactingOverrides.delete(session.id);
           }
         } else {
-          const menuHit = detectClaudeUsageLimitMenu(paneText);
+          const rawMenuHit = detectClaudeUsageLimitMenu(paneText);
+          const rawTmuxHit = scanTmuxRateLimit(paneText);
+          const paneFenced = this.paneRateLimitFenced(session, paneText, rawTmuxHit ?? rawMenuHit);
+          const menuHit = paneFenced ? null : rawMenuHit;
           if (!rateLimit?.limited) {
-            const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
+            const tmuxHit = paneFenced ? null : (rawTmuxHit ?? menuHit);
             if (tmuxHit?.limited) {
               rateLimit = tmuxHit;
             }
           }
-          if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
+          if (
+            !options?.suppressMenuConfirmation &&
+            menuHit?.limited &&
+            claudeUsageMenuOptionOneSelected(paneText)
+          ) {
             await this.confirmClaudeUsageLimitMenu(session);
           }
           // Re-confirmation: the detection is flagged but its parsed reset has
@@ -27135,7 +30359,7 @@ export class SessionService {
         } else {
           if (!rateLimit?.limited) {
             const tmuxHit = scanTmuxRateLimit(paneText);
-            if (tmuxHit?.limited) {
+            if (!this.paneRateLimitFenced(session, paneText, tmuxHit) && tmuxHit?.limited) {
               rateLimit = tmuxHit;
             }
           }
@@ -27170,7 +30394,11 @@ export class SessionService {
         // A failed fork takes no observation: it only ever promotes on a hit,
         // so this is a pure guard.
         const tmuxHit = paneText === null ? null : scanTmuxRateLimit(paneText);
-        if (tmuxHit?.limited) {
+        if (
+          paneText !== null &&
+          !this.paneRateLimitFenced(session, paneText, tmuxHit) &&
+          tmuxHit?.limited
+        ) {
           rateLimit = tmuxHit;
         }
       }
@@ -27197,6 +30425,9 @@ export class SessionService {
         rateLimit?.limited && !rateLimitActive(rateLimit, nowMs) ? rateLimit.resetAtMs : undefined;
       if (rateLimitActive(rateLimit, nowMs) || paneReconfirmedLimit) {
         state = "rate_limited";
+        if (rateLimit?.resetAtMs !== undefined && rateLimit.resetAtMs > nowMs) {
+          activeRateLimitResetAt = new Date(rateLimit.resetAtMs).toISOString();
+        }
         classifiedDetail = `State: rate_limited (${rateLimit?.reason}${paneReconfirmedLimit && !rateLimitActive(rateLimit, nowMs) ? ", pane menu re-confirmed after expiry" : ""})`;
       } else if (rateLimitExpiredResetAtMs !== undefined) {
         // The parsed reset instant has passed and no live menu re-confirmed
@@ -27263,6 +30494,9 @@ export class SessionService {
       workspacePresent: workspace.exists,
       agentActivityAt,
       ...(rateLimitExpiredAtMs !== undefined ? { rateLimitExpiredAtMs } : {}),
+      ...(state === "rate_limited" && activeRateLimitResetAt
+        ? { rateLimitResetAt: activeRateLimitResetAt }
+        : {}),
       ...(liveModel ? { liveModel } : {}),
       ...(tokenUsage ? { tokenUsage } : {}),
       ...(tokenUsages ? { tokenUsages } : {}),
@@ -27280,25 +30514,33 @@ export class SessionService {
   ): Promise<
     { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
   > {
+    const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
     // viewed-session enrich still run the tmux-banner/usage-menu scan.
-    const classified = await this.classifySessionRecord(session, { scanPane: false });
-    const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
+    const classified = await this.classifySessionRecord(session, {
+      scanPane: false,
+      journalPolicy: "read",
+    });
+    const persisted = this.persistClassifiedTokenUsage(classified.session, classified, "read");
     if (persisted.status === "missing") return undefined;
     session = persisted.session;
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const workspaceState = resolveWorkspaceState(this.config.dataDir, session);
-    const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
+    const displaySlots = this.displaySlotsForSession(session, workspaceState);
     const sidecars = await this.sidecarViews(session, this.resolveProjectForSession(session));
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
     const hasServiceIssues = await this.hasServiceIssues(session);
-    const persistedSession = session;
-    session = this.withReportingError(session);
-    const source = isDeepStrictEqual(session, persistedSession) ? session : null;
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      return current ? this.assembleDashboard(current) : undefined;
+    }
+    const reported = this.withReportingError(session);
+    const reportingConsistent = isDeepStrictEqual(reported, session);
+    session = reported;
     const {
       queuedMessages: _queuedMessages,
       pipeline: _pipeline,
@@ -27314,34 +30556,64 @@ export class SessionService {
       allowedTriggers: _allowedTriggers,
       agentSessionId: _agentSessionId,
       agentLaunchId: _agentLaunchId,
+      claudeStatusOwner: _claudeStatusOwner,
+      taskStatus: _taskStatus,
+      taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
       triggerOrigin: _triggerOrigin,
+      handoffIdempotency: _handoffIdempotency,
+      blockedTriggerNotices: _blockedTriggerNotices,
+      spawnIntent: _spawnIntent,
       sidecarLaunches: _sidecarLaunches,
       branchSource: _branchSource,
       error: _error,
       errorSource: _errorSource,
       pr: _recordPr,
       prAlertTransfer: _prAlertTransfer,
+      terminalSlotsCaptured: _terminalSlotsCaptured,
+      snapshotNudge: _snapshotNudge,
+      rateLimitedAt: _oldLimit,
+      rateLimitResetAt: _oldReset,
       ...dashboardSession
     } = session;
-    const state = this.stabilizeState(
-      session.id,
-      hasRetainedSessionError(session) ? "error" : classified.state,
+    const rawState = hasRetainedSessionError(session) ? "error" : classified.state;
+    const state = projectTaskStatus(
+      session,
+      rawState,
+      this.stabilizeState(session.id, rawState),
+      classified.runtime.runtimeAlive,
+      workspacePresent,
     );
     await this.updateStateHistory(
       session,
       state,
-      classified.source,
+      state !== rawState && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
+      classified.rateLimitResetAt,
+      "read",
     );
+    const marked = readSession(this.config.dataDir, session.id);
+    if (!marked) return undefined;
+    session = this.withReportingError(marked);
+    const source = reportingConsistent && isDeepStrictEqual(session, marked) ? session : null;
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      return current ? this.assembleDashboard(current) : undefined;
+    }
     this.guardSidecarViews(session.id, sidecars);
     return {
       source,
       view: {
         ...dashboardSession,
+        updatedAt: session.updatedAt,
+        ...(session.rateLimitedAt ? { rateLimitedAt: session.rateLimitedAt } : {}),
+        ...(session.rateLimitResetAt ? { rateLimitResetAt: session.rateLimitResetAt } : {}),
+        ...(session.spawnIntent ? { spawnIntent: publicSpawnIntent(session.spawnIntent) } : {}),
         ...(session.error ? { error: session.error } : {}),
         // Always resolved for consumers, whatever shape the stored record is in.
         // `deskId` rides along as a compat alias so a browser tab still running
@@ -27371,6 +30643,7 @@ export class SessionService {
   private persistClassifiedTokenUsage(
     session: SessionRecord,
     classified: Pick<SessionStateResult, "tokenUsage" | "tokenUsages">,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): { status: "present"; session: SessionRecord } | { status: "missing" } {
     const current = readSession(this.config.dataDir, session.id);
     if (!current) return { status: "missing" };
@@ -27385,7 +30658,7 @@ export class SessionService {
     if (!tokenUsage || JSON.stringify(tokenUsage) === JSON.stringify(current.tokenUsage)) {
       return { status: "present", session: current };
     }
-    writeSession(this.config.dataDir, { ...current, tokenUsage });
+    this.writeClassifiedSession({ ...current, tokenUsage }, journalPolicy);
     // Re-read so downstream sources deep-equal the stored (normalized) record.
     const written = readSession(this.config.dataDir, session.id);
     return written ? { status: "present", session: written } : { status: "missing" };
@@ -27567,16 +30840,29 @@ export class SessionService {
     return latest;
   }
 
-  // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
-  // Computed once per listSessions() batch and threaded into every enrich so a
-  // batch of N claude sessions does one listAccounts read instead of N.
-  // Empty when authRotation.switchAuth is off: the web hides Switch auth on it.
-  private computeClaudeAccountsView(): { id: string; label?: string; authenticated: boolean }[] {
+  // Compatibility projection for the legacy Claude session-switch menu.
+  private async computeClaudeAccountsView(): Promise<
+    { id: string; label?: string; authenticated: boolean }[]
+  > {
     if (!this.config.authRotation.switchAuth) return [];
-    return listAccounts(this.config.dataDir).map((account) => ({
+    let accounts: Pick<AuthAccountSummary, "id" | "displayName" | "authenticated">[];
+    try {
+      accounts = (await this.listAuthorizationAccounts("claude")).accounts;
+    } catch {
+      const stored = this.authAccounts.read().accounts;
+      const names = authDisplayNames(stored);
+      accounts = stored
+        .filter((account) => account.provider === "claude")
+        .map((account) => ({
+          id: account.id,
+          displayName: names.get(account.id) ?? account.id,
+          authenticated: false,
+        }));
+    }
+    return accounts.map((account) => ({
       id: account.id,
-      ...(account.label ? { label: account.label } : {}),
-      authenticated: isAccountAuthenticated(account),
+      label: account.displayName,
+      authenticated: account.authenticated,
     }));
   }
 
@@ -27653,19 +30939,31 @@ export class SessionService {
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
+    assertCurrent?: () => void,
   ): Promise<{
     view: Omit<SessionListItemView, "lifecycle">;
     classified: SessionStateResult;
     source: SessionRecord | null;
     detectionOnlyError: boolean;
   }> {
+    const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
     const hasIndependentError = (record: SessionRecord): boolean =>
       record.status === "errored" ||
       Boolean(record.serverErrorAt) ||
       Boolean(record.error?.trim() && !record.error.startsWith(STATUS_DETECTION_ERROR_PREFIX));
     const inputHasIndependentError = hasIndependentError(session);
-    const classified = await this.classifySessionRecord(session);
-    const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
+    assertCurrent?.();
+    const classified = await this.classifySessionRecord(session, {
+      strictErrors: assertCurrent !== undefined,
+      journalPolicy: assertCurrent ? "strict" : "read",
+      ...(assertCurrent ? { assertCurrent } : {}),
+    });
+    assertCurrent?.();
+    const persisted = this.persistClassifiedTokenUsage(
+      classified.session,
+      classified,
+      assertCurrent ? "strict" : "read",
+    );
     if (persisted.status === "missing") {
       throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     }
@@ -27693,24 +30991,51 @@ export class SessionService {
     // workspace file yet.
     const anchorRecord = this.deskAnchorRecord(session);
     const sidecars = await this.sidecarViews(session, project);
-    const persistedSession = session;
-    session = this.withReportingError(session);
-    const source = isDeepStrictEqual(session, persistedSession) ? session : null;
+    assertCurrent?.();
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      return this.enrichWithClassified(current, claudeAccounts, sessionBatch, assertCurrent);
+    }
+    const reported = this.withReportingError(session);
+    const reportingConsistent = isDeepStrictEqual(reported, session);
+    session = reported;
     classified.session = session;
     if (hasRetainedSessionError(session)) classified.state = "error";
-    const state = this.stabilizeState(session.id, classified.state);
+    const state = projectTaskStatus(
+      session,
+      classified.state,
+      this.stabilizeState(session.id, classified.state),
+      classified.runtime.runtimeAlive,
+      workspacePresent,
+    );
     await this.updateStateHistory(
       session,
       state,
-      classified.source,
+      state !== classified.state && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
+      classified.rateLimitResetAt,
+      assertCurrent ? "strict" : "read",
     );
+    assertCurrent?.();
+    const marked = readSession(this.config.dataDir, session.id);
+    if (!marked) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+    session = this.withReportingError(marked);
+    classified.session = session;
+    const source = reportingConsistent && isDeepStrictEqual(session, marked) ? session : null;
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      return this.enrichWithClassified(current, claudeAccounts, sessionBatch, assertCurrent);
+    }
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
     const workspaceState = resolveWorkspaceState(this.config.dataDir, anchorRecord);
-    const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
+    const displaySlots = this.displaySlotsForSession(session, workspaceState);
     const deskGroupMembers = await this.buildDeskGroupMembers(
       session,
       {
@@ -27720,15 +31045,35 @@ export class SessionService {
       sessionBatch,
     );
     const resolvedClaudeAccounts =
-      session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
+      session.agent === "claude"
+        ? (claudeAccounts ?? (await this.computeClaudeAccountsView()))
+        : [];
+    let effectiveAuth = session.auth;
+    let authError: string | undefined;
+    if (session.auth) {
+      try {
+        effectiveAuth =
+          (await this.readAuthorizationState()).sessions.find(
+            (entry) => entry.sessionId === session.id,
+          ) ?? session.auth;
+      } catch {
+        authError = "Managed authorization proxy unavailable";
+      }
+    }
     const {
       launchCommand: _launchCommand,
       prompt: _prompt,
       originalTaskPrompt: _originalTaskPrompt,
       agentLaunchId: _agentLaunchId,
+      claudeStatusOwner: _claudeStatusOwner,
+      taskStatus: _taskStatus,
+      taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
       triggerOrigin: _triggerOrigin,
+      handoffIdempotency: _handoffIdempotency,
+      blockedTriggerNotices: _blockedTriggerNotices,
+      spawnIntent: _spawnIntent,
       sidecarLaunches: _sidecarLaunches,
       tokenUsage: _tokenUsage,
       preflightTokenUsage: _preflightTokenUsage,
@@ -27740,11 +31085,16 @@ export class SessionService {
       errorSource: _errorSource,
       pr: _recordPr,
       prAlertTransfer: _prAlertTransfer,
+      terminalSlotsCaptured: _terminalSlotsCaptured,
+      snapshotNudge: _snapshotNudge,
       ...sessionWithoutDetailFields
     } = session;
 
     const view: Omit<SessionListItemView, "lifecycle"> = {
       ...sessionWithoutDetailFields,
+      ...(effectiveAuth ? { auth: effectiveAuth } : {}),
+      ...(authError ? { authError } : {}),
+      ...(session.spawnIntent ? { spawnIntent: publicSpawnIntent(session.spawnIntent) } : {}),
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
       workspaceId: workspaceIdOf(session),
@@ -27764,7 +31114,11 @@ export class SessionService {
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
       ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
       ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
-      ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
+      ...(session.agent === "claude" && effectiveAuth
+        ? { activeClaudeAccountId: effectiveAuth.effectiveAccountId }
+        : session.claudeAccountId
+          ? { activeClaudeAccountId: session.claudeAccountId }
+          : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
       tokenUsageView,
       preflightTokenUsageView: this.derivePreflightTokenUsageView(session),

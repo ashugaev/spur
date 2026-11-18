@@ -63,35 +63,35 @@ CLOSE-OUT GATE, mandatory after any code change
   2  Uncommitted files -> route to developer for commit. Never auto-commit here.
   3  Implementation diff from branch base empty -> SKIPPED.
   4  git push -u origin "$(git branch --show-current)"
-  5  gh pr view succeeds -> mark drafts ready; confirm OPEN, non-draft; comment HEAD SHA. Fails -> CREATE OPEN PR.
-  6  Problem parked out of scope during the task -> file it per ISSUE REPORTING below.
-  7  Return the PR url, plus any issue url filed at step 6.
+  5  Write "$SPUR_SESSION_ARTIFACTS_DIR/pr-body.md" per PR BODY.
+  6  gh pr view succeeds -> mark drafts ready; gh pr edit with --body-file and --attach per references/pr-evidence.md; confirm OPEN, non-draft; comment HEAD SHA. Fails -> CREATE OPEN PR.
+  7  Problem parked out of scope during the task -> file it per ISSUE REPORTING below.
+  8  Return the PR url, plus any issue url filed at step 7.
 
 PR TITLE: <type>: <description>. Types incl. style, no version bump. AO_ISSUE_ID set, prefix: <ISSUE-ID>: <type>: <description>.
 
-PR BODY: plain language, what got fixed and why. Two to four lines, no headings.
+PR BODY: fill assets/pr-body.md; template owns block order and presentation.
 
-  Banned: file paths, symbol names, code, diff stats, test checklist, reasoning, design talk.
-  Reader wants the effect, not the diff. Detail belongs in the diff and the commits.
-  Closes line only when a real issue number exists.
-
-  Bad:   Dropped the Default sentinel in resolveAgentLaunchModel, added 3 vitest cases.
-  Good:  Spawn dropdown now shows the model that launches. Before, it showed
-         one model and started another.
+  Lead with user effect; config keys/defaults/aliases and compatibility stay compact.
+  CORE: important module labels and decisive logic, never touched-file inventory.
+  FLOW: application interaction, not implementation chronology.
+  PROMPTS: context plus literal source diff against PR base; new blocks have additions only. No change -> explicit no-change bullet, omit diff.
+  Visible packages/web change -> collapsed evidence table, one row per changed state; capture/upload per references/pr-evidence.md. No visible change -> no-change bullet.
+  DECISIONS: 1-4 material tradeoff rows in template's columns, one concise sentence/cell; include scope cuts, never invent alternatives. None -> reason bullet instead of table.
+  Verification reports proved results/revision, never test checklists or unrun checks.
+  Real issue number exists -> last bullet `- Closes #<n>`.
+  Module identifiers only in CORE; exact prompt code only in PROMPTS. Elsewhere ban code/symbols; everywhere ban file paths, diff stats, operator detail and secrets.
+  Remove authoring placeholders before publication.
 
 CREATE OPEN PR
 
-  git push -u origin HEAD
+  --attach pair per captured state only. No visible change: no --attach.
 
   gh pr create \
     --title "<type>: <description>" \
-    --body "$(cat <<'EOF'
-<what changed, one or two sentences>
-<why it was needed, one sentence>
-
-Closes #<issue-number>
-EOF
-)"
+    --body-file "$SPUR_SESSION_ARTIFACTS_DIR/pr-body.md" \
+    --attach "$SPUR_SESSION_ARTIFACTS_DIR/before/01-<state>.png" \
+    --attach "$SPUR_SESSION_ARTIFACTS_DIR/after/01-<state>.png"
 
 ISSUE REPORTING, for a problem outside the current request
 

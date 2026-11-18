@@ -335,6 +335,16 @@ describe("buildUserActionRecord decoder", () => {
     expect(build({ method: "OPTIONS", path: "/sessions" })).toBeNull();
   });
 
+  it("skips agent-made handoff records and keeps human ones", () => {
+    const path = "/sessions/demo-1/handoff";
+    expect(build({ path, body: { agent: "codex" }, callerSession: "demo-2" })).toBeNull();
+    expect(build({ path, body: { agent: "codex" } })).toMatchObject({
+      action: "session.handoff",
+      actor: "user",
+    });
+    expect(build({ callerSession: "demo-2" })).toMatchObject({ action: "session.kill" });
+  });
+
   it("decodes session.kill with sessionId and ok outcome", () => {
     const result = build({ path: "/sessions/demo-1/kill" });
     expect(result).toMatchObject({

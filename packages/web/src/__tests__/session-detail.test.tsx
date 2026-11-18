@@ -11,6 +11,7 @@ import { useState, type ReactElement, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionDetail } from "@/components/SessionDetail";
 import type { SpurSessionView } from "@/lib/types";
+import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
 
 // SessionDetail now reads the tag catalog via react-query (useTagCatalog), so
 // every render needs a QueryClientProvider. Wrap through the render `wrapper`
@@ -638,7 +639,7 @@ describe("SessionDetail voice input", () => {
     expect(within(nav).queryByRole("link", { name: /codex.*api-b2/i })).not.toBeInTheDocument();
     expect(within(nav).queryByRole("link", { name: /cursor.*api-c3/i })).not.toBeInTheDocument();
 
-    fireEvent.click(within(nav).getByRole("button", { name: "Show completed desk agents" }));
+    fireEvent.click(within(nav).getByRole("button", { name: "Show closed desk agents" }));
 
     expect(within(nav).getByRole("link", { name: /codex.*api-b2/i })).toBeInTheDocument();
     expect(within(nav).queryByRole("link", { name: /cursor.*api-c3/i })).not.toBeInTheDocument();
@@ -2040,6 +2041,43 @@ describe("SessionDetail voice input", () => {
     expect(writeText).toHaveBeenCalledWith(fullPrompt);
     expect(await screen.findByText("Task copied")).toBeInTheDocument();
   });
+
+  it.each([undefined, "tests pass"])(
+    "shows and copies auto-close conditions: %s",
+    async (conditions) => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText },
+      });
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(
+              sessionFixture({
+                selfDestruct: { enabled: true, ...(conditions ? { conditions } : {}) },
+              }),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      const copy = await screen.findByRole("button", { name: "Copy auto-close conditions" });
+      expect(screen.getByText("Auto-close conditions", { exact: true })).toBeInTheDocument();
+      expect(copy).toHaveAttribute("title", "Copy auto-close conditions");
+      const text = `Close this session when ${conditions ?? DEFAULT_SELF_DESTRUCT_CONDITION}.`;
+      expect(screen.getByText(text)).toBeInTheDocument();
+      fireEvent.click(copy);
+      expect(writeText).toHaveBeenCalledWith(text);
+      expect(await screen.findByText("Auto-close conditions copied")).toBeInTheDocument();
+    },
+  );
 
   it("falls back to execCommand copy when navigator.clipboard is unavailable", async () => {
     const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
@@ -5294,6 +5332,13 @@ describe("SessionDetail artifacts", () => {
       await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+    expect(screen.queryByText(/^\d+ \/ \d+$/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close artifact preview" })).toHaveClass(
+      "text-[var(--color-text-tertiary)]",
+    );
+    expect(
+      within(screen.getByRole("dialog")).getByRole("link", { name: "Download shot.png" }),
+    ).not.toHaveClass("text-[var(--color-text-secondary)]!");
 
     const previewSurface = screen.getByLabelText("Artifact preview surface");
     stubElementBounds(previewSurface);
@@ -5441,6 +5486,296 @@ describe("SessionDetail artifacts", () => {
     ).toBeInTheDocument();
   });
 
+  describe("phone viewport", () => {
+    const artifactBase = {
+      origin: "intentional",
+      createdAt: "2026-04-02T10:00:00.000Z",
+      updatedAt: "2026-04-02T10:00:00.000Z",
+    };
+
+    function mockPhoneSession(artifacts: Array<Record<string, unknown>>) {
+      vi.spyOn(window, "matchMedia").mockImplementation(
+        (query: string) =>
+          ({
+            matches: query === "(width < 40rem)",
+            media: query,
+            onchange: null,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+            addListener: vi.fn(),
+            removeListener: vi.fn(),
+            dispatchEvent: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(JSON.stringify(sessionFixture({ artifacts: artifacts as never })), {
+            status: 200,
+          });
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        return new Response("trace line", { status: 200 });
+      });
+    }
+
+    const phoneArtifacts = [
+      {
+        ...artifactBase,
+        id: "shot.png",
+        name: "shot.png",
+        size: 1200,
+        mimeType: "image/png",
+        kind: "image",
+      },
+      {
+        ...artifactBase,
+        id: "second.png",
+        name: "second.png",
+        size: 1300,
+        mimeType: "image/png",
+        kind: "image",
+      },
+      {
+        ...artifactBase,
+        id: "trace.log",
+        name: "trace.log",
+        size: 3200,
+        mimeType: "application/octet-stream",
+        kind: "download",
+      },
+    ];
+
+    async function openPhoneArtifact(name: string) {
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: `Preview ${name}` })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: `Preview ${name}` }));
+      return screen.findByRole("dialog", { name: `Artifact preview ${name}` });
+    }
+
+    it("navigates images by tap thirds, toggles the header on center tap, and shows a counter", async () => {
+      mockPhoneSession(phoneArtifacts);
+      await openPhoneArtifact("shot.png");
+
+      const imageSurface = screen.getByLabelText("Artifact preview surface");
+      const headerPrevious = screen.getByRole("button", { name: "Previous artifact" });
+      const headerNext = screen.getByRole("button", { name: "Next artifact" });
+      expect(headerPrevious).toBeDisabled();
+      expect(headerNext).toBeEnabled();
+      expect(imageSurface.contains(headerPrevious)).toBe(false);
+      expect(imageSurface.contains(headerNext)).toBe(false);
+      expect(screen.getByText("1 / 3")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "shot.png" })).toHaveAttribute(
+        "title",
+        "shot.png",
+      );
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toHaveClass(
+        "text-[var(--color-text-secondary)]",
+      );
+      expect(
+        within(screen.getByRole("dialog")).getByRole("link", { name: "Download shot.png" }),
+      ).toHaveClass("text-[var(--color-text-secondary)]!");
+
+      stubElementBounds(screen.getByLabelText("Artifact preview surface"), 300, 100);
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 150 });
+      expect(
+        screen.queryByRole("button", { name: "Close artifact preview" }),
+      ).not.toBeInTheDocument();
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 150 });
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 250 });
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByText("2 / 3")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 50 });
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 50 });
+      expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
+
+      // Header buttons navigate without reaching the surface tap handler (header stays shown).
+      fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByText("2 / 3")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Previous artifact" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toBeInTheDocument();
+    });
+
+    it("restores the hidden header after navigation and after close and reopen", async () => {
+      mockPhoneSession(phoneArtifacts);
+      await openPhoneArtifact("shot.png");
+      const closeButton = () => screen.queryByRole("button", { name: "Close artifact preview" });
+
+      stubElementBounds(screen.getByLabelText("Artifact preview surface"), 300, 100);
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 150 });
+      expect(closeButton()).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 250 });
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+      expect(closeButton()).toBeInTheDocument();
+
+      stubElementBounds(screen.getByLabelText("Artifact preview surface"), 300, 100);
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 150 });
+      expect(closeButton()).not.toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: "Escape" });
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Preview second.png" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+      expect(closeButton()).toBeInTheDocument();
+    });
+
+    it("keeps the phone copy button a fixed icon-only square in every copy state", async () => {
+      const writeText = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("denied"))
+        .mockResolvedValueOnce(undefined);
+      Object.defineProperty(window.navigator, "clipboard", {
+        configurable: true,
+        value: { writeText },
+      });
+      mockPhoneSession([
+        {
+          ...artifactBase,
+          id: "notes.txt",
+          name: "notes.txt",
+          size: 10,
+          mimeType: "text/plain",
+          kind: "text",
+        },
+      ]);
+      await openPhoneArtifact("notes.txt");
+
+      const expectFixedSquare = (button: HTMLElement) => {
+        expect(button).toHaveClass("h-8", "w-8");
+        expect(button).toHaveTextContent("");
+      };
+
+      const idle = await screen.findByRole("button", { name: "Copy notes.txt" });
+      expectFixedSquare(idle);
+
+      fireEvent.click(idle);
+      const failed = await screen.findByRole("button", { name: "Copy failed for notes.txt" });
+      expect(failed).toHaveAttribute("title", "Copy failed for notes.txt");
+      expectFixedSquare(failed);
+
+      fireEvent.click(failed);
+      const copied = await screen.findByRole("button", { name: "Copied notes.txt" });
+      expect(copied).toHaveAttribute("title", "Copied notes.txt");
+      expectFixedSquare(copied);
+    });
+
+    it("renders the phone Open button for HTML as a 32px icon-only secondary-color square", async () => {
+      mockPhoneSession([
+        {
+          ...artifactBase,
+          id: "report.html",
+          name: "report.html",
+          size: 100,
+          mimeType: "text/html; charset=utf-8",
+          kind: "text",
+        },
+      ]);
+      const dialog = await openPhoneArtifact("report.html");
+
+      const open = within(dialog).getByRole("link", { name: "Open report.html in a new tab" });
+      expect(open).toHaveClass(
+        "h-8",
+        "w-8",
+        "text-[var(--color-text-secondary)]!",
+        "hover:text-[var(--color-text-primary)]!",
+      );
+      expect(open).toHaveTextContent("");
+      expect(open).toHaveAttribute("title", "Open report.html in a new tab");
+    });
+
+    it("keeps a zoomed image from flipping on tap", async () => {
+      mockPhoneSession(phoneArtifacts);
+      const dialog = await openPhoneArtifact("shot.png");
+
+      fireEvent.click(within(dialog).getByRole("button", { name: "Zoom in" }));
+      fireEvent.click(within(dialog).getByRole("img"), { clientX: 250 });
+
+      expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toBeInTheDocument();
+    });
+
+    it("puts previous and next in the header for non-image artifacts", async () => {
+      mockPhoneSession(phoneArtifacts);
+      await openPhoneArtifact("trace.log");
+
+      const previous = screen.getAllByRole("button", { name: "Previous artifact" });
+      expect(previous).toHaveLength(1);
+      expect(
+        screen.getByLabelText("Artifact preview surface").contains(previous[0] as HTMLElement),
+      ).toBe(false);
+      expect(screen.getByText("3 / 3")).toBeInTheDocument();
+
+      const surface = screen.getByLabelText("Artifact preview surface");
+      stubElementBounds(surface, 300, 100);
+      fireEvent.click(surface, { clientX: 150 });
+      expect(
+        screen.getByRole("dialog", { name: "Artifact preview trace.log" }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toBeInTheDocument();
+
+      fireEvent.click(previous[0] as HTMLElement);
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+    });
+
+    it("hides the counter when the open artifact sits outside the filter", async () => {
+      mockPhoneSession([
+        {
+          ...artifactBase,
+          id: "agent-output.txt",
+          name: "agent-output.txt",
+          size: 3200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+        },
+        {
+          ...artifactBase,
+          id: "agent-history.jsonl",
+          name: "agent-history.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+        },
+      ]);
+      await openPhoneArtifact("agent-output.txt");
+      expect(screen.getByText("1 / 1")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
+      expect(
+        screen.getByRole("dialog", { name: "Artifact preview agent-output.txt" }),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/^\d+ \/ \d+$/)).not.toBeInTheDocument();
+    });
+  });
+
   it("keeps selected artifacts open across category changes and closes when the id disappears", async () => {
     let sessionPayload = sessionFixture({
       artifacts: [
@@ -5496,6 +5831,8 @@ describe("SessionDetail artifacts", () => {
     expect(
       screen.getByRole("dialog", { name: "Artifact preview agent-output.txt" }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Next artifact" })).toBeDisabled();
 
     sessionPayload = sessionFixture({
       artifacts: [
@@ -6860,6 +7197,94 @@ describe("SessionDetail artifacts", () => {
       expect(within(table).queryByText("Makefile")).not.toBeInTheDocument();
     });
 
+    it.each(["Grid", "List"])(
+      "viewer prev/next walks only the filtered artifacts in %s view",
+      async (view) => {
+        stubSessions({
+          "api-a1": () => [
+            { name: "a.png" },
+            { name: "notes.txt" },
+            { name: "b.png" },
+            { name: "Makefile" },
+            { name: "c.png" },
+          ],
+        });
+        render(<SessionDetail sessionId="api-a1" />);
+        await waitFor(() => {
+          expect(screen.getByText("a.png")).toBeInTheDocument();
+        });
+        fireEvent.click(
+          within(screen.getByRole("tablist", { name: "Artifact view" })).getByRole("button", {
+            name: view,
+          }),
+        );
+        fireEvent.click(formatButton("PNG (3)"));
+
+        fireEvent.click(screen.getByRole("button", { name: "Preview a.png" }));
+        expect(
+          await screen.findByRole("dialog", { name: "Artifact preview a.png" }),
+        ).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+
+        fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
+        expect(
+          await screen.findByRole("dialog", { name: "Artifact preview b.png" }),
+        ).toBeInTheDocument();
+        fireEvent.keyDown(window, { key: "ArrowRight" });
+        expect(
+          await screen.findByRole("dialog", { name: "Artifact preview c.png" }),
+        ).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+        fireEvent.keyDown(window, { key: "ArrowLeft" });
+        expect(
+          await screen.findByRole("dialog", { name: "Artifact preview b.png" }),
+        ).toBeInTheDocument();
+      },
+    );
+
+    it("list view viewer prev/next follows the displayed sort order, not payload order", async () => {
+      stubSessions({
+        "api-a1": () => [
+          { name: "c.png" },
+          { name: "notes.txt" },
+          { name: "a.png" },
+          { name: "b.png" },
+        ],
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+      fireEvent.click(
+        within(screen.getByRole("tablist", { name: "Artifact view" })).getByRole("button", {
+          name: "List",
+        }),
+      );
+      fireEvent.click(formatButton("PNG (3)"));
+      const table = screen.getByRole("table");
+      fireEvent.click(within(table).getByRole("button", { name: /^Name/ }));
+      expect(
+        within(table)
+          .getAllByRole("button", { name: /^Preview / })
+          .map((button) => button.getAttribute("aria-label")),
+      ).toEqual(["Preview a.png", "Preview b.png", "Preview c.png"]);
+
+      fireEvent.click(within(table).getByRole("button", { name: "Preview a.png" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview a.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+      fireEvent.keyDown(window, { key: "ArrowRight" });
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview b.png" }),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview c.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+    });
+
     it("hides the format control when the category has one extension", async () => {
       stubSessions({ "api-a1": () => [{ name: "a.png" }, { name: "b.png" }] });
       render(<SessionDetail sessionId="api-a1" />);
@@ -7436,10 +7861,47 @@ describe("SessionDetail display state", () => {
     await expectStateBadge("error");
   });
 
-  it("shows killed state when session is killed (does not override to working)", async () => {
+  it("shows closed when the lifecycle is killed despite native working", async () => {
     stubFetch({ status: "killed", state: "killed" }, "working");
     render(<SessionDetail sessionId="api-a1" />);
-    await expectStateBadge("killed");
+    await expectStateBadge("closed");
+  });
+
+  it("keeps a completed task live with its artifacts and close action", async () => {
+    stubFetch(
+      {
+        state: "completed",
+        artifacts: [
+          {
+            id: "proof.txt",
+            name: "proof.txt",
+            size: 8,
+            mimeType: "text/plain",
+            kind: "text",
+            origin: "intentional",
+            createdAt: "2026-01-02T10:00:00.000Z",
+            updatedAt: "2026-01-02T10:00:00.000Z",
+          },
+        ],
+      },
+      "waiting",
+    );
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("completed");
+    expect(screen.getByRole("button", { name: "Close Session" })).toHaveAttribute(
+      "title",
+      "Stop the agent and services, delete artifacts, remove the worktree",
+    );
+    expect(screen.getByPlaceholderText("Message...")).toBeEnabled();
+    expect(screen.getByText("proof.txt")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reopen" })).not.toBeInTheDocument();
+  });
+
+  it("shows closed after lifecycle completion", async () => {
+    stubFetch({ status: "completed", state: "stopped", runtimeAlive: false }, "waiting");
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("closed");
+    expect(screen.getByRole("button", { name: "Reopen" })).toBeInTheDocument();
   });
 
   it("shows stopped state when session is stopped (does not override to working)", async () => {
@@ -7448,11 +7910,14 @@ describe("SessionDetail display state", () => {
     await expectStateBadge("stopped");
   });
 
-  it("overrides to working when session state is waiting and claude conversation reports working", async () => {
-    stubFetch({ status: "running", state: "waiting" }, "working");
-    render(<SessionDetail sessionId="api-a1" />);
-    await expectStateBadge("working");
-  });
+  it.each(["waiting", "completed"] as const)(
+    "overrides %s when claude conversation reports working",
+    async (state) => {
+      stubFetch({ status: "running", state }, "working");
+      render(<SessionDetail sessionId="api-a1" />);
+      await expectStateBadge("working");
+    },
+  );
 
   it("shows working when session state is working and claude conversation reports working", async () => {
     stubFetch({ status: "running", state: "working" }, "working");
@@ -8707,7 +9172,7 @@ describe("SessionDetail GitHub PR check unavailable", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Complete" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Close Session" }));
 
     await waitFor(() => {
       expect(
@@ -8819,7 +9284,7 @@ describe("SessionDetail lifecycle operation", () => {
       await advance();
       expect(screen.getByText("Invalid session lifecycle snapshot")).toBeInTheDocument();
       expect(screen.queryByRole("heading", { name: "Fix auth" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Close Session" })).not.toBeInTheDocument();
       current = sessionFixture();
       // The rejected read is a failed poll: the next one backs off to 2x the 4s base.
       await advance(8_000);
@@ -9019,12 +9484,18 @@ describe("SessionDetail lifecycle operation", () => {
       render(<SessionDetail sessionId="api-a1" />);
       await advance();
       const button = screen.getByRole("button", {
-        name: action === "complete" ? "Complete" : "Reopen",
+        name: action === "complete" ? "Close Session" : "Reopen",
       });
       fireEvent.click(button);
       fireEvent.click(button);
       await advance();
       expect(posts).toBe(1);
+      if (action === "complete") {
+        expect(screen.getByRole("button", { name: "Closing session" })).toHaveAttribute(
+          "aria-busy",
+          "true",
+        );
+      }
       current = { ...current, lifecycle: receipt(operationId, "pending", 1, action) };
       await advance(12_000);
       expect(posts).toBe(1);

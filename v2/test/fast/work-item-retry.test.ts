@@ -29,7 +29,7 @@ const itemBase = {
   number: 7,
   title: "Review me",
   repo: "acme/api",
-  autoComplete: true,
+  autoClose: true,
   createdAt: iso(-1000),
 };
 

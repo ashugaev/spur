@@ -19,6 +19,10 @@ SELF VERIFY
 RULES
 
   Reject PASS with missing required checks, stale review/validation or PR state violating github close-out rules.
+  Validate PR body against .agents/skills/github/assets/pr-body.md and github PR BODY: required bold blocks/order, DECISIONS table, other nonvisual prose bullets, one risk level/reason, uploaded evidence URLs.
+  Require DESCRIPTION and VERIFIED result bullets; reject wrong table columns or material decisions presented as bullets. No decisions -> reason bullet per github PR BODY.
+  Compare literal prompt diff with actual base/head source; reject fabricated deletions and stale revision claims.
+  Reject authoring placeholders and local evidence paths, including ./before/ and ./after/.
   Report short, concrete.
   Reject missing, failed, skipped or stale required manual scenarios.
   Enforce manager's manual-proof and required-CI release gate.

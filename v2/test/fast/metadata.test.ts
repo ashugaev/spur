@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   archiveSessions,
+  listArchivedSessions,
   listTelegramTopicSessionIds,
   readArchivedSession,
   readTelegramTopicGcClock,
@@ -67,6 +68,8 @@ import {
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeSession,
+  observeSessionWrites,
+  withSessionWriteGuard,
   updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
 import { appendEventLog, readEventLog } from "../../src/event-log.js";
@@ -118,7 +121,7 @@ it("round-trips pending spawn ownership and rejects stale checkpoints and malfor
     number: 1,
     title: "task",
     repo: "repo",
-    autoComplete: false,
+    autoClose: false,
     createdAt: work.createdAt,
     state: "pending",
     spawnWorkId: "work",
@@ -420,7 +423,7 @@ describe("work-item lifecycle registry", () => {
     title: "Review me",
     repo: "acme/api",
     createdAt: "2026-05-11T10:00:00.000Z",
-    autoComplete: true,
+    autoClose: true,
   };
 
   async function writeLifecycleFile(dataDir: string, records: unknown[]): Promise<void> {
@@ -429,24 +432,11 @@ describe("work-item lifecycle registry", () => {
     await writeFile(join(dir, "pr-watch.json"), JSON.stringify({ records }, null, 2), "utf8");
   }
 
-  it("round-trips members and derives the record state", async () => {
-    const dataDir = await newDataDir();
-    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [
-      {
-        triggerId: "review",
-        blockIndex: 0,
-        state: "running",
-        sessionId: "api-a1b2",
-        claimedAt: "2026-05-11T10:00:00.000Z",
-        attempts: 1,
-      },
-    ]);
-
-    expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
-      ...itemBase,
-      state: "running",
-      sessionId: "api-a1b2",
-      members: [
+  it.each([true, false])(
+    "round-trips members with autoClose=%s for legacy readers",
+    async (autoClose) => {
+      const dataDir = await newDataDir();
+      updateWorkItemMembers(dataDir, "api", "pr-watch", { ...itemBase, autoClose }, () => [
         {
           triggerId: "review",
           blockIndex: 0,
@@ -454,6 +444,173 @@ describe("work-item lifecycle registry", () => {
           sessionId: "api-a1b2",
           claimedAt: "2026-05-11T10:00:00.000Z",
           attempts: 1,
+        },
+      ]);
+      expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
+        ...itemBase,
+        autoClose,
+        state: "running",
+        sessionId: "api-a1b2",
+        members: [
+          {
+            triggerId: "review",
+            blockIndex: 0,
+            state: "running",
+            sessionId: "api-a1b2",
+            claimedAt: itemBase.createdAt,
+            attempts: 1,
+          },
+        ],
+      });
+      const disk = readFileSync(
+        join(dataDir, "source-state", "work-item-lifecycle", "api", "pr-watch.json"),
+        "utf8",
+      );
+      expect(disk).toContain(`"autoComplete": ${autoClose}`);
+      expect(disk).not.toContain('"autoClose"');
+    },
+  );
+
+  const lifecycleBase = {
+    externalId: itemBase.externalId,
+    url: itemBase.url,
+    number: itemBase.number,
+    title: itemBase.title,
+    repo: itemBase.repo,
+    createdAt: itemBase.createdAt,
+  };
+  it.each([
+    [{}, true],
+    [{ autoComplete: true }, true],
+    [{ autoComplete: false }, false],
+    [{ autoComplete: "false" }, true],
+    [{ autoClose: true }, true],
+    [{ autoClose: false }, false],
+    [{ autoClose: true, autoComplete: true }, true],
+    [{ autoClose: false, autoComplete: false }, false],
+    [{ autoClose: false, autoComplete: true }, false],
+    [{ autoClose: true, autoComplete: false }, false],
+    [{ autoClose: "false", autoComplete: false }, false],
+    [{ autoClose: false, autoComplete: "true" }, false],
+    [{ autoClose: null, autoComplete: "false" }, true],
+  ] as const)("decodes policy %j as %s without rewriting", async (policy, autoClose) => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "work-item-lifecycle", "api");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "pr-watch.json");
+    const bytes = JSON.stringify({
+      records: [{ ...lifecycleBase, sessionId: "api-a1b2", ...policy }],
+    });
+    await writeFile(path, bytes);
+    expect(
+      readWorkItemLifecycles(dataDir, "api", "pr-watch").get(lifecycleBase.externalId),
+    ).toEqual({
+      ...lifecycleBase,
+      sessionId: "api-a1b2",
+      state: "running",
+      autoClose,
+      members: [
+        {
+          blockIndex: 0,
+          state: "running",
+          sessionId: "api-a1b2",
+          claimedAt: itemBase.createdAt,
+          attempts: 0,
+        },
+      ],
+    });
+    expect(readFileSync(path, "utf8")).toBe(bytes);
+  });
+
+  it("preserves false in every lifecycle state through record and delete for legacy readers", async () => {
+    const dataDir = await newDataDir();
+    const records: Array<Parameters<typeof recordWorkItemLifecycle>[3]> = [
+      {
+        ...lifecycleBase,
+        externalId: "pending",
+        autoClose: false,
+        state: "pending",
+        spawnWorkId: "owned-work",
+      },
+      {
+        ...lifecycleBase,
+        externalId: "running",
+        autoClose: false,
+        state: "running",
+        sessionId: "api-a1b2",
+      },
+      {
+        ...lifecycleBase,
+        externalId: "failed",
+        autoClose: false,
+        state: "failed",
+        error: "spawn failed",
+      },
+      {
+        ...lifecycleBase,
+        externalId: "completed",
+        autoClose: false,
+        state: "completed",
+        sessionId: "api-a1b2",
+        completedAt: "2026-05-11T11:00:00.000Z",
+      },
+    ];
+    const path = join(dataDir, "source-state", "work-item-lifecycle", "api", "pr-watch.json");
+    const assertSurvivors = () => {
+      expect([...readWorkItemLifecycles(dataDir, "api", "pr-watch").values()]).toMatchObject(
+        [...records].sort((left, right) => left.externalId.localeCompare(right.externalId)),
+      );
+      const disk = JSON.parse(readFileSync(path, "utf8")) as {
+        records: Array<{ externalId: string; autoComplete?: unknown; autoClose?: unknown }>;
+      };
+      expect(disk.records.every((record) => !Object.hasOwn(record, "autoClose"))).toBe(true);
+      // Old binaries recognize only autoComplete and default absent/malformed values to true.
+      const legacy = disk.records.map((record) => ({
+        id: record.externalId,
+        autoComplete: typeof record.autoComplete === "boolean" ? record.autoComplete : true,
+      }));
+      expect(legacy).toEqual(
+        [...records]
+          .sort((left, right) => left.externalId.localeCompare(right.externalId))
+          .map((record) => ({ id: record.externalId, autoComplete: false })),
+      );
+    };
+    for (const record of records) recordWorkItemLifecycle(dataDir, "api", "pr-watch", record);
+    assertSurvivors();
+    recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
+      ...lifecycleBase,
+      autoClose: true,
+      state: "pending",
+    });
+    deleteWorkItemLifecycle(dataDir, "api", "pr-watch", lifecycleBase.externalId);
+    assertSurvivors();
+  });
+
+  it("round-trips lifecycle records", async () => {
+    const dataDir = await newDataDir();
+    recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
+      externalId: "acme/api#7",
+      state: "running",
+      sessionId: "api-a1b2",
+      url: "https://github.com/acme/api/pull/7",
+      number: 7,
+      title: "Review me",
+      repo: "acme/api",
+      createdAt: "2026-05-11T10:00:00.000Z",
+      autoClose: true,
+    });
+
+    expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
+      ...itemBase,
+      state: "running",
+      sessionId: "api-a1b2",
+      members: [
+        {
+          blockIndex: 0,
+          state: "running",
+          sessionId: "api-a1b2",
+          claimedAt: "2026-05-11T10:00:00.000Z",
+          attempts: 0,
         },
       ],
     });
@@ -1649,6 +1806,59 @@ describe("session workspaceId normalization", () => {
     updatedAt: "2026-03-18T10:01:00.000Z",
   };
 
+  it("publishes normalized reset metadata after commit and unregisters synchronous observers", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = {
+      ...legacyBase,
+      id: "api-1",
+      tmuxSession: "api-1",
+      rateLimitedAt: "2026-03-18T10:00:00.000Z",
+      rateLimitResetAt: "2026-03-18T12:00:00+01:00",
+    };
+    const seen: SessionRecord[] = [];
+    const unregister = observeSessionWrites(dataDir, (current) => {
+      expect(readSession(dataDir, current.id)).toEqual(current);
+      seen.push(current);
+    });
+    try {
+      writeSession(dataDir, record);
+      expect(readSession(dataDir, record.id)?.rateLimitResetAt).toBe("2026-03-18T11:00:00.000Z");
+      writeSession(dataDir, { ...record, status: "completed" });
+      expect(readSession(dataDir, record.id)).not.toHaveProperty("rateLimitedAt");
+      expect(readSession(dataDir, record.id)).not.toHaveProperty("rateLimitResetAt");
+      expect(seen.map((session) => session.status)).toEqual(["running", "completed"]);
+    } finally {
+      unregister();
+    }
+    writeSession(dataDir, record);
+    expect(seen).toHaveLength(2);
+  });
+
+  it("propagates observer failure after committed status and fences async stale writes before commit", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-1", tmuxSession: "api-1" };
+    const unregister = observeSessionWrites(dataDir, () => {
+      throw new Error("journal failed");
+    });
+    expect(() => writeSession(dataDir, record)).toThrow("journal failed");
+    expect(readSession(dataDir, record.id)?.status).toBe("running");
+    unregister();
+    let current = true;
+    await expect(
+      withSessionWriteGuard(
+        () => {
+          if (!current) throw new Error("reloaded");
+        },
+        async () => {
+          await Promise.resolve();
+          current = false;
+          writeSession(dataDir, { ...record, status: "completed" });
+        },
+      ),
+    ).rejects.toThrow("reloaded");
+    expect(readSession(dataDir, record.id)?.status).toBe("running");
+  });
+
   it("survives a write/read round-trip", async () => {
     // Guards the whitelist trap: normalizeSessionRecord drops any field it
     // does not list, and its own default would then silently re-derive
@@ -1662,6 +1872,68 @@ describe("session workspaceId normalization", () => {
     });
 
     expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-1");
+  });
+
+  it("keeps a captured empty terminal slot state distinct from legacy records", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = {
+      ...legacyBase,
+      id: "api-1",
+      tmuxSession: "api-1",
+      status: "completed",
+      terminalSlotsCaptured: true,
+      slots: { links: [] },
+    };
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, record.id)).toMatchObject({ terminalSlotsCaptured: true });
+    expect(readSession(dataDir, record.id)).not.toHaveProperty("slots");
+
+    writeSession(dataDir, { ...record, terminalSlotsCaptured: false } as unknown as SessionRecord);
+    expect(readSession(dataDir, record.id)).not.toHaveProperty("terminalSlotsCaptured");
+  });
+
+  it("persists a rate-limit clear fence and drops malformed provenance", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-2", tmuxSession: "api-2" };
+    const fence = {
+      agentLaunchId: "launch-1",
+      sourceOrdinals: { "/transcript.jsonl": 2 },
+      paneLatched: true,
+    };
+    writeSession(dataDir, { ...record, rateLimitClearFence: fence });
+    expect(readSession(dataDir, record.id)?.rateLimitClearFence).toEqual(fence);
+    writeSession(dataDir, {
+      ...record,
+      rateLimitClearFence: { ...fence, sourceOrdinals: { "/transcript.jsonl": -1 } },
+    });
+    expect(readSession(dataDir, record.id)?.rateLimitClearFence).toBeUndefined();
+  });
+
+  it("persists the claude status owner and drops a malformed one", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-2", tmuxSession: "api-2" };
+    const owner = {
+      agentLaunchId: "launch-1",
+      agentSessionId: "ses_1",
+      pid: 4242,
+      procStart: "777",
+    };
+    writeSession(dataDir, { ...record, claudeStatusOwner: owner });
+    expect(readSession(dataDir, record.id)?.claudeStatusOwner).toEqual(owner);
+    const { procStart: _procStart, ...withoutProcStart } = owner;
+    writeSession(dataDir, { ...record, claudeStatusOwner: withoutProcStart });
+    expect(readSession(dataDir, record.id)?.claudeStatusOwner).toEqual(withoutProcStart);
+    for (const malformed of [
+      { ...owner, pid: 0 },
+      { ...owner, agentLaunchId: 7 },
+      { ...owner, procStart: "" },
+    ]) {
+      writeSession(dataDir, {
+        ...record,
+        claudeStatusOwner: malformed as unknown as NonNullable<SessionRecord["claudeStatusOwner"]>,
+      });
+      expect(readSession(dataDir, record.id)?.claudeStatusOwner).toBeUndefined();
+    }
   });
 
   it("persists the restore idle baseline and accepts legacy records without one", async () => {
@@ -1770,6 +2042,53 @@ describe("session workspaceId normalization", () => {
     },
   );
 
+  it("round-trips snapshotNudge and drops a malformed fingerprint", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      snapshotNudge: { fingerprint: "b".repeat(64), attempts: 2 },
+    });
+    expect(readSession(dataDir, "api-2")?.snapshotNudge).toEqual({
+      fingerprint: "b".repeat(64),
+      attempts: 2,
+    });
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-3",
+      tmuxSession: "api-3",
+      snapshotNudge: { fingerprint: "invalid", attempts: 1 },
+    });
+    expect(readSession(dataDir, "api-3")?.snapshotNudge).toBeUndefined();
+  });
+
+  it("round-trips authChangePing and drops malformed claims", async () => {
+    const dataDir = await newDataDir();
+    const claim = { key: "2:backup", attempts: 2, pinged: false };
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      authChangePing: claim,
+    });
+    expect(readSession(dataDir, "api-2")?.authChangePing).toEqual(claim);
+    for (const bad of [
+      { ...claim, key: "" },
+      { ...claim, attempts: 3 },
+      { ...claim, attempts: -1 },
+      { ...claim, pinged: "yes" },
+    ]) {
+      writeSession(dataDir, {
+        ...legacyBase,
+        id: "api-3",
+        tmuxSession: "api-3",
+        authChangePing: bad,
+      } as SessionRecord);
+      expect(readSession(dataDir, "api-3")?.authChangePing).toBeUndefined();
+    }
+  });
+
   it("drops a malformed ToDo reminder fingerprint", async () => {
     const dataDir = await newDataDir();
     writeSession(dataDir, {
@@ -1801,6 +2120,97 @@ describe("session workspaceId normalization", () => {
       expect(readSession(dataDir, "api-2")?.closeoutOwner).toBe(expected);
     },
   );
+});
+
+describe("task-status persistence", () => {
+  const base: SessionRecord = {
+    id: "api-1",
+    project: "api",
+    agent: "claude",
+    prompt: "ship it",
+    branch: "feature/task-status",
+    worktree: true,
+    worktreePath: "/tmp/worktree",
+    tmuxSession: "api-1",
+    launchCommand: "claude",
+    status: "running",
+    agentLaunchId: "launch-a",
+    createdAt: "2026-11-15T00:00:00Z",
+    updatedAt: "2026-11-15T00:00:00Z",
+  };
+  it("round-trips a declaration across cache reloads and drops it on a new launch", async () => {
+    const dataDir = await newDataDir();
+    const taskStatus = {
+      state: "completed",
+      revision: 2,
+      agentLaunchId: "launch-a",
+      updatedAt: "2026-11-15T00:00:00Z",
+    } as const;
+    writeSession(dataDir, { ...base, taskStatusRevision: 2, taskStatus });
+    expect(readSession(dataDir, base.id)).toMatchObject({ taskStatusRevision: 2, taskStatus });
+    writeSession(dataDir, {
+      ...base,
+      agentLaunchId: "launch-b",
+      taskStatusRevision: 2,
+      taskStatus,
+    });
+    expect(readSession(dataDir, base.id)?.taskStatus).toBeUndefined();
+  });
+  it("accepts legacy absence and omits malformed optional values", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, base);
+    expect(readSession(dataDir, base.id)?.taskStatusRevision).toBeUndefined();
+    writeSession(dataDir, {
+      ...base,
+      taskStatusRevision: -1,
+      taskStatus: {
+        state: "completed",
+        revision: 0,
+        agentLaunchId: "launch-a",
+        updatedAt: "invalid",
+      },
+    });
+    expect(readSession(dataDir, base.id)?.taskStatus).toBeUndefined();
+    expect(readSession(dataDir, base.id)?.taskStatusRevision).toBeUndefined();
+  });
+});
+
+describe("handoff idempotency receipt", () => {
+  const base: SessionRecord = {
+    id: "api-1",
+    project: "api",
+    agent: "claude",
+    prompt: "ship it",
+    branch: "feature/handoff",
+    worktree: true,
+    worktreePath: "/tmp/worktree",
+    tmuxSession: "api-1",
+    launchCommand: "claude",
+    status: "completed",
+    createdAt: "2026-11-15T00:00:00Z",
+    updatedAt: "2026-11-15T00:00:00Z",
+  };
+  it("keeps a valid receipt and drops a malformed one", async () => {
+    const dataDir = await newDataDir();
+    const handoffIdempotency = {
+      key: "h1",
+      request: { agent: "cursor" as const },
+      successorId: "api-2",
+      movedTodoItems: 3,
+    };
+    writeSession(dataDir, { ...base, handoffIdempotency });
+    expect(readSession(dataDir, base.id)?.handoffIdempotency).toEqual(handoffIdempotency);
+    for (const broken of [
+      { ...handoffIdempotency, key: "" },
+      { ...handoffIdempotency, successorId: "" },
+      { ...handoffIdempotency, movedTodoItems: -1 },
+      { ...handoffIdempotency, movedTodoItems: 1.5 },
+      { ...handoffIdempotency, request: "cursor" },
+    ]) {
+      writeSession(dataDir, { ...base, handoffIdempotency: broken } as unknown as SessionRecord);
+      expect(readSession(dataDir, base.id)).not.toHaveProperty("handoffIdempotency");
+    }
+  });
 });
 
 describe("staleSidecars", () => {
@@ -2633,6 +3043,35 @@ describe("session metadata PR migration", () => {
     expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ allowedTriggers: [] }));
   });
 
+  it("keeps blockedTriggerNotices string array and drops malformed values", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "own closeout",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, { ...session, blockedTriggerNotices: ["a"] });
+    expect(readSession(dataDir, "api-1")?.blockedTriggerNotices).toEqual(["a"]);
+
+    for (const malformed of ["x", [1], ["a", 1]]) {
+      writeSession(dataDir, {
+        ...session,
+        blockedTriggerNotices: malformed as unknown as string[],
+      });
+      expect(readSession(dataDir, "api-1")?.blockedTriggerNotices).toBeUndefined();
+    }
+  });
+
   it("preserves serverErrorAt when writing and reading a session record", async () => {
     const dataDir = await newDataDir();
     const session: SessionRecord = {
@@ -3081,6 +3520,62 @@ describe("archiveSessions", () => {
   });
 });
 
+describe("listArchivedSessions", () => {
+  function archiveRecords(dataDir: string, ids: string[]): void {
+    for (const id of ids) {
+      writeSession(dataDir, { ...sessionBase, id, tmuxSession: id });
+    }
+    archiveSessions(
+      dataDir,
+      ids.map((id) => ({ id, project: "api" })),
+    );
+  }
+
+  it("skips an invalid archived record and keeps the rest", async () => {
+    const dataDir = await newDataDir();
+    archiveRecords(dataDir, ["api-1", "api-2"]);
+    writeFileSync(join(dataDir, "sessions-archive", "api", "api-2.json"), "{}", "utf-8");
+
+    const sessions = listArchivedSessions(dataDir, () => true);
+
+    expect(sessions.map((session) => session.id)).toEqual(["api-1"]);
+  });
+
+  it("skips an archived record with malformed auth metadata and keeps the rest", async () => {
+    const dataDir = await newDataDir();
+    archiveRecords(dataDir, ["api-1", "api-2"]);
+    const path = join(dataDir, "sessions-archive", "api", "api-2.json");
+    const record = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    writeFileSync(path, JSON.stringify({ ...record, auth: { sessionId: 7 } }), "utf-8");
+
+    const sessions = listArchivedSessions(dataDir, () => true);
+
+    expect(sessions.map((session) => session.id)).toEqual(["api-1"]);
+  });
+
+  it("runs the include predicate before parsing the file", async () => {
+    const dataDir = await newDataDir();
+    archiveRecords(dataDir, ["api-1", "api-2"]);
+    // Parsing a directory throws EISDIR, a plain Error that is not skipped as invalid metadata.
+    const excluded = join(dataDir, "sessions-archive", "api", "api-2.json");
+    await rm(excluded);
+    mkdirSync(excluded);
+    const seen: string[] = [];
+
+    const sessions = listArchivedSessions(dataDir, (project, id) => {
+      seen.push(`${project}/${id}`);
+      return id === "api-1";
+    });
+
+    expect(sessions.map((session) => session.id)).toEqual(["api-1"]);
+    expect(seen.sort()).toEqual(["api/api-1", "api/api-2"]);
+  });
+
+  it("returns nothing without an archive", async () => {
+    expect(listArchivedSessions(await newDataDir(), () => true)).toEqual([]);
+  });
+});
+
 describe("listSessions concurrency", () => {
   it("skips a record file removed mid-scan", async () => {
     const dataDir = await newDataDir();
@@ -3102,6 +3597,20 @@ describe("listSessions concurrency", () => {
     writeSession(dataDir, { ...sessionBase, id: "api-2", tmuxSession: "api-2" });
     expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-2"]);
     expect(invalidEntries(dataDir)).toHaveLength(1);
+  });
+
+  it("skips a live record with malformed auth metadata, logs it, and readSession throws", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    writeSession(dataDir, { ...sessionBase, id: "api-2", tmuxSession: "api-2" });
+    const path = join(dataDir, "sessions", "api", "api-2.json");
+    const record = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    writeFileSync(path, JSON.stringify({ ...record, auth: { sessionId: 7 } }), "utf-8");
+
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+    expect(invalidEntries(dataDir)[0]?.message).toContain("auth");
+    expect(() => readSession(dataDir, "api-2")).toThrow();
   });
 });
 

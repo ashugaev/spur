@@ -301,6 +301,65 @@ export async function readCurrentBranch(repoPath: string): Promise<string> {
   return runGit(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"], GIT_READ_TIMEOUT_MS);
 }
 
+export interface WorktreeHead {
+  branch: string | null;
+  headSha: string | null;
+  dirty: boolean | null;
+}
+
+/** Git state of a worktree; each field is null when its git call fails. */
+export async function readWorktreeHead(worktreePath: string): Promise<WorktreeHead> {
+  const read = async (args: string[]): Promise<string | null> => {
+    if (!worktreePath.trim() || !existsSync(worktreePath)) return null;
+    try {
+      return await runGit(worktreePath, args, GIT_READ_TIMEOUT_MS);
+    } catch {
+      return null;
+    }
+  };
+  const [branch, headSha, status] = await Promise.all([
+    read(["rev-parse", "--abbrev-ref", "HEAD"]),
+    read(["rev-parse", "HEAD"]),
+    read(["status", "--porcelain"]),
+  ]);
+  return {
+    branch: branch || null,
+    headSha: headSha || null,
+    dirty: status === null ? null : status.trim().length > 0,
+  };
+}
+
+/**
+ * Commits on HEAD after `sha`. Null when the worktree is gone, `sha` or `branch` was not
+ * recorded, HEAD left that branch, or `sha` is no longer an ancestor of HEAD (amend, rebase).
+ */
+export async function countCommitsSince(
+  worktreePath: string,
+  sha: string | null,
+  branch: string | null,
+): Promise<number | null> {
+  if (sha === null || branch === null || !worktreePath.trim() || !existsSync(worktreePath)) {
+    return null;
+  }
+  try {
+    const current = await runGit(
+      worktreePath,
+      ["rev-parse", "--abbrev-ref", "HEAD"],
+      GIT_READ_TIMEOUT_MS,
+    );
+    if (current !== branch) return null;
+    await runGit(worktreePath, ["merge-base", "--is-ancestor", sha, "HEAD"], GIT_READ_TIMEOUT_MS);
+    const count = await runGit(
+      worktreePath,
+      ["rev-list", "--count", `${sha}..HEAD`],
+      GIT_READ_TIMEOUT_MS,
+    );
+    return Number(count);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Configured URL of every git remote, keyed by remote name. One spawn for the
  * whole set instead of one `remote get-url` per candidate remote, and no GitHub

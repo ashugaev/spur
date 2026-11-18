@@ -3,6 +3,7 @@ import { readdir, stat, mkdir, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
+import { SNAPSHOT_HOOK_TOOL_NAME, SNAPSHOT_HOOK_TURN_FILE } from "../snapshots.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { AgentModel } from "./models.js";
@@ -208,26 +209,47 @@ export async function discoverClaudeModelCapabilities(): Promise<ClaudeModelCapa
 const RESTRICT_WRITES_DENY_COMMAND =
   "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
 
-export async function ensureClaudeRestrictWritesSettings(sessionToolDir: string): Promise<string> {
+export async function ensureClaudeSettings(
+  sessionToolDir: string,
+  options: { restrictWrites: boolean },
+): Promise<string> {
   const settingsDir = join(sessionToolDir, "claude");
   const settingsPath = join(settingsDir, "settings.json");
+  const snapshotHook = {
+    hooks: [
+      { type: "command", command: shellEscape(join(sessionToolDir, SNAPSHOT_HOOK_TOOL_NAME)) },
+    ],
+  };
   await mkdir(settingsDir, { recursive: true });
   await writeFile(
     settingsPath,
     JSON.stringify(
       {
         hooks: {
-          PreToolUse: [
-            {
-              matcher: "Write|Edit|MultiEdit|NotebookEdit",
-              hooks: [{ type: "command", command: RESTRICT_WRITES_DENY_COMMAND }],
-            },
-          ],
+          ...(options.restrictWrites
+            ? {
+                PreToolUse: [
+                  {
+                    matcher: "Write|Edit|MultiEdit|NotebookEdit",
+                    hooks: [{ type: "command", command: RESTRICT_WRITES_DENY_COMMAND }],
+                  },
+                ],
+              }
+            : {}),
+          UserPromptSubmit: [snapshotHook],
+          PostToolUse: [snapshotHook],
+          Stop: [snapshotHook],
         },
       },
       null,
       2,
     ) + "\n",
+    "utf8",
+  );
+  // A new Claude process starts a work turn, whatever turn the previous process died in.
+  await writeFile(
+    join(sessionToolDir, SNAPSHOT_HOOK_TURN_FILE),
+    JSON.stringify({ reminder: false, worked: false }),
     "utf8",
   );
   return settingsPath;

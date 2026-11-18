@@ -6,6 +6,8 @@ import { writeSession } from "../../src/metadata.js";
 import {
   __resetUsageCacheForTest,
   buildUsageReport,
+  readFreshSessionQuota,
+  readHostCredentialSources,
   parseClaudeUsage,
   parseCodexUsage,
   type UsageReportDeps,
@@ -235,6 +237,127 @@ describe("buildUsageReport quotas", () => {
     expect(JSON.stringify(report)).not.toContain(s.home);
   });
 
+  it("keeps the host row when the provider has only non-ready managed accounts", async () => {
+    const s = await setup();
+    const report = await buildUsageReport({
+      ...s.deps(vi.fn() as unknown as typeof fetch),
+      managedAccounts: [
+        {
+          id: "acc-1",
+          provider: "codex",
+          displayName: "c@example.com",
+          credential: "oauth",
+          status: "sign_in_required",
+        },
+      ],
+    });
+    expect(report.quotas.map((q) => [q.provider, q.source])).toEqual([["codex", "codex"]]);
+  });
+
+  it("returns a pending row for a ready OAuth account with no cached quota", async () => {
+    const s = await setup();
+    const report = await buildUsageReport({
+      ...s.deps(vi.fn() as unknown as typeof fetch),
+      managedAccounts: [
+        {
+          id: "acc-1",
+          provider: "codex",
+          displayName: "c@example.com",
+          credential: "oauth",
+          status: "ready",
+        },
+      ],
+    });
+    expect(report.quotas).toEqual([
+      {
+        provider: "codex",
+        source: "acc-1",
+        label: "c@example.com",
+        fetchedAt: new Date(NOW).toISOString(),
+        status: "error",
+        error: "pending",
+        message: "quota not fetched yet",
+        httpStatus: null,
+      },
+    ]);
+  });
+
+  it("keeps the host wording for a rejected host login", async () => {
+    const s = await setup();
+    await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+    const fetchMock = vi.fn(async () => new Response("x", { status: 401 }));
+    const report = await buildUsageReport(s.deps(fetchMock as unknown as typeof fetch));
+    expect(report.quotas[0]).toMatchObject({
+      error: "unauthorized",
+      message: "saved login rejected; run the agent to refresh it",
+    });
+  });
+
+  it("shows the last refresh failure kind instead of pending", async () => {
+    const s = await setup();
+    const report = await buildUsageReport({
+      ...s.deps(vi.fn() as unknown as typeof fetch),
+      managedAccounts: [
+        {
+          id: "acc-1",
+          provider: "codex",
+          displayName: "c@example.com",
+          credential: "oauth",
+          status: "ready",
+          quotaError: "unauthorized",
+        },
+      ],
+    });
+    expect(report.quotas[0]).toMatchObject({
+      status: "error",
+      error: "unauthorized",
+      message: "sign-in rejected; sign in again from the accounts menu",
+    });
+  });
+
+  it("lists one row per ready OAuth managed account and drops that provider's host source", async () => {
+    const s = await setup();
+    await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+    const windows = [{ label: "5h", usedPercent: 10, remainingPercent: 90, resetsAt: null }];
+    const quota = { windows, fetchedAt: "2026-11-06T11:59:00.000Z" };
+    const fetchMock = vi.fn(async () => json(CODEX_BODY));
+    const report = await buildUsageReport({
+      ...s.deps(fetchMock as unknown as typeof fetch),
+      managedAccounts: [
+        {
+          id: "acc-1",
+          provider: "claude",
+          displayName: "a@example.com",
+          credential: "oauth",
+          status: "ready",
+          quota,
+        },
+        {
+          id: "acc-2",
+          provider: "claude",
+          displayName: "b@example.com",
+          credential: "oauth",
+          status: "ready",
+          quota,
+        },
+        {
+          id: "acc-3",
+          provider: "claude",
+          displayName: "key",
+          credential: "api_key",
+          status: "ready",
+        },
+      ],
+    });
+    expect(report.quotas.map((q) => [q.provider, q.source, q.label, q.status])).toEqual([
+      ["codex", "codex", "codex", "error"],
+      ["claude", "acc-1", "a@example.com", "ok"],
+      ["claude", "acc-2", "b@example.com", "ok"],
+    ]);
+    expect(report.quotas[1]).toMatchObject({ windows, fetchedAt: quota.fetchedAt });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("no_credentials and expired send no request", async () => {
     const s = await setup();
     const fetchMock = vi.fn();
@@ -339,10 +462,18 @@ describe("buildUsageReport quotas", () => {
       JSON.stringify([{ id: "b", configDir: accountDir, createdAt: "2026-01-01T00:00:00Z" }]),
     );
     writeSession(s.dataDir, session("sess-2", { claudeAccountId: "b" }));
+    writeSession(s.dataDir, session("sess-3", { claudeAccountId: "b" }));
     const fetchMock = vi.fn(async () => json(CLAUDE_BODY));
     await buildUsageReport(s.deps(fetchMock as unknown as typeof fetch));
     const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
     expect(init.headers).toMatchObject({ Authorization: "Bearer dated-token" });
+    await readFreshSessionQuota(s.deps(fetchMock as unknown as typeof fetch), {
+      id: "sess-3",
+      agent: "claude",
+      claudeAccountId: "b",
+    });
+    const freshInit = (fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1];
+    expect(freshInit.headers).toMatchObject({ Authorization: "Bearer dated-token" });
   });
 
   it("caches within 180 s, shares in-flight requests, holds 429 per Retry-After", async () => {
@@ -368,6 +499,41 @@ describe("buildUsageReport quotas", () => {
     expect(limited).toHaveBeenCalledTimes(1);
     await buildUsageReport({ ...s.deps(lf), nowMs: NOW + 601_000 });
     expect(limited).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads a fresh bound account quota without the settled usage cache", async () => {
+    const s = await setup();
+    await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+    const fetchMock = vi.fn(async () => json(CLAUDE_BODY));
+    const deps = s.deps(fetchMock as unknown as typeof fetch);
+    await buildUsageReport(deps);
+    const result = await readFreshSessionQuota(deps, { id: "sess-1", agent: "claude" });
+    expect(result).toMatchObject({ provider: "claude", source: "default", status: "ok" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(await readFreshSessionQuota(deps, { id: "sess-1", agent: "cursor" })).toBeNull();
+  });
+
+  it("fresh read updates the cached source result", async () => {
+    const s = await setup();
+    await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+    const bad = vi.fn(async () => new Response("", { status: 401 }));
+    await buildUsageReport(s.deps(bad as unknown as typeof fetch));
+    expect(
+      (await readHostCredentialSources(s.deps(bad as unknown as typeof fetch)))[0],
+    ).toMatchObject({
+      status: "error",
+      error: "unauthorized",
+    });
+    const good = vi.fn(async () => json(CLAUDE_BODY));
+    await readFreshSessionQuota(s.deps(good as unknown as typeof fetch), {
+      id: "sess-1",
+      agent: "claude",
+    });
+    expect(good).toHaveBeenCalledTimes(1);
+    const sources = await readHostCredentialSources(s.deps(bad as unknown as typeof fetch));
+    expect(sources[0]).toMatchObject({ provider: "claude", source: "default", status: "ok" });
+    expect(bad).toHaveBeenCalledTimes(1);
+    expect(sources.map((source) => source.provider)).toEqual(["claude", "codex"]);
   });
 });
 

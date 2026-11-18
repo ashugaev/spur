@@ -678,7 +678,7 @@ describe("Dashboard", () => {
     expect(screen.queryByText("Send message")).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText("Message...")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close Session" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Details" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Fix auth" })).toHaveAttribute(
@@ -1647,8 +1647,8 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Ship it" },
     });
-    fireEvent.click(screen.getByRole("checkbox", { name: "Self-destruct" }));
-    fireEvent.change(screen.getByLabelText("Self-destruct conditions"), {
+    fireEvent.click(screen.getByRole("checkbox", { name: "Auto-close session" }));
+    fireEvent.change(screen.getByLabelText("Auto-close conditions"), {
       target: { value: "  tests pass  " },
     });
     const spawnButton = screen.getByRole("button", { name: "Spawn" });
@@ -1681,8 +1681,8 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    expect(screen.getByRole("checkbox", { name: "Self-destruct" })).not.toBeChecked();
-    expect(screen.queryByLabelText("Self-destruct conditions")).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Auto-close session" })).not.toBeChecked();
+    expect(screen.queryByLabelText("Auto-close conditions")).not.toBeInTheDocument();
   });
 
   it("shows the default self-destruct condition as a placeholder and omits conditions when left blank", async () => {
@@ -1721,9 +1721,9 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Ship it" },
     });
-    fireEvent.click(screen.getByRole("checkbox", { name: "Self-destruct" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Auto-close session" }));
 
-    const conditionsField = screen.getByLabelText("Self-destruct conditions");
+    const conditionsField = screen.getByLabelText("Auto-close conditions");
     expect(conditionsField).toHaveAttribute(
       "placeholder",
       `Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`,
@@ -2459,8 +2459,8 @@ describe("Dashboard", () => {
       target: { value: "release" },
     });
     fireEvent.click(screen.getByRole("checkbox", { name: "Plan" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Self-destruct" }));
-    fireEvent.change(screen.getByLabelText("Self-destruct conditions"), {
+    fireEvent.click(screen.getByRole("checkbox", { name: "Auto-close session" }));
+    fireEvent.change(screen.getByLabelText("Auto-close conditions"), {
       target: { value: "After review" },
     });
     fireEvent.click(screen.getByRole("button", { name: "+ Step" }));
@@ -2498,8 +2498,8 @@ describe("Dashboard", () => {
     expect(screen.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     expect(screen.getByPlaceholderText("Base branch")).toHaveValue("release");
     expect(screen.getByRole("checkbox", { name: "Plan" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Self-destruct" })).toBeChecked();
-    expect(screen.getByLabelText("Self-destruct conditions")).toHaveValue("After review");
+    expect(screen.getByRole("checkbox", { name: "Auto-close session" })).toBeChecked();
+    expect(screen.getByLabelText("Auto-close conditions")).toHaveValue("After review");
     expect(screen.getByLabelText("step 1")).toHaveValue("Run tests");
   });
 

@@ -256,11 +256,35 @@ describe("Dashboard spawn photo preparation", () => {
     );
     expect(screen.getByLabelText("Prompt...")).toHaveValue("Keep all");
     expect(screen.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
-    spawnConflict = undefined;
+    let resolveRetry!: (response: Response) => void;
+    spawnResponse = new Promise<Response>((accept) => {
+      resolveRetry = accept;
+    });
     fireEvent.click(submit());
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(sentBatchId(1)).toBe(sentBatchId(0));
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(batchRequests).toBe(1);
+    await act(async () =>
+      resolveRetry(
+        Response.json(
+          {
+            error: "Retry still in progress",
+            code: "spawn_in_progress",
+            sessionId: "demo-7",
+          },
+          { status: 409 },
+        ),
+      ),
+    );
+    await waitFor(() => {
+      expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent(
+        "Retry still in progress",
+      );
+      expect(submit()).not.toBeDisabled();
+    });
+    expect(screen.getByLabelText("Prompt...")).toHaveValue("Keep all");
+    expect(screen.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
+    expect(sentBatchId(1)).toBe(sentBatchId(0));
     expect(batchRequests).toBe(1);
   });
 

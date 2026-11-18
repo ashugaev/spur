@@ -11,7 +11,7 @@ import {
 } from "@/lib/link-icons";
 import { formatAbsoluteTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
-import { ClaudeAccountsMenu } from "@/components/ClaudeAccountsMenu";
+import { AuthAccountsMenu } from "@/components/AuthAccountsMenu";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { VersionMenu } from "@/components/VersionMenu";
 import type { GitHubStatusResponse } from "@/lib/github-status";
@@ -410,7 +410,7 @@ export function StatusBar({
           </svg>
         </button>
         <ThemeToggle />
-        <ClaudeAccountsMenu />
+        <AuthAccountsMenu />
         <VersionMenu />
       </div>
     </footer>

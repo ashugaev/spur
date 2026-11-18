@@ -11,6 +11,9 @@ import {
   RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
+import { z } from "zod";
+import { AuthorizationError, authProviderSchema } from "./auth-accounts.js";
+import { authLoginMethodSchema } from "./auth-proxy.js";
 import { agentPaneChildFallbackEnabled } from "./agents/executable.js";
 import {
   AgentModelError,
@@ -62,6 +65,11 @@ import type { SourceWorkbench, SourceWorkSessionItem } from "./event-sources/typ
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { readSession } from "./metadata.js";
+import { parseSessionLinkFilters } from "./session-slots.js";
+import {
+  parseSessionTransitionsQuery,
+  SessionTransitionsCursorError,
+} from "./session-transitions.js";
 import { ACTIONS_COLLECTION, StoreError, StoreService, type StoreQuery } from "./stores.js";
 import { SseHub, acceptsEventStream } from "./sse.js";
 import { StoreAgent, parseAgentMessage } from "./store-agent.js";
@@ -95,10 +103,14 @@ import {
   PreflightPreviewError,
   isListedSessionView,
   QueueDeliveryInFlightError,
+  RateLimitClearError,
   SessionAdmissionDeniedError,
   SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
+  HandoffTargetNotStalledError,
+  IdempotencyKeyConflictError,
+  InvalidIdempotencyKeyError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
   SessionService,
@@ -146,6 +158,8 @@ import {
   type UpdateSessionSlotsRequest,
   type TodoActor,
   type TodoMutationRequest,
+  type WriteSnapshotRequest,
+  type SessionLinkFilter,
   type SessionListView,
   type SessionView,
 } from "./types.js";
@@ -156,6 +170,18 @@ import {
   TodoOpenWorkError,
   TodoTransitionConflictError,
 } from "./todo.js";
+import { CLOSEOUT_VERSION, CloseoutCorruptError } from "./closeout-archive.js";
+import { parseArtifactRelativePath } from "./session-artifacts.js";
+import {
+  InvalidSnapshotRequestError,
+  SnapshotConflictError,
+  SnapshotCorruptError,
+  SnapshotTooLargeError,
+  WorkSnapshotRequiredError,
+  parseSnapshotIncludeDone,
+  parseSnapshotListQuery,
+} from "./snapshots.js";
+import { parseTaskStatusRequest, TaskStatusError } from "./task-status.js";
 
 interface JsonError {
   error: string;
@@ -319,19 +345,22 @@ export async function resolveTodoMutationActor(args: {
   lookup: (
     sessionId: string,
   ) => { id: string; agent: AgentName } | Promise<{ id: string; agent: AgentName }>;
+  invalid?: new (message: string) => Error;
+  /** The caller may act on a session other than its own (handoff of a stalled session). */
+  anyTarget?: boolean;
 }): Promise<TodoActor> {
   const { origin, callerHeader, targetSessionId, lookup } = args;
-  if (Array.isArray(callerHeader))
-    throw new InvalidTodoRequestError("Caller session header is invalid");
+  const Invalid = args.invalid ?? InvalidTodoRequestError;
+  if (Array.isArray(callerHeader)) throw new Invalid("Caller session header is invalid");
   if (callerHeader) {
-    if (origin !== "cli") throw new InvalidTodoRequestError("Caller session requires CLI origin");
-    if (callerHeader !== targetSessionId)
-      throw new InvalidTodoRequestError("Caller session does not match ToDo owner");
+    if (origin !== "cli") throw new Invalid("Caller session requires CLI origin");
+    if (!args.anyTarget && callerHeader !== targetSessionId)
+      throw new Invalid("Caller session does not match target session");
     const caller = await lookup(callerHeader);
     return { kind: "agent", agent: caller.agent, sessionId: caller.id };
   }
   if (origin === "cli" || origin === "ui" || origin === "mcp") return { kind: "human", origin };
-  throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
+  throw new Invalid("Request origin is invalid");
 }
 
 async function authorizeAutoPingTarget(args: {
@@ -495,6 +524,13 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
   response.end(body);
 }
 
+/** undefined: absent (latest); null: not a positive integer. */
+function parseCloseoutVersion(params: URLSearchParams): number | undefined | null {
+  const raw = params.get("version");
+  if (raw === null) return undefined;
+  return CLOSEOUT_VERSION.test(raw) ? Number(raw) : null;
+}
+
 function sendError(response: ServerResponse, statusCode: number, message: string): void {
   sendJson(response, statusCode, { error: message } satisfies JsonError);
 }
@@ -650,6 +686,16 @@ export function parseCompleteSessionRequest(raw: unknown): CompleteSessionReques
     ...(prAction ? { prAction } : {}),
     ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
   };
+}
+
+function parseWriteSnapshotRequest(raw: unknown): { content: string; final: boolean } {
+  if (!isRecord(raw)) throw new Error("Snapshot request must be an object");
+  if (Object.keys(raw).some((key) => key !== "content" && key !== "final"))
+    throw new Error("Snapshot request contains unknown fields");
+  const { content, final } = raw as Partial<Record<keyof WriteSnapshotRequest, unknown>>;
+  if (typeof content !== "string" || !content.trim()) throw new Error("content must be nonblank");
+  if (final !== undefined && typeof final !== "boolean") throw new Error("final must be a boolean");
+  return { content, final: final === true };
 }
 
 function parseTodoMutationRequest(raw: unknown): TodoMutationRequest {
@@ -877,8 +923,15 @@ function parseSpawnStateSubscriptions(raw: unknown): SubscribeSessionStatesReque
 }
 
 function mergeSpawnStateSubscriptions(body: SpawnSessionRequest): SpawnSessionRequest {
+  const account = z.string().trim().min(1).nullable().optional().safeParse(body.authAccountId);
+  if (!account.success)
+    throw new AuthorizationError("authAccountId must be a nonblank string or null", 400);
   const subscriptions = parseSpawnStateSubscriptions(body.subscriptions);
-  return { ...body, ...(subscriptions ? { subscriptions } : {}) };
+  return {
+    ...body,
+    ...(account.data !== undefined ? { authAccountId: account.data } : {}),
+    ...(subscriptions ? { subscriptions } : {}),
+  };
 }
 
 export async function startServer(
@@ -978,6 +1031,7 @@ export async function startServer(
     setGhEventSink(cfg.dataDir);
   };
   applyLogConfigs(service.config);
+  await service.recoverManagedAuthorization();
   service.startBackgroundLoops();
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
@@ -997,6 +1051,8 @@ export async function startServer(
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
+  // GET /usage logs a managed-account read failure once per run of failures.
+  let managedUsageFailing = false;
   // Single owner of a failed request: the status sets the response code and the
   // log level from one argument, so the two can never drift.
   const failRequest = (
@@ -1024,6 +1080,8 @@ export async function startServer(
       sessionService: service,
       autoPing,
       memoryHoldEngaged: () => service.memoryHoldEngaged(),
+      noticeBlockedTrigger: (sessionId, triggerId) =>
+        service.noticeBlockedTrigger(sessionId, triggerId),
       logger: {
         warn: logger.warn ?? writeStderr,
         ...(logger.info ? { info: logger.info } : {}),
@@ -1208,6 +1266,23 @@ export async function startServer(
         const nowMs = Date.now();
         const todayStart = new Date(nowMs);
         todayStart.setHours(0, 0, 0, 0);
+        let managedAccounts: Awaited<
+          ReturnType<typeof service.listAuthorizationAccounts>
+        >["accounts"] = [];
+        try {
+          managedAccounts = (await service.listAuthorizationAccounts(undefined, { quota: true }))
+            .accounts;
+          managedUsageFailing = false;
+        } catch (error) {
+          if (!managedUsageFailing) {
+            logEvent("usage.managed_accounts.unavailable", {
+              level: "warn",
+              message: "Managed accounts unavailable; usage shows host logins",
+              details: { error: error instanceof Error ? error.message : String(error) },
+            });
+          }
+          managedUsageFailing = true;
+        }
         sendJson(
           response,
           200,
@@ -1217,6 +1292,7 @@ export async function startServer(
             dataDir: service.config.dataDir,
             nowMs,
             todayStartMs: todayStart.getTime(),
+            managedAccounts,
           }),
         );
         return;
@@ -1370,15 +1446,153 @@ export async function startServer(
         }
       }
 
+      if (method === "GET" && path === "/auth-accounts") {
+        const provider = authProviderSchema
+          .optional()
+          .safeParse(url.searchParams.get("agent") ?? undefined);
+        if (!provider.success) throw new AuthorizationError("agent must be claude or codex", 400);
+        sendJson(
+          response,
+          200,
+          await service.listAuthorizationAccounts(provider.data, { quota: true }),
+        );
+        return;
+      }
+
+      if (method === "POST" && path === "/auth-accounts") {
+        const body = z
+          .object({ provider: authProviderSchema })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("provider must be claude or codex", 400);
+        sendJson(response, 201, {
+          account: await service.addAuthorizationAccount(body.data.provider),
+        });
+        return;
+      }
+
+      const authPoolProvider = path.match(/^\/auth-pools\/([^/]+)$/)?.[1];
+      if (method === "PATCH" && authPoolProvider) {
+        const provider = authProviderSchema.safeParse(authPoolProvider);
+        if (!provider.success)
+          throw new AuthorizationError("provider must be claude or codex", 400);
+        const body = z
+          .object({
+            defaultAccountId: z.string().min(1).nullable().optional(),
+            autoRotate: z.boolean().optional(),
+          })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Invalid authorization pool update", 400);
+        sendJson(response, 200, {
+          pool: await service.updateAuthorizationPool(provider.data, {
+            ...(body.data.defaultAccountId !== undefined
+              ? { defaultAccountId: body.data.defaultAccountId }
+              : {}),
+            ...(body.data.autoRotate !== undefined ? { autoRotate: body.data.autoRotate } : {}),
+          }),
+        });
+        return;
+      }
+
+      const managedAccountId = path.match(/^\/auth-accounts\/([^/]+)$/)?.[1];
+      if (method === "DELETE" && managedAccountId) {
+        await service.removeAuthorizationAccount(managedAccountId);
+        sendJson(response, 200, { removed: managedAccountId });
+        return;
+      }
+
+      const managedLoginId = path.match(/^\/auth-accounts\/([^/]+)\/login$/)?.[1];
+      if (method === "POST" && managedLoginId) {
+        const body = z
+          .object({ method: authLoginMethodSchema.optional() })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) {
+          throw new AuthorizationError("method must be oauth, device or browser", 400);
+        }
+        sendJson(
+          response,
+          200,
+          await service.startAuthorizationLogin(managedLoginId, body.data.method),
+        );
+        return;
+      }
+      const managedApiKeyId = path.match(/^\/auth-accounts\/([^/]+)\/api-key$/)?.[1];
+      if (method === "POST" && managedApiKeyId) {
+        const body = z
+          .object({ apiKey: z.string() })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Supply an apiKey string", 400);
+        sendJson(
+          response,
+          200,
+          await service.setAuthorizationApiKey(managedApiKeyId, body.data.apiKey),
+        );
+        return;
+      }
+      if (method === "GET" && path === "/auth-alerts") {
+        sendJson(response, 200, await service.listAuthAlerts());
+        return;
+      }
+      if (method === "POST" && path === "/auth-terminal-logins") {
+        const body = z
+          .union([
+            z.object({ accountId: z.string().min(1) }).strict(),
+            z.object({ host: authProviderSchema }).strict(),
+          ])
+          .safeParse(await readJsonBody(request));
+        if (!body.success) {
+          throw new AuthorizationError("Supply accountId or host (claude or codex)", 400);
+        }
+        sendJson(response, 200, await service.startTerminalLogin(body.data));
+        return;
+      }
+      const terminalLoginId = path.match(/^\/auth-terminal-logins\/([^/]+)$/)?.[1];
+      if (method === "GET" && terminalLoginId) {
+        sendJson(response, 200, service.getTerminalLogin(terminalLoginId));
+        return;
+      }
+      if (method === "DELETE" && terminalLoginId) {
+        await service.stopTerminalLogin(terminalLoginId);
+        sendJson(response, 200, { stopped: terminalLoginId });
+        return;
+      }
+      const managedLoginInputId = path.match(/^\/auth-accounts\/([^/]+)\/login-input$/)?.[1];
+      if (method === "POST" && managedLoginInputId) {
+        const body = z
+          .union([
+            z.object({ input: z.string().trim().min(1) }).strict(),
+            z.object({ cancel: z.literal(true) }).strict(),
+          ])
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Supply input or cancel:true", 400);
+        sendJson(
+          response,
+          200,
+          await service.authorizationLoginInput(
+            managedLoginInputId,
+            "input" in body.data ? body.data.input : null,
+          ),
+        );
+        return;
+      }
+      const managedLoginStatusId = path.match(/^\/auth-accounts\/([^/]+)\/login-status$/)?.[1];
+      if (method === "GET" && managedLoginStatusId) {
+        sendJson(response, 200, await service.authorizationLoginStatus(managedLoginStatusId));
+        return;
+      }
+
       if (method === "GET" && path === "/claude-accounts") {
-        sendJson(response, 200, { accounts: service.listClaudeAccounts() });
+        sendJson(response, 200, { accounts: await service.listClaudeAccounts() });
         return;
       }
 
       if (method === "POST" && path === "/claude-accounts/add") {
-        const body = await readJsonBody<{ label?: unknown }>(request);
-        const label = typeof body.label === "string" ? body.label.trim() : "";
-        const account = service.addClaudeAccount(label ? { label } : {});
+        // A label in the body is ignored: accounts are named from provider identity.
+        await readJsonBody(request);
+        const account = await service.addClaudeAccount();
         const { loginTmuxSession } = await service.startAccountLogin(account.id);
         // Return the summary shape (no absolute configDir) to match GET /claude-accounts.
         sendJson(response, 201, {
@@ -1386,7 +1600,6 @@ export async function startServer(
             id: account.id,
             label: account.label,
             authenticated: false,
-            lastUsedAt: account.lastUsedAt,
           },
           loginTmuxSession,
         });
@@ -1401,7 +1614,7 @@ export async function startServer(
           return;
         }
         try {
-          service.removeClaudeAccount(id);
+          await service.removeClaudeAccount(id);
         } catch (error) {
           // In-use guard rejection is a client-correctable conflict, not a 500.
           const message = error instanceof Error ? error.message : String(error);
@@ -1424,19 +1637,64 @@ export async function startServer(
         return;
       }
 
+      // Poll-only lifecycle feed. Query: exclusive opaque `since`, repeated S5
+      // `link=label[=URL]` predicates (AND), integer `limit` 1..1000 (default 200),
+      // optional comma-separated `kinds=status,state`. Omitted kinds includes
+      // every status edge and state edges involving needs_input, rate_limited,
+      // stale, stopped, error or killed; working/waiting chatter is excluded.
+      // Thus defaults cover completion, kill, errors, park/stale, rate-limit
+      // entry/reset/exit and resume. Entries retain event-time links after GC.
+      // Response: {entries,nextCursor,hasMore}, in commit order. Omitted since
+      // starts oldest retained; an empty poll still returns a usable cursor.
+      // Cursors survive restart; invalid/foreign/future -> 400, expired -> 410
+      // with floorCursor/latestCursor (resync through a full sessions list).
+      // Retention: hot + five uncompressed 16 MiB segments, entry overshoot;
+      // no minimum time window. A fresh observation failure fails the request.
+      if (method === "GET" && path === "/sessions/transitions") {
+        let query: ReturnType<typeof parseSessionTransitionsQuery>;
+        try {
+          query = parseSessionTransitionsQuery(url.searchParams);
+        } catch (error) {
+          sendJson(response, 400, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return;
+        }
+        try {
+          sendJson(response, 200, await service.listSessionTransitions(query));
+        } catch (error) {
+          if (!(error instanceof SessionTransitionsCursorError)) throw error;
+          sendJson(response, error.status, {
+            error: error.message,
+            ...(error.floorCursor !== undefined ? { floorCursor: error.floorCursor } : {}),
+            ...(error.latestCursor !== undefined ? { latestCursor: error.latestCursor } : {}),
+          });
+        }
+        return;
+      }
+
       if (method === "GET" && path === "/sessions") {
         const includeCompleted =
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "1" ||
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
         const requestedView = url.searchParams.get("view")?.trim().toLowerCase();
         const view = requestedView === "dashboard" ? "dashboard" : "full";
+        let links: { label: string; url?: string }[];
+        try {
+          links = parseSessionLinkFilters(url.searchParams.getAll("link"));
+        } catch (error) {
+          sendJson(response, 400, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return;
+        }
         const abort = new AbortController();
         response.once("close", () => {
           if (!response.writableEnded) abort.abort();
         });
         let sessions: Awaited<ReturnType<typeof service.list>>;
         try {
-          sessions = await service.list({ includeCompleted, view, signal: abort.signal });
+          sessions = await service.list({ includeCompleted, view, links, signal: abort.signal });
         } catch (error) {
           if (abort.signal.aborted) return;
           throw error;
@@ -2192,7 +2450,7 @@ export async function startServer(
         sendJson(
           response,
           201,
-          await service.spawn(mergeSpawnStateSubscriptions(body), { acceptQueued: true }),
+          await service.spawnFromRequest(mergeSpawnStateSubscriptions(body), "foreground"),
         );
         return;
       }
@@ -2202,7 +2460,7 @@ export async function startServer(
         sendJson(
           response,
           201,
-          await service.spawnInBackground(mergeSpawnStateSubscriptions(body)),
+          await service.spawnFromRequest(mergeSpawnStateSubscriptions(body), "background"),
         );
         return;
       }
@@ -2336,6 +2594,201 @@ export async function startServer(
         return;
       }
 
+      const clearRateLimitSessionId = path.match(/^\/sessions\/([^/]+)\/rate-limit\/clear$/)?.[1];
+      if (method === "POST" && clearRateLimitSessionId) {
+        if (origin === "mcp" || request.headers["x-spur-caller-session"] !== undefined) {
+          failRequest(response, 403, "Agent session cannot clear a rate limit", { method, path });
+          return;
+        }
+        const body = await readJsonBody<unknown>(request);
+        if (
+          !isRecord(body) ||
+          Object.keys(body).some((key) => key !== "force") ||
+          (body.force !== undefined && typeof body.force !== "boolean")
+        ) {
+          failRequest(response, 400, "Rate-limit clear body must be {force?: boolean}", {
+            method,
+            path,
+          });
+          return;
+        }
+        const targetSessionId = decodeURIComponent(clearRateLimitSessionId);
+        const result = await service.clearRateLimit(targetSessionId, body.force === true, origin);
+        if (result.deliveryScheduled) triggers?.nudgeSession(targetSessionId);
+        sendJson(response, 200, result);
+        return;
+      }
+
+      const snapshotsSessionId = path.match(/^\/sessions\/([^/]+)\/snapshots$/)?.[1];
+      if (method === "GET" && snapshotsSessionId) {
+        sendJson(
+          response,
+          200,
+          service.readSnapshots(
+            decodeURIComponent(snapshotsSessionId),
+            parseSnapshotListQuery(url.searchParams),
+          ),
+        );
+        return;
+      }
+      if (method === "POST" && snapshotsSessionId) {
+        const targetSessionId = decodeURIComponent(snapshotsSessionId);
+        await resolveTodoMutationActor({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+          targetSessionId,
+          lookup: (callerSessionId) => service.getSessionIdentity(callerSessionId),
+          invalid: InvalidSnapshotRequestError,
+        });
+        let body: { content: string; final: boolean };
+        try {
+          body = parseWriteSnapshotRequest(await readJsonBody<unknown>(request));
+        } catch (parseError) {
+          throw new InvalidSnapshotRequestError(
+            parseError instanceof Error ? parseError.message : "Invalid snapshot request",
+          );
+        }
+        sendJson(response, 200, await service.writeSnapshot(targetSessionId, body));
+        return;
+      }
+
+      const snapshotVersionMatch = path.match(/^\/sessions\/([^/]+)\/snapshots\/([^/]+)$/);
+      if (method === "GET" && snapshotVersionMatch) {
+        const requested = decodeURIComponent(snapshotVersionMatch[2] ?? "");
+        if (requested !== "latest" && !/^[1-9][0-9]*$/.test(requested)) {
+          throw new InvalidSnapshotRequestError('version must be a positive integer or "latest"');
+        }
+        sendJson(
+          response,
+          200,
+          await service.readSnapshot(
+            decodeURIComponent(snapshotVersionMatch[1] ?? ""),
+            requested === "latest" ? "latest" : Number(requested),
+            { includeDone: parseSnapshotIncludeDone(url.searchParams) },
+          ),
+        );
+        return;
+      }
+
+      const taskStatusSessionId = path.match(/^\/sessions\/([^/]+)\/task-status$/)?.[1];
+      if ((method === "GET" || method === "POST") && taskStatusSessionId) {
+        const target = decodeURIComponent(taskStatusSessionId);
+        if (method === "GET") {
+          sendJson(response, 200, await service.readTaskStatus(target));
+        } else {
+          if (request.headers["x-spur-caller-session"] !== target) {
+            throw new TaskStatusError(
+              "Task status requires the target agent caller",
+              403,
+              "task_status_forbidden",
+            );
+          }
+          const body = parseTaskStatusRequest(await readJsonBody<unknown>(request));
+          sendJson(response, 200, await service.writeTaskStatus(target, body));
+        }
+        return;
+      }
+
+      const closeoutMatch = path.match(/^\/sessions\/([^/]+)\/closeout$/);
+      if (method === "GET" && closeoutMatch?.[1]) {
+        const version = parseCloseoutVersion(url.searchParams);
+        if (version === null) {
+          sendError(response, 400, "version must be a positive integer");
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          service.readCloseout(decodeURIComponent(closeoutMatch[1]), version),
+        );
+        return;
+      }
+
+      const closeoutFileMatch = path.match(/^\/sessions\/([^/]+)\/closeout\/files\/(.+)$/);
+      if (method === "GET" && closeoutFileMatch?.[1] && closeoutFileMatch[2]) {
+        const version = parseCloseoutVersion(url.searchParams);
+        if (version === null) {
+          sendError(response, 400, "version must be a positive integer");
+          return;
+        }
+        let sessionId: string;
+        let relativePath: string | null;
+        try {
+          sessionId = decodeURIComponent(closeoutFileMatch[1]);
+          relativePath = parseArtifactRelativePath(
+            closeoutFileMatch[2]
+              .split("/")
+              .map((segment) => decodeURIComponent(segment))
+              .join("/"),
+          );
+        } catch {
+          sendError(response, 404, `Closeout file not found: ${closeoutFileMatch[2]}`);
+          return;
+        }
+        if (relativePath === null) {
+          sendError(response, 404, `Closeout file not found: ${closeoutFileMatch[2]}`);
+          return;
+        }
+        const file = service.readCloseoutFile(sessionId, relativePath, version);
+        response.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": String(file.size),
+          "content-disposition": `attachment; filename="${encodeURIComponent(basename(file.name))}"`,
+          "x-content-type-options": "nosniff",
+          "cache-control": "no-store",
+        });
+        const stream = createReadStream(file.path);
+        stream.on("error", () => {
+          if (!response.headersSent) {
+            sendError(response, 500, "Failed to read closeout file");
+          } else {
+            response.destroy();
+          }
+        });
+        stream.pipe(response);
+        return;
+      }
+
+      if (method === "GET" && path === "/closeouts") {
+        let links: SessionLinkFilter[];
+        try {
+          links = parseSessionLinkFilters(url.searchParams.getAll("link"));
+        } catch (parseError) {
+          sendError(
+            response,
+            400,
+            parseError instanceof Error ? parseError.message : "Invalid link",
+          );
+          return;
+        }
+        if (links.length === 0) {
+          sendError(response, 400, "link is required");
+          return;
+        }
+        sendJson(response, 200, service.closeoutsByLink(links));
+        return;
+      }
+
+      if (method === "GET" && path === "/snapshots/latest") {
+        let links: SessionLinkFilter[];
+        try {
+          links = parseSessionLinkFilters(url.searchParams.getAll("link"));
+        } catch (parseError) {
+          throw new InvalidSnapshotRequestError(
+            parseError instanceof Error ? parseError.message : "Invalid link",
+          );
+        }
+        if (links.length === 0) throw new InvalidSnapshotRequestError("link is required");
+        sendJson(
+          response,
+          200,
+          await service.latestSnapshotsByLink(links, {
+            includeDone: parseSnapshotIncludeDone(url.searchParams),
+          }),
+        );
+        return;
+      }
+
       const todoSessionId = path.match(/^\/sessions\/([^/]+)\/todo$/)?.[1];
       if (method === "GET" && todoSessionId) {
         sendJson(response, 200, await service.readTodo(decodeURIComponent(todoSessionId)));
@@ -2451,15 +2904,19 @@ export async function startServer(
       const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
       if (method === "POST" && handoffSessionId) {
         const body = await readJsonBody<HandoffSessionRequest>(request);
-        sendJson(
-          response,
-          200,
-          await service.handoff(
-            handoffSessionId,
-            body,
-            humanTodoOptions(origin, request.headers["x-spur-caller-session"]),
-          ),
-        );
+        const callerHeader = request.headers["x-spur-caller-session"];
+        const todoOptions = callerHeader
+          ? {
+              todoActor: await resolveTodoMutationActor({
+                origin,
+                callerHeader,
+                targetSessionId: handoffSessionId,
+                lookup: (callerSessionId) => service.getSessionIdentity(callerSessionId),
+                anyTarget: true,
+              }),
+            }
+          : humanTodoOptions(origin, callerHeader);
+        sendJson(response, 200, await service.handoff(handoffSessionId, body, todoOptions));
         return;
       }
 
@@ -2490,20 +2947,16 @@ export async function startServer(
 
       const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
       if (method === "POST" && switchAuthSessionId) {
-        if (!service.config.authRotation.switchAuth) {
-          sendError(response, 404, "switch-auth is disabled; set authRotation.switchAuth: true");
-          return;
-        }
         const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
-        const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
-        if (!accountId) {
-          sendJson(response, 400, { error: "accountId must be a non-empty string" });
+        const account = z.string().trim().min(1).nullable().safeParse(body.accountId);
+        if (!account.success) {
+          sendJson(response, 400, { error: "accountId must be a non-empty string or null" });
           return;
         }
         sendJson(
           response,
           200,
-          await service.switchAuth(switchAuthSessionId, accountId, {
+          await service.switchAuth(switchAuthSessionId, account.data, {
             reason: "manual",
             force: body.force === true,
           }),
@@ -2894,7 +3347,16 @@ export async function startServer(
         });
         return;
       }
+      if (error instanceof RateLimitClearError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { error: message, resetAt: error.resetAt },
+        });
+        return;
+      }
       if (
+        error instanceof AuthorizationError ||
         error instanceof AgentReasoningEffortError ||
         error instanceof AgentModelError ||
         error instanceof SessionResourceNotFoundError ||
@@ -2905,6 +3367,7 @@ export async function startServer(
         error instanceof InvalidSessionSubscriptionInputError ||
         error instanceof InvalidWakeRequestError ||
         error instanceof InvalidJsonBodyError ||
+        error instanceof InvalidIdempotencyKeyError ||
         error instanceof WakeTargetMissingError ||
         error instanceof WakeDispatchConflictError ||
         error instanceof SessionAdmissionDeniedError ||
@@ -2927,7 +3390,9 @@ export async function startServer(
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
         error instanceof SessionNotRestorableError ||
+        error instanceof HandoffTargetNotStalledError ||
         error instanceof SpawnBatchConflictError ||
+        error instanceof IdempotencyKeyConflictError ||
         error instanceof PrAlertOwnerRequestError
       ) {
         failRequest(response, error.statusCode, message, {
@@ -2963,7 +3428,64 @@ export async function startServer(
         });
         return;
       }
-      if (error instanceof InvalidTodoRequestError) {
+      if (error instanceof WorkSnapshotRequiredError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            ...(error.sessionIds.length === 1
+              ? { sessionId: error.sessionIds[0] }
+              : { sessionIds: error.sessionIds }),
+            required: error.required,
+            error: error.message,
+          },
+        });
+        return;
+      }
+      if (error instanceof SnapshotTooLargeError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            limitBytes: error.limitBytes,
+            actualBytes: error.actualBytes,
+            error: error.message,
+          },
+        });
+        return;
+      }
+      if (error instanceof CloseoutCorruptError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { code: error.code, sessionId: error.sessionId, error: error.message },
+        });
+        return;
+      }
+      if (error instanceof SnapshotCorruptError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            sessionId: error.sessionId,
+            version: error.version,
+            error: error.message,
+          },
+        });
+        return;
+      }
+      if (error instanceof InvalidSnapshotRequestError || error instanceof SnapshotConflictError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { code: error.code, error: error.message },
+        });
+        return;
+      }
+      if (error instanceof TaskStatusError || error instanceof InvalidTodoRequestError) {
         failRequest(response, error.statusCode, message, {
           method,
           path,
@@ -3009,6 +3531,9 @@ export async function startServer(
             statusCode: response.statusCode,
             ...(errorMessage ? { error: errorMessage } : {}),
             latencyMs: Math.round(performance.now() - startedAt),
+            ...(typeof request.headers["x-spur-caller-session"] === "string"
+              ? { callerSession: request.headers["x-spur-caller-session"] }
+              : {}),
           });
           if (record) {
             appendUserAction(service.info().dataDir, record);

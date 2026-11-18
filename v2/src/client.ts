@@ -62,6 +62,16 @@ async function fetchJson(
   return { response, payload };
 }
 
+async function fetchBytes(
+  baseUrl: string,
+  path: string,
+  init?: RequestInit,
+): Promise<{ response: Response; payload: unknown }> {
+  const response = await fetch(`${baseUrl}${path}`, init);
+  if (!response.ok) return { response, payload: parseJsonText(await response.text()) };
+  return { response, payload: Buffer.from(await response.arrayBuffer()) };
+}
+
 function deadlineController(ms: number): { controller: AbortController; clear: () => void } {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
@@ -76,6 +86,15 @@ function unresponsiveDaemonError(baseUrl: string): Error {
 }
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
+  return requestWith<T>(fetchJson, baseUrl, path, init);
+}
+
+async function requestWith<T>(
+  read: typeof fetchJson,
+  baseUrl: string,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
   const method = init?.method ?? "GET";
   const mutation = method !== "GET";
   const startedAt = Date.now();
@@ -102,7 +121,7 @@ async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit)
   };
   let result: { response: Response; payload: unknown };
   try {
-    result = await fetchJson(baseUrl, path, withOrigin);
+    result = await read(baseUrl, path, withOrigin);
   } catch (error) {
     if (!request.controller.signal.aborted) throw error;
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
@@ -347,7 +366,11 @@ async function waitForStableDaemonProbe(baseUrl: string): Promise<DaemonProbe> {
     }
   }
 
-  throw new Error(`Timed out waiting for daemon at ${baseUrl} to finish starting`);
+  throw startingTimeoutError(baseUrl);
+}
+
+function startingTimeoutError(baseUrl: string): Error {
+  return new Error(`Timed out waiting for daemon at ${baseUrl} to finish starting`);
 }
 
 function isMissingProcessError(error: unknown): boolean {
@@ -385,6 +408,32 @@ function hasManagedDefaultDaemonUnit(configPath: string): boolean {
   return resolveSystemdScope(homedir()).kind !== "missing";
 }
 
+function managedDaemonError(configPath: string): Error {
+  return new Error(
+    `Spur daemon at ${configPath} is unreachable and spur-daemon.service owns this instance; restart it with systemctl instead of forking a detached daemon.`,
+  );
+}
+
+function managedIncompatibleDaemonError(baseUrl: string): Error {
+  return new Error(
+    `Spur daemon at ${baseUrl} reports an API version this CLI does not support and spur-daemon.service owns this instance; install a matching Spur build, then restart it with systemctl.`,
+  );
+}
+
+function managedTimeoutError(probe: DaemonProbe, baseUrl: string, configPath: string): Error {
+  switch (probe.state) {
+    case "starting":
+      return startingTimeoutError(baseUrl);
+    case "incompatible":
+      return managedIncompatibleDaemonError(baseUrl);
+    case "unresponsive":
+      return unresponsiveDaemonError(baseUrl);
+    case "ready":
+    case "unreachable":
+      return managedDaemonError(configPath);
+  }
+}
+
 function spawnDaemon(
   cliEntrypoint: string,
   configPath: string,
@@ -402,9 +451,8 @@ function spawnDaemon(
     );
   }
   if (hasManagedDefaultDaemonUnit(configPath)) {
-    throw new Error(
-      `Spur daemon at ${configPath} is unreachable and spur-daemon.service owns this instance; restart it with systemctl instead of forking a detached daemon.`,
-    );
+    if (reason === "autostart") return;
+    throw managedDaemonError(configPath);
   }
   if (reason === "autostart") {
     const sessionId = process.env.SPUR_SESSION?.trim() ?? "";
@@ -525,16 +573,19 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
   if (probe.state === "ready") {
     return baseUrl;
   }
-  if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
+  let unresponsiveRecovery = probe.state === "unresponsive";
+  let handledIncompatible = false;
   if (probe.state === "incompatible") {
     await stopIncompatibleDaemon(baseUrl, probe.pid);
+    handledIncompatible = true;
     probe = await probeDaemon(baseUrl);
-    if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
+    unresponsiveRecovery = probe.state === "unresponsive";
   }
   if (probe.state === "unreachable") {
     spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
   }
 
+  const managed = hasManagedDefaultDaemonUnit(resolvedConfigPath);
   const deadline = waitDeadline(DAEMON_START_ATTEMPTS);
   for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS && Date.now() < deadline; attempt += 1) {
     await sleep(DAEMON_START_RETRY_DELAY_MS);
@@ -543,15 +594,21 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
       return baseUrl;
     }
     if (probe.state === "incompatible") {
+      // A managed unit restarts the same build, so a second stop cannot help.
+      if (managed && handledIncompatible) throw managedIncompatibleDaemonError(baseUrl);
       await stopIncompatibleDaemon(baseUrl, probe.pid);
+      handledIncompatible = true;
       probe = await probeDaemon(baseUrl);
-      if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
+      if (probe.state === "ready") return baseUrl;
+      if (probe.state === "unresponsive") unresponsiveRecovery = true;
       if (probe.state === "unreachable") {
         spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
       }
     }
   }
 
+  if (managed) throw managedTimeoutError(probe, baseUrl, resolvedConfigPath);
+  if (unresponsiveRecovery) throw unresponsiveDaemonError(baseUrl);
   throw new Error(`Timed out waiting for daemon at ${baseUrl}`);
 }
 
@@ -575,6 +632,15 @@ export async function getJson<T>(
 ): Promise<T> {
   const baseUrl = await ensureServer(cliEntrypoint, configPath);
   return requestJson<T>(baseUrl, path);
+}
+
+export async function getBytes(
+  cliEntrypoint: string,
+  path: string,
+  configPath?: string,
+): Promise<Buffer> {
+  const baseUrl = await ensureServer(cliEntrypoint, configPath);
+  return requestWith<Buffer>(fetchBytes, baseUrl, path);
 }
 
 export async function postJson<T>(

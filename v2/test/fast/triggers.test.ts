@@ -13,6 +13,7 @@ import type {
 import { EventBus } from "../../src/event-bus.js";
 import type { TriggerGroupController } from "../../src/triggers.js";
 import { normalizeSlotLinks } from "../../src/session-slots.js";
+import { projectTaskStatus } from "../../src/task-status.js";
 import type {
   AutoPingRouteDescriptor,
   PersistedPendingBatch,
@@ -21,6 +22,7 @@ import type {
   ReviewSnapshot,
   SendBatchRetryEntry,
   SessionRecord,
+  SessionState,
   WorkItemLifecycleRecord,
   WorkItemMember,
 } from "../../src/types.js";
@@ -378,7 +380,7 @@ function spawnDeskGroupConfig(options?: { thirdBlock?: boolean }) {
   };
 }
 
-function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
+function workItemSpawnConfig(options?: { prompt?: string; autoClose?: boolean }) {
   return {
     dataDir: DATA_DIR,
     projects: {
@@ -399,7 +401,7 @@ function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean
                   prompt: options?.prompt ?? "Take {{url}} from {{repo}}.",
                 },
               ],
-              autoComplete: options?.autoComplete ?? true,
+              autoClose: options?.autoClose ?? true,
             },
           },
         },
@@ -480,7 +482,7 @@ function workItemReadOnlyFanoutSpawnConfig() {
   };
 }
 
-function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
+function sentrySpawnConfig(options?: { prompt?: string; autoClose?: boolean }) {
   return {
     dataDir: "/tmp/spur-data",
     projects: {
@@ -507,7 +509,7 @@ function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }
                   prompt: options?.prompt ?? "Triage {{url}} from {{repo}}.",
                 },
               ],
-              autoComplete: options?.autoComplete ?? true,
+              autoClose: options?.autoClose ?? true,
             },
           },
         },
@@ -746,7 +748,7 @@ const WORK_ITEM_BASE = {
   number: 42,
   title: "Fix the bug",
   repo: "acme/api",
-  autoComplete: true,
+  autoClose: true,
 };
 
 function workItemSpawnOptions(blockIndex = 0) {
@@ -781,12 +783,12 @@ function workItemMember(overrides?: {
 // A lifecycle record built from members the way the metadata writer derives it.
 function workItemLifecycle(
   members: WorkItemMember[],
-  options?: { createdAt?: string; autoComplete?: boolean },
+  options?: { createdAt?: string; autoClose?: boolean },
 ): WorkItemLifecycleRecord {
   return buildWorkItemRecord(
     {
       ...WORK_ITEM_BASE,
-      autoComplete: options?.autoComplete ?? true,
+      autoClose: options?.autoClose ?? true,
       createdAt: options?.createdAt ?? new Date(Date.now() - 5 * 60_000).toISOString(),
     },
     members,
@@ -796,6 +798,7 @@ function workItemLifecycle(
 
 function runningWorkItemLifecycle(options?: {
   createdAt?: string;
+  autoClose?: boolean;
 }): Extract<WorkItemLifecycleRecord, { state: "running" }> {
   return workItemLifecycle([workItemMember()], options) as Extract<
     WorkItemLifecycleRecord,
@@ -869,6 +872,7 @@ async function loadTriggersModule() {
         autoPing,
       } as TriggerDeps);
       return {
+        nudgeSession: controller.nudgeSession,
         async stop(): Promise<void> {
           await controller.stop();
           autoPing.dispose();
@@ -2454,60 +2458,69 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("caps fresh conflict envelopes across controllers while delivering new sibling comments", async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "spur-conflict-cap-"));
-    const autoPing = new AutoPingService(dataDir);
-    const bus = new EventBus();
-    const get = vi.fn().mockResolvedValue({
-      id: "api-1",
-      state: "stale",
-      status: "stopped",
-      workspaceExists: true,
-      stopReason: "stale_timeout",
-    });
-    const deliver = vi.fn().mockResolvedValue(undefined);
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const deps = {
-      config: { ...config({ event: "github:merge_conflict" }), dataDir } as never,
-      bus,
-      autoPing,
-      sessionService: { get, deliver } as never,
-      logger: { warn: vi.fn() },
-    };
-    let controller = startConfiguredTriggers(deps);
-    try {
-      for (let index = 0; index < 100; index += 1) {
-        const event = mergeConflictEvent();
-        const signals = [
-          ...event.data.signals,
-          { key: `comment:${index}`, kind: "comment" as const, text: `Action ${index}` },
-        ];
-        readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot(signals));
-        bus.emit({ ...event, occurrenceId: `fresh-${index}`, data: { ...event.data, signals } });
-        await vi.advanceTimersByTimeAsync(1);
+  it.each([
+    ["merge_conflict", "Merge conflicts are blocking this PR."],
+    ["out_of_date", "PR branch is behind its base branch and must be updated before merge."],
+  ] as const)(
+    "caps fresh %s envelopes across controllers while delivering new sibling comments",
+    async (kind, signalText) => {
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-conflict-cap-"));
+      const autoPing = new AutoPingService(dataDir);
+      const bus = new EventBus();
+      const get = vi.fn().mockResolvedValue({
+        id: "api-1",
+        state: "stale",
+        status: "stopped",
+        workspaceExists: true,
+        stopReason: "stale_timeout",
+      });
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const deps = {
+        config: { ...config({ event: `github:${kind}` }), dataDir } as never,
+        bus,
+        autoPing,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      };
+      let controller = startConfiguredTriggers(deps);
+      try {
+        for (let index = 0; index < 100; index += 1) {
+          const base = mergeConflictEvent();
+          const event = {
+            ...base,
+            name: `github:${kind}`,
+            data: { ...base.data, signals: [{ key: kind, kind, text: signalText }] },
+          };
+          const signals = [
+            ...event.data.signals,
+            { key: `comment:${index}`, kind: "comment" as const, text: `Action ${index}` },
+          ];
+          readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot(signals));
+          bus.emit({ ...event, occurrenceId: `fresh-${index}`, data: { ...event.data, signals } });
+          await vi.advanceTimersByTimeAsync(1);
+          await controller.stop();
+          controller = startConfiguredTriggers(deps);
+        }
+        expect(deliver).toHaveBeenCalledTimes(100);
+        expect(
+          deliver.mock.calls.filter((call) => String(call[1]).includes(signalText)),
+        ).toHaveLength(1);
+        expect(deliver.mock.calls.at(-1)?.[1]).toContain("Action 99");
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) =>
+              entry.event === "trigger.send.suppressed" &&
+              entry.details?.reason === "conflict_already_delivered",
+          ).length,
+        ).toBeGreaterThan(0);
+      } finally {
         await controller.stop();
-        controller = startConfiguredTriggers(deps);
+        autoPing.dispose();
+        rmSync(dataDir, { recursive: true, force: true });
       }
-      expect(deliver).toHaveBeenCalledTimes(100);
-      expect(
-        deliver.mock.calls.filter((call) =>
-          String(call[1]).includes("Merge conflicts are blocking"),
-        ),
-      ).toHaveLength(1);
-      expect(deliver.mock.calls.at(-1)?.[1]).toContain("Action 99");
-      expect(
-        logSpurEventMock.mock.calls.filter(
-          ([, entry]) =>
-            entry.event === "trigger.send.suppressed" &&
-            entry.details?.reason === "conflict_already_delivered",
-        ).length,
-      ).toBeGreaterThan(0);
-    } finally {
-      await controller.stop();
-      autoPing.dispose();
-      rmSync(dataDir, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
   it.each([false])(
     "retains exhausted item tombstones across fresh UUIDs and reloads (CI=%s)",
@@ -4955,6 +4968,64 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it.each(["github", "service"] as const)(
+    "delivers %s feedback once when native waiting projects a declared completed task",
+    async (source) => {
+      const declaration = {
+        status: "running" as const,
+        agentLaunchId: "launch-a",
+        taskStatusRevision: 0,
+        taskStatus: {
+          state: "completed" as const,
+          revision: 0,
+          agentLaunchId: "launch-a",
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      let nativeState: SessionState = "working";
+      const get = vi.fn(async () => ({
+        id: "api-1",
+        status: declaration.status,
+        state: projectTaskStatus(declaration, nativeState, nativeState, true, true),
+        runtimeAlive: true,
+        workspaceExists: true,
+        lastActivityAt: staleActivity(),
+      }));
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: (source === "github" ? config() : serviceConfig()) as never,
+        bus,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        bus.emit(source === "github" ? githubEvent() : serviceEvent());
+        await advanceSendWindow();
+        expect(deliver).not.toHaveBeenCalled();
+        expect(readPendingSendBatchesMock().size).toBe(1);
+
+        nativeState = "waiting";
+        expect((await get()).state).toBe("completed");
+        controller.nudgeSession("api-1");
+        await vi.advanceTimersByTimeAsync(1);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        expect(deliver).toHaveBeenCalledWith("api-1", expect.any(String), { interrupt: false });
+        expect(readPendingSendBatchesMock().size).toBe(0);
+
+        controller.nudgeSession("api-1");
+        controller.nudgeSession("api-1");
+        await advanceSendWindow();
+        expect(deliver).toHaveBeenCalledTimes(1);
+        expect(readPendingSendBatchesMock().size).toBe(0);
+      } finally {
+        await controller.stop();
+      }
+    },
+  );
+
   it("delivers service alerts with the list log-view hint for the bound session", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
@@ -5122,6 +5193,11 @@ describe("startConfiguredTriggers", () => {
       bus.emit(githubEvent());
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
+
+      const readsBeforeNudge = getMock.mock.calls.length;
+      controller.nudgeSession("api-1");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getMock.mock.calls.length).toBeGreaterThan(readsBeforeNudge);
 
       await advanceSendWindow();
 
@@ -5685,6 +5761,7 @@ describe("startConfiguredTriggers", () => {
       allowedTriggers: [],
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const noticeMock = vi.fn();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -5694,6 +5771,7 @@ describe("startConfiguredTriggers", () => {
         get: getMock,
         deliver: deliverMock,
       } as never,
+      noticeBlockedTrigger: noticeMock,
       logger: {
         warn: vi.fn(),
       },
@@ -5711,9 +5789,76 @@ describe("startConfiguredTriggers", () => {
         ).toBe(true);
       });
       expect(deliverMock).not.toHaveBeenCalled();
+      expect(noticeMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }
+  });
+
+  describe("closeout notice", () => {
+    const ownerSession = (overrides: Record<string, unknown> = {}) => ({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+      closeoutOwner: true,
+      allowedTriggers: [],
+      ...overrides,
+    });
+
+    it("notices the closeout owner when its allowlist drops a send trigger", async () => {
+      const getMock = vi.fn().mockResolvedValue(ownerSession());
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      const noticeMock = vi.fn();
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: { get: getMock, deliver: deliverMock } as never,
+        noticeBlockedTrigger: noticeMock,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(githubEvent());
+        await vi.waitFor(() => expect(noticeMock).toHaveBeenCalledExactlyOnceWith("api-1", "send"));
+        expect(deliverMock).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("notices the closeout owner when a queued batch is dropped on flush", async () => {
+      const getMock = vi
+        .fn()
+        .mockResolvedValue(ownerSession({ allowedTriggers: ["send"], state: "working" }));
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      const noticeMock = vi.fn();
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: { get: getMock, deliver: deliverMock } as never,
+        noticeBlockedTrigger: noticeMock,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(githubEvent());
+        await advanceSendWindow();
+        expect(noticeMock).not.toHaveBeenCalled();
+        getMock.mockResolvedValue(ownerSession());
+        await advanceSendWindow();
+        await vi.waitFor(() => expect(noticeMock).toHaveBeenCalledExactlyOnceWith("api-1", "send"));
+        expect(deliverMock).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
   });
 
   it("delivers send triggers listed in the session allowlist", async () => {
@@ -5786,7 +5931,7 @@ describe("startConfiguredTriggers", () => {
           number: 42,
           title: "Fix the bug",
           repo: "acme/api",
-          autoComplete: true,
+          autoClose: true,
           members: [
             expect.objectContaining({
               triggerId: "pick-up",
@@ -5895,7 +6040,7 @@ describe("startConfiguredTriggers", () => {
         workItemSpawnOptions(1),
       );
       expect(records.get("acme/api#42")).toEqual(
-        expect.objectContaining({ state: "running", autoComplete: false }),
+        expect.objectContaining({ state: "running", autoClose: false }),
       );
     } finally {
       await controller.stop();
@@ -5935,7 +6080,7 @@ describe("startConfiguredTriggers", () => {
         },
       );
       expect(records.get("acme/web#WEB-7")).toEqual(
-        expect.objectContaining({ state: "running", sessionId: "api-9", autoComplete: true }),
+        expect.objectContaining({ state: "running", sessionId: "api-9", autoClose: true }),
       );
     } finally {
       await controller.stop();
@@ -5965,7 +6110,7 @@ describe("startConfiguredTriggers", () => {
                 handle: {
                   source: "check",
                   event: "script:item.new",
-                  spawn: { blocks: [{ prompt: "{{branch}} {{id}}" }], autoComplete: true },
+                  spawn: { blocks: [{ prompt: "{{branch}} {{id}}" }], autoClose: true },
                 },
               },
             },
@@ -6013,7 +6158,7 @@ describe("startConfiguredTriggers", () => {
             externalId: "script:check#a",
             state: "running",
             sessionId: "api-9",
-            autoComplete: true,
+            autoClose: true,
           }),
         );
       } finally {
@@ -6392,7 +6537,7 @@ describe("startConfiguredTriggers", () => {
     {
       reason: "owner_completed",
       level: "info",
-      lifecycle: workItemLifecycle([workItemMember()], { autoComplete: false }),
+      lifecycle: workItemLifecycle([workItemMember()], { autoClose: false }),
       get: {
         id: "api-9",
         status: "completed" as const,
@@ -6429,7 +6574,7 @@ describe("startConfiguredTriggers", () => {
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig({ autoComplete: reason !== "owner_completed" }) as never,
+      config: workItemSpawnConfig({ autoClose: reason !== "owner_completed" }) as never,
       bus,
       sessionService: { get: getMock, spawn: spawnMock } as never,
       logger: { warn: vi.fn() },
@@ -6707,7 +6852,7 @@ describe("startConfiguredTriggers", () => {
         "pr-watch",
         {
           ...WORK_ITEM_BASE,
-          autoComplete: false,
+          autoClose: false,
           createdAt,
           spawnWorkId: workId,
         },
@@ -7723,7 +7868,7 @@ describe("startConfiguredTriggers", () => {
                       ...f.config.projects.api.triggers["pick-up"],
                       spawn: {
                         ...f.config.projects.api.triggers["pick-up"].spawn,
-                        autoComplete: true,
+                        autoClose: true,
                       },
                     },
                   },
@@ -7746,7 +7891,7 @@ describe("startConfiguredTriggers", () => {
               f.dataDir,
               "api",
               "pr-watch",
-              { ...current, title: "New controller title", autoComplete: true },
+              { ...current, title: "New controller title", autoClose: true },
               (members) =>
                 members.map((member) =>
                   (change === "partial plan" && member.blockIndex === 1) ||
@@ -7785,7 +7930,7 @@ describe("startConfiguredTriggers", () => {
             .get(WORK_ITEM_BASE.externalId);
           if (!before) throw new Error("Missing continuation baseline");
           if (change !== "current")
-            expect(before).toMatchObject({ title: "New controller title", autoComplete: true });
+            expect(before).toMatchObject({ title: "New controller title", autoClose: true });
           expect(
             before.members.find((member) => member.blockIndex === 1)?.claimedAt === claimA,
           ).toBe(change !== "newer claim" && change !== "partial plan");
@@ -7857,7 +8002,7 @@ describe("startConfiguredTriggers", () => {
                 ...f.config.projects.api.triggers["pick-up"],
                 spawn: {
                   blocks: [{ prompt: "anchor" }, { prompt: "follower" }],
-                  autoComplete: false,
+                  autoClose: false,
                 },
               },
             },
@@ -7902,7 +8047,7 @@ describe("startConfiguredTriggers", () => {
               triggers: {
                 "pick-up": {
                   ...config.projects.api.triggers["pick-up"],
-                  spawn: { ...config.projects.api.triggers["pick-up"].spawn, autoComplete: true },
+                  spawn: { ...config.projects.api.triggers["pick-up"].spawn, autoClose: true },
                 },
               },
             },
@@ -7931,7 +8076,7 @@ describe("startConfiguredTriggers", () => {
         const before = f.actual
           .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
           .get(WORK_ITEM_BASE.externalId);
-        expect(before).toMatchObject({ title: "New controller title", autoComplete: true });
+        expect(before).toMatchObject({ title: "New controller title", autoClose: true });
         expect(before?.members.find((member) => member.blockIndex === 1)?.claimedAt).not.toBe(
           claimA,
         );
@@ -8244,7 +8389,7 @@ describe("startConfiguredTriggers", () => {
             {
               ...WORK_ITEM_BASE,
               createdAt: new Date().toISOString(),
-              autoComplete: false,
+              autoClose: false,
             },
             () => [
               workItemMember({
@@ -8271,7 +8416,7 @@ describe("startConfiguredTriggers", () => {
           const member = () =>
             actual.readWorkItemLifecycles(dataDir, "api", "pr-watch").get(WORK_ITEM_BASE.externalId)
               ?.members[0];
-          const base = workItemSpawnConfig({ autoComplete: false });
+          const base = workItemSpawnConfig({ autoClose: false });
           const firstConfig = {
             ...base,
             projects: {
@@ -8368,10 +8513,9 @@ describe("startConfiguredTriggers", () => {
           claims.push(memberOf(records)?.previousTriggerIds);
           throw new Error("unit launch failure");
         });
-        const { bus, controller } = await startTriggers(
-          workItemSpawnConfig({ autoComplete: false }),
-          { spawn },
-        );
+        const { bus, controller } = await startTriggers(workItemSpawnConfig({ autoClose: false }), {
+          spawn,
+        });
         try {
           bus.emit(workItemEvent());
           await vi.waitFor(() => expect(claims).toHaveLength(1));
@@ -8414,7 +8558,7 @@ describe("startConfiguredTriggers", () => {
             {
               ...WORK_ITEM_BASE,
               createdAt: new Date().toISOString(),
-              autoComplete: false,
+              autoClose: false,
             },
             () => [previous, sibling],
           );
@@ -8443,7 +8587,7 @@ describe("startConfiguredTriggers", () => {
             .mockImplementation(async (id: string) => ({ id, ...WORKING }));
           const spawn = vi.fn();
           const { bus, controller } = await startTriggers(
-            workItemSpawnConfig({ autoComplete: false }),
+            workItemSpawnConfig({ autoClose: false }),
             { get, spawn },
           );
           try {
@@ -8486,14 +8630,14 @@ describe("startConfiguredTriggers", () => {
             attempts: 3,
           });
           const records = useWorkItemLifecycleStore([
-            workItemLifecycle([owner], { autoComplete: false }),
+            workItemLifecycle([owner], { autoClose: false }),
           ]);
           const get = vi.fn().mockResolvedValue({ id: "api-native", ...WORKING });
           if (branch === "owner load error")
             get.mockRejectedValue(new Error("unit transient owner lookup"));
           const spawn = vi.fn();
           const { bus, controller } = await startTriggers(
-            workItemSpawnConfig({ autoComplete: false }),
+            workItemSpawnConfig({ autoClose: false }),
             { get, spawn },
           );
           try {
@@ -8660,13 +8804,10 @@ describe("startConfiguredTriggers", () => {
         return { id: "api-9", ...WORKING };
       });
       const spawnMock = vi.fn();
-      const { bus, controller } = await startTriggers(
-        workItemSpawnConfig({ autoComplete: false }),
-        {
-          spawn: spawnMock,
-          get: getMock,
-        },
-      );
+      const { bus, controller } = await startTriggers(workItemSpawnConfig({ autoClose: false }), {
+        spawn: spawnMock,
+        get: getMock,
+      });
 
       try {
         bus.emit(workItemEvent());
@@ -8732,7 +8873,7 @@ describe("startConfiguredTriggers", () => {
           dataDir,
           "api",
           "pr-watch",
-          { ...WORK_ITEM_BASE, url, createdAt, autoComplete: false },
+          { ...WORK_ITEM_BASE, url, createdAt, autoClose: false },
           () => [
             {
               blockIndex: 0,
@@ -9214,7 +9355,7 @@ describe("startConfiguredTriggers", () => {
           workItemMember({ triggerId: "second", sessionId: "api-5" }),
         ]),
       ]);
-      const base = workItemSpawnConfig({ autoComplete: false });
+      const base = workItemSpawnConfig({ autoClose: false });
       const config = {
         ...base,
         projects: {
@@ -9574,6 +9715,69 @@ describe("startConfiguredTriggers", () => {
       expect(classifyWorkItemOwner(session as never)).toBe(expected);
     });
   });
+  it.each([
+    { configured: true, retainedPolicy: true, native: "waiting", ageMs: 6 * 60_000, closes: 1 },
+    { configured: false, retainedPolicy: true, native: "waiting", ageMs: 6 * 60_000, closes: 0 },
+    { configured: "absent", retainedPolicy: true, native: "waiting", ageMs: 6 * 60_000, closes: 0 },
+    { configured: true, retainedPolicy: false, native: "waiting", ageMs: 6 * 60_000, closes: 0 },
+    { configured: true, retainedPolicy: true, native: "working", ageMs: 6 * 60_000, closes: 0 },
+    { configured: true, retainedPolicy: true, native: "waiting", ageMs: 10_000, closes: 0 },
+  ] as const)(
+    "applies opt-in auto-completion to projected task status: config=$configured retained=$retainedPolicy native=$native age=$ageMs",
+    async ({ configured, retainedPolicy, native, ageMs, closes }) => {
+      let status: SessionRecord["status"] = "running";
+      const declaration = {
+        agentLaunchId: "launch-a",
+        taskStatusRevision: 0,
+        taskStatus: {
+          state: "completed" as const,
+          revision: 0,
+          agentLaunchId: "launch-a",
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      const get = vi.fn(async () => ({
+        id: "api-9",
+        status,
+        state: projectTaskStatus({ ...declaration, status }, native, native, true, true),
+        runtimeAlive: true,
+        workspaceExists: true,
+      }));
+      const complete = vi.fn(async () => {
+        status = "completed";
+      });
+      const records = useWorkItemLifecycleStore([
+        runningWorkItemLifecycle({
+          autoClose: retainedPolicy,
+          createdAt: new Date(Date.now() - ageMs).toISOString(),
+        }),
+      ]);
+      const triggerConfig = workItemSpawnConfig({ autoClose: configured === true });
+      if (configured === "absent") {
+        Reflect.deleteProperty(triggerConfig.projects.api.triggers["pick-up"].spawn, "autoClose");
+      }
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const controller = startConfiguredTriggers({
+        config: triggerConfig as never,
+        bus: new EventBus(),
+        sessionService: { get, complete } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(1);
+        expect(complete).toHaveBeenCalledTimes(closes);
+        expect(records.get("acme/api#42")?.state).toBe(closes ? "completed" : "running");
+        if (closes) expect(complete).toHaveBeenCalledWith("api-9", { prAction: "leave_open" });
+        controller.nudgeSession("api-9");
+        controller.nudgeSession("api-9");
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(complete).toHaveBeenCalledTimes(closes);
+        expect(status).toBe(closes ? "completed" : "running");
+      } finally {
+        await controller.stop();
+      }
+    },
+  );
 
   it("auto-completes a waiting work-item session after the minimum age", async () => {
     const getMock = vi.fn().mockResolvedValue({
@@ -9675,7 +9879,7 @@ describe("startConfiguredTriggers", () => {
       const configDir = mkdtempSync(join(tmpdir(), "spur-auto-complete-config-"));
       const configPath = join(configDir, "spur.yaml");
       const { loadConfig } = await import("../../src/config.js");
-      const raw = workItemSpawnConfig({ autoComplete: false });
+      const raw = workItemSpawnConfig({ autoClose: false });
       const project = raw.projects.api;
       const spawn: { blocks: { prompt: string }[]; autoComplete?: boolean } = {
         blocks: [{ prompt: "owner" }, { prompt: "peer" }],
@@ -9705,7 +9909,7 @@ describe("startConfiguredTriggers", () => {
             workItemMember(),
             workItemMember({ blockIndex: 1, sessionId: "api-peer", claimedAt: sibling.claimedAt }),
           ],
-          { autoComplete: false },
+          { autoClose: false },
         ),
       ]);
       let controller: TriggerGroupController | undefined;
@@ -9732,7 +9936,7 @@ describe("startConfiguredTriggers", () => {
         bus.emit(workItemEvent());
         await vi.waitFor(() => {
           expect(records.get("acme/api#42")).toMatchObject({
-            autoComplete: true,
+            autoClose: true,
             members: [
               expect.objectContaining({ sessionId: "api-9" }),
               expect.objectContaining({ sessionId: "api-peer" }),
@@ -9946,7 +10150,7 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("logs spawn.failed when autoComplete=true is configured on a non-work-item event", async () => {
+  it("logs spawn.failed when autoClose=true is configured on a non-work-item event", async () => {
     const spawnMock = vi.fn();
     const cronAutoCompleteConfig = {
       dataDir: "/tmp/spur-data",
@@ -9965,7 +10169,7 @@ describe("startConfiguredTriggers", () => {
                     prompt: "ship the task",
                   },
                 ],
-                autoComplete: true,
+                autoClose: true,
               },
             },
           },

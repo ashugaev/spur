@@ -73,6 +73,7 @@ interface TriggerLogger {
 
 export interface TriggerGroupController {
   stop(): Promise<void>;
+  nudgeSession(sessionId: string): void;
 }
 
 interface StartConfiguredTriggersDeps {
@@ -88,6 +89,9 @@ interface StartConfiguredTriggersDeps {
   // dozens of fixtures build `sessionService` as `as never` and would pass
   // typecheck while throwing "is not a function" at runtime.
   memoryHoldEngaged?: () => boolean;
+  // Owner notice for a dropped send trigger; same optional-dep shape as
+  // `memoryHoldEngaged`, default no-op.
+  noticeBlockedTrigger?: (sessionId: string, triggerId: string) => void;
 }
 
 interface PendingBatch {
@@ -267,7 +271,7 @@ interface WorkItemClaimContext {
   sourceId: string;
   triggerId: string;
   workItem: WorkItemEventData;
-  autoComplete: boolean;
+  autoClose: boolean;
   // Every spawn trigger configured for this source; a member whose trigger is
   // not among them belongs to a renamed or removed trigger.
   sourceSpawnTriggerIds: ReadonlySet<string>;
@@ -292,7 +296,7 @@ interface WorkItemClaim {
 }
 
 function workItemRecordBase(ctx: WorkItemClaimContext): WorkItemRecordBase {
-  return { ...ctx.workItem, autoComplete: ctx.autoComplete, createdAt: new Date().toISOString() };
+  return { ...ctx.workItem, autoClose: ctx.autoClose, createdAt: new Date().toISOString() };
 }
 
 function isOwnMember(ctx: WorkItemClaimContext, member: WorkItemMember, blockIndex: number) {
@@ -1326,7 +1330,7 @@ async function runSpawnTrigger(
   sourceId: string,
   eventName: string,
   blocks: TriggerSpawnBlockConfig[],
-  autoComplete: boolean | undefined,
+  autoClose: boolean | undefined,
   restrictWrites: boolean | undefined,
   allowedTriggers: string[] | undefined,
   deskGroup: boolean | undefined,
@@ -1367,7 +1371,7 @@ async function runSpawnTrigger(
         sourceId,
         triggerId,
         workItem: workItemData,
-        autoComplete: autoComplete === true,
+        autoClose: autoClose === true,
         sourceSpawnTriggerIds,
         fencedBlocks,
         controllerCurrent,
@@ -1375,7 +1379,7 @@ async function runSpawnTrigger(
     : null;
 
   try {
-    if (autoComplete && !workItemData) {
+    if (autoClose && !workItemData) {
       throw new Error(`Cannot auto-complete ${eventName}: incompatible work-item payload`);
     }
     let planned: PlannedSpawnBlock[] = blocks.map((block, blockIndex) => ({
@@ -1689,7 +1693,7 @@ function markWorkItemOwnerCompleted(
   );
 }
 
-async function runWorkItemAutoCompleteTrigger(
+async function runWorkItemAutoCloseTrigger(
   dataDir: string,
   service: SessionService,
   projectId: string,
@@ -1701,7 +1705,7 @@ async function runWorkItemAutoCompleteTrigger(
   const now = Date.now();
 
   for (const lifecycle of lifecycles.values()) {
-    if (lifecycle.state !== "running" || !lifecycle.autoComplete) {
+    if (lifecycle.state !== "running" || !lifecycle.autoClose) {
       continue;
     }
     // Age counts from the owner's spawn result; legacy members have none.
@@ -1746,7 +1750,10 @@ async function runWorkItemAutoCompleteTrigger(
         });
         continue;
       }
-      if (session.status !== "running" || session.state !== "waiting") {
+      if (
+        session.status !== "running" ||
+        (session.state !== "waiting" && session.state !== "completed")
+      ) {
         continue;
       }
 
@@ -1825,7 +1832,8 @@ function sendWindowMs(batch: SendBatch): number {
 function isDeliverableState(session: SessionView, windowMs: number): boolean {
   return (
     session.state === "stale" ||
-    (session.state === "waiting" && isIdleEnoughToReceive(session.lastActivityAt, windowMs))
+    ((session.state === "waiting" || session.state === "completed") &&
+      isIdleEnoughToReceive(session.lastActivityAt, windowMs))
   );
 }
 
@@ -2007,6 +2015,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const logger = deps.logger ?? DEFAULT_TRIGGER_LOGGER;
   const autoPing = deps.autoPing;
   const memoryHoldEngaged = deps.memoryHoldEngaged ?? (() => false);
+  const noticeBlockedTrigger = deps.noticeBlockedTrigger ?? (() => {});
   const unsubscribers: Array<() => void> = [];
   const inFlight = new Set<Promise<void>>();
   const pendingBatches = new Map<string, PendingBatch>();
@@ -2021,9 +2030,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const tickFlushQueued = new Set<string>();
   const routeLeases = new Map<string, string>();
   const loggedSuppressions = new Map<string, Set<string>>();
-  const autoCompleteChecks: Array<() => void> = [];
+  const autoCloseChecks: Array<() => void> = [];
   let flushTimer: NodeJS.Timeout | null = null;
-  let autoCompleteTimer: NodeJS.Timeout | null = null;
+  let autoCloseTimer: NodeJS.Timeout | null = null;
   let stopped = false;
   const interactiveFlushTimers = new Set<NodeJS.Timeout>();
 
@@ -2757,7 +2766,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       work.sourceId,
       work.eventName,
       trigger.spawn.blocks,
-      trigger.spawn.autoComplete,
+      trigger.spawn.autoClose,
       trigger.spawn.restrictWrites,
       trigger.spawn.allowedTriggers,
       trigger.spawnDeskGroup,
@@ -2830,6 +2839,27 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
   };
 
+  const dropNotAllowed = (
+    queueKey: string,
+    batch: PendingBatch,
+    session: SessionView,
+    ids: { sessionId: string; projectId: string; sourceId: string; triggerId: string },
+  ): void => {
+    clearBatch(queueKey, batch);
+    logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+      level: "warn",
+      ...ids,
+      message: `Dropped queued trigger update for ${ids.sessionId}: trigger ${ids.triggerId} is not allowed`,
+      details: {
+        reason: "trigger_not_allowed",
+      },
+    });
+    logger.warn(
+      `[trigger:${ids.projectId}/${ids.triggerId}] dropped queued update: trigger not allowed for ${ids.sessionId}`,
+    );
+    if (session.closeoutOwner === true) noticeBlockedTrigger(ids.sessionId, ids.triggerId);
+  };
+
   const flushPending = async (queueKey: string, batch: PendingBatch): Promise<void> => {
     if (!pendingBatches.has(queueKey)) return;
 
@@ -2869,21 +2899,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
 
     if (!isSendTriggerAllowed(session, batch.triggerId)) {
-      clearBatch(queueKey, batch);
-      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
-        level: "warn",
+      dropNotAllowed(queueKey, batch, session, {
         sessionId: batch.batch.sessionId,
         projectId: batch.projectId,
         sourceId: batch.sourceId,
         triggerId: batch.triggerId,
-        message: `Dropped queued trigger update for ${batch.batch.sessionId}: trigger ${batch.triggerId} is not allowed`,
-        details: {
-          reason: "trigger_not_allowed",
-        },
       });
-      logger.warn(
-        `[trigger:${batch.projectId}/${batch.triggerId}] dropped queued update: trigger not allowed for ${batch.batch.sessionId}`,
-      );
       return;
     }
 
@@ -3095,21 +3116,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
 
     if (!isSendTriggerAllowed(session, triggerId)) {
-      clearBatch(queueKey, batch);
-      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
-        level: "warn",
+      dropNotAllowed(queueKey, batch, session, {
         sessionId: sendBatch.sessionId,
         projectId,
         sourceId: trigger.source,
         triggerId,
-        message: `Dropped queued trigger update for ${sendBatch.sessionId}: trigger ${triggerId} is not allowed`,
-        details: {
-          reason: "trigger_not_allowed",
-        },
       });
-      logger.warn(
-        `[trigger:${projectId}/${triggerId}] dropped queued update: trigger not allowed for ${sendBatch.sessionId}`,
-      );
       return;
     }
 
@@ -3341,7 +3353,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               event.sourceId,
               event.name,
               trigger.spawn.blocks,
-              trigger.spawn.autoComplete,
+              trigger.spawn.autoClose,
               trigger.spawn.restrictWrites,
               trigger.spawn.allowedTriggers,
               trigger.spawnDeskGroup,
@@ -3385,11 +3397,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
       unsubscribers.push(unsubscribe);
 
-      if (!isSendTrigger(trigger) && trigger.spawn.autoComplete === true) {
-        autoCompleteChecks.push(() => {
+      if (!isSendTrigger(trigger) && trigger.spawn.autoClose === true) {
+        autoCloseChecks.push(() => {
           const queueKey = `${projectId}:${triggerId}:${trigger.source}:work-item-auto-complete`;
           enqueue(queueKey, async () => {
-            await runWorkItemAutoCompleteTrigger(
+            await runWorkItemAutoCloseTrigger(
               deps.config.dataDir,
               deps.sessionService,
               projectId,
@@ -3403,19 +3415,26 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
   }
 
-  if (autoCompleteChecks.length > 0) {
-    for (const check of autoCompleteChecks) {
+  if (autoCloseChecks.length > 0) {
+    for (const check of autoCloseChecks) {
       check();
     }
-    autoCompleteTimer = setInterval(() => {
+    autoCloseTimer = setInterval(() => {
       if (stopped) return;
-      for (const check of autoCompleteChecks) {
+      for (const check of autoCloseChecks) {
         check();
       }
     }, WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS);
   }
 
   return {
+    nudgeSession(sessionId: string): void {
+      if (stopped) return;
+      for (const [queueKey, batch] of pendingBatches) {
+        if (batch.batch.sessionId === sessionId)
+          enqueue(queueKey, () => flushPending(queueKey, batch));
+      }
+    },
     async stop(): Promise<void> {
       stopped = true;
       for (const [queueKey, batch] of pendingBatches) {
@@ -3437,9 +3456,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       }
       for (const timer of interactiveFlushTimers) clearTimeout(timer);
       interactiveFlushTimers.clear();
-      if (autoCompleteTimer) {
-        clearInterval(autoCompleteTimer);
-        autoCompleteTimer = null;
+      if (autoCloseTimer) {
+        clearInterval(autoCloseTimer);
+        autoCloseTimer = null;
       }
       for (let index = unsubscribers.length - 1; index >= 0; index -= 1) {
         try {

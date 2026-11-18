@@ -81,3 +81,7 @@ docs/context-engineering-backlog.md
 
 # playwright-cli scratch output (QA sessions write it into the worktree)
 .playwright-cli/
+
+# Bundled managed-auth executables, produced from companion/auth-proxy.
+v2/bin/auth-proxy/
+v2/licenses/auth-proxy/

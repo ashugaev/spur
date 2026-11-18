@@ -165,4 +165,33 @@ describe("user-action logging (server)", () => {
       await stop();
     }
   });
+
+  it("does not log a handoff request carrying a caller session", async () => {
+    const { port, dataDir, stop } = await bootServer();
+    const url = `http://127.0.0.1:${port}/sessions/demo-1/handoff`;
+    try {
+      const agent = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-spur-origin": "cli",
+          "x-spur-caller-session": "demo-1",
+        },
+        body: JSON.stringify({ agent: "codex" }),
+      });
+      expect(agent.ok).toBe(false);
+      expect(readUserActionLog(dataDir)).toHaveLength(0);
+      const human = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-spur-origin": "cli" },
+        body: JSON.stringify({ agent: "codex" }),
+      });
+      expect(human.status).toBeGreaterThanOrEqual(400);
+    } finally {
+      await stop();
+    }
+    expect(readUserActionLog(dataDir)).toMatchObject([
+      { action: "session.handoff", actor: "user" },
+    ]);
+  });
 });

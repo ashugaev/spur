@@ -28,9 +28,17 @@ import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import type * as agentsIndexModule from "../../src/agents/index.js";
 import type * as claudeModule from "../../src/agents/claude.js";
 import type * as codexModule from "../../src/agents/codex.js";
+import type * as authAccountsModule from "../../src/auth-accounts.js";
+import type { AuthAccountsState } from "../../src/auth-accounts.js";
+import type { AuthRegistration, AuthRotation } from "../../src/auth-proxy.js";
 import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
+import type * as metadataModule from "../../src/metadata.js";
+let actualMetadataModule: typeof metadataModule;
+export function sessionMetadataModule(): typeof metadataModule {
+  return actualMetadataModule;
+}
 import type * as sessionPrModule from "../../src/session-pr.js";
 import type * as releasesCacheModule from "../../src/releases-cache.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
@@ -322,6 +330,8 @@ const hasUncommittedChangesMock: Mock = vi.fn();
 const isGitWorktreeMock: Mock = vi.fn();
 const hasUnpushedCommitsMock: Mock = vi.fn();
 const readCurrentBranchMock: Mock = vi.fn();
+const readWorktreeHeadMock: Mock = vi.fn();
+const countCommitsSinceMock: Mock = vi.fn();
 const readBranchDestinationMock: Mock = vi.fn();
 const readRemoteUrlsMock: Mock = vi.fn();
 const removeWorktreeMock: Mock = vi.fn();
@@ -378,6 +388,23 @@ const touchAccountUsedMock: Mock = vi.fn();
 const ensureDefaultAccountMock: Mock = vi.fn();
 const seedSessionHomeMock: Mock = vi.fn();
 const swapSessionCredentialsMock: Mock = vi.fn();
+const authAccountsReadMock: Mock = vi.fn();
+const authAccountsRemoveMock: Mock = vi.fn();
+const authAccountsRecordIdentitiesMock: Mock = vi.fn();
+const authProxyConfigureMock: Mock = vi.fn();
+const authProxyGetStateMock: Mock = vi.fn();
+const authProxyGetUsageMock: Mock = vi.fn();
+const authProxySetApiKeyMock: Mock = vi.fn();
+const authProxyRegisterSessionMock: Mock = vi.fn();
+const authProxySwitchSessionMock: Mock = vi.fn();
+const authProxyRevokeSessionMock: Mock = vi.fn();
+const authProxyRecoverMock: Mock = vi.fn();
+const authProxyDisposeMock: Mock = vi.fn();
+const authProxyLoginMock: Mock = vi.fn();
+const authProxyLoginStatusMock: Mock = vi.fn();
+const authProxyCancelLoginMock: Mock = vi.fn();
+const authProxyRemoveAccountMock: Mock = vi.fn();
+const authProxyRotationHandler: { current?: (rotation: AuthRotation) => void } = {};
 
 interface TestAccount {
   id: string;
@@ -409,6 +436,65 @@ function resetAccountStoreMocks(accounts: () => TestAccount[]): void {
   ensureDefaultAccountMock.mockReset();
   seedSessionHomeMock.mockReset();
   swapSessionCredentialsMock.mockReset();
+  authAccountsReadMock.mockReset().mockImplementation(
+    (): AuthAccountsState => ({
+      schema: 1,
+      accounts: accounts().map(({ id, createdAt }) => ({ id, provider: "claude", createdAt })),
+      pools: accounts().length
+        ? {
+            claude: {
+              defaultAccountId: accounts()[0]!.id,
+              defaultGeneration: 0,
+              autoRotate: false,
+            },
+          }
+        : {},
+    }),
+  );
+  authAccountsRemoveMock.mockReset();
+  authAccountsRecordIdentitiesMock.mockReset();
+  authProxyConfigureMock.mockReset().mockResolvedValue(undefined);
+  authProxyGetUsageMock.mockReset().mockResolvedValue([]);
+  authProxySetApiKeyMock.mockReset();
+  authProxyGetStateMock.mockReset().mockImplementation(async () => ({
+    accounts: accounts().map(({ id, authenticated }) => ({
+      id,
+      provider: "claude",
+      status: authenticated ? "ready" : "sign-in-required",
+    })),
+    sessions: [],
+  }));
+  authProxyRegisterSessionMock.mockReset().mockImplementation(
+    async (input: {
+      sessionId: string;
+      provider: "claude" | "codex";
+      accountId: string | null;
+    }): Promise<AuthRegistration> => ({
+      ...input,
+      mode: input.accountId === null ? "auto" : "pinned",
+      effectiveAccountId: input.accountId ?? "default-profile",
+      generation: 1,
+      endpoint: "http://127.0.0.1:9999",
+      token: "fixture-routing-key",
+    }),
+  );
+  authProxySwitchSessionMock.mockReset();
+  authProxyRevokeSessionMock.mockReset().mockResolvedValue(undefined);
+  authProxyRecoverMock.mockReset().mockResolvedValue(undefined);
+  authProxyDisposeMock.mockReset();
+  authProxyLoginMock
+    .mockReset()
+    .mockImplementation(async (accountId: string) => ({ accountId, status: "pending" }));
+  authProxyLoginStatusMock.mockReset().mockImplementation(async (accountId: string) => ({
+    accountId,
+    status: accounts().find((account) => account.id === accountId)?.authenticated
+      ? "ready"
+      : "sign-in-required",
+  }));
+  authProxyCancelLoginMock
+    .mockReset()
+    .mockImplementation(async (accountId: string) => ({ accountId, status: "sign-in-required" }));
+  authProxyRemoveAccountMock.mockReset().mockResolvedValue(undefined);
 }
 const readCursorJsonlStateMock: Mock = vi.fn();
 const readCursorTokenUsageMock: Mock = vi.fn();
@@ -416,6 +502,7 @@ const configureCursorTurnEndedStoreMock: Mock = vi.fn();
 const sendDesktopNotificationMock: Mock = vi.fn();
 const findLatestClaudeSessionFileMock: Mock = vi.fn();
 const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDir}/codex-home`);
+const readCodexUserConfigMock: Mock = vi.fn();
 const captureCodexRolloutBaselineMock: Mock = vi.fn();
 const findLatestCodexSessionFileMock: Mock = vi.fn();
 const readCodexRolloutStateMock: Mock = vi.fn();
@@ -425,6 +512,8 @@ const ghMock: Mock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
 const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
 let TEST_DATA_DIR = resolve(`/tmp/spur-session-service-test-${process.pid}`);
+let TEST_HOME = join(TEST_DATA_DIR, "home");
+let hostHome: string | undefined;
 
 const writeTelegramOfferMock: Mock = vi.fn();
 const readInterfaceConsentMock: Mock = vi.fn();
@@ -522,7 +611,47 @@ vi.mock("../../src/claude-accounts.js", () => ({
   ensureDefaultAccount: ensureDefaultAccountMock,
   seedSessionHome: seedSessionHomeMock,
   swapSessionCredentials: swapSessionCredentialsMock,
+  ensureAccountProjectsLink: vi.fn(),
   sessionClaudeHome: (sessionToolDir: string) => `${sessionToolDir}/claude-home`,
+}));
+
+vi.mock("../../src/auth-accounts.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof authAccountsModule>()),
+  AuthAccounts: class {
+    read = authAccountsReadMock;
+    remove = authAccountsRemoveMock;
+    add = vi.fn();
+    recordIdentities = authAccountsRecordIdentitiesMock;
+    updatePool = vi.fn();
+  },
+}));
+
+vi.mock("../../src/auth-proxy.js", () => ({
+  authProxyBinaryPath: () => "/fixture/auth-proxy",
+  AuthProxy: class {
+    constructor(
+      _dataDir: string,
+      _configuration: unknown,
+      _binaryPath: unknown,
+      onRotated: (rotation: AuthRotation) => void,
+    ) {
+      authProxyRotationHandler.current = onRotated;
+    }
+    configure = authProxyConfigureMock;
+    getState = authProxyGetStateMock;
+    getUsage = authProxyGetUsageMock;
+    setApiKey = authProxySetApiKeyMock;
+    registerSession = authProxyRegisterSessionMock;
+    switchSession = authProxySwitchSessionMock;
+    revokeSession = authProxyRevokeSessionMock;
+    recover = authProxyRecoverMock;
+    dispose = authProxyDisposeMock;
+    login = authProxyLoginMock;
+    loginInput = vi.fn();
+    loginStatus = authProxyLoginStatusMock;
+    cancelLogin = authProxyCancelLoginMock;
+    removeAccount = authProxyRemoveAccountMock;
+  },
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
@@ -694,48 +823,71 @@ vi.mock("../../src/ids.js", () => ({
   reserveNextSessionId: reserveNextSessionIdMock,
 }));
 
-vi.mock("../../src/metadata.js", () => ({
-  readInterfaceConsent: readInterfaceConsentMock,
-  writeInterfaceConsent: writeInterfaceConsentMock,
-  writeTelegramOffer: writeTelegramOfferMock,
-  retireTelegramLegacyState: vi.fn(),
-  telegramBindingKey: (chatId: number, messageThreadId?: number) =>
-    `${chatId}:${messageThreadId ?? "main"}`,
-  archiveSessions: archiveSessionsMock,
-  clearGitHubPollDisabledSession: clearGitHubPollDisabledSessionMock,
-  listGitHubPollDisabledSourceIds: (...args: unknown[]): string[] =>
-    (listGitHubPollDisabledSourceIdsMock(...args) as string[] | undefined) ?? [],
-  deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
-  deleteServiceInstance: deleteServiceInstanceMock,
-  deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
-  deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
-  deleteServiceSourceStatesForSession: deleteServiceSourceStatesForSessionMock,
-  deleteTelegramSourceStateForSession: deleteTelegramSourceStateForSessionMock,
-  deleteTelegramReplyTarget: deleteTelegramReplyTargetMock,
-  hasPendingTelegramSend: hasPendingTelegramSendMock,
-  pendingTriggerSendWorkIds: pendingTriggerSendWorkIdsMock,
-  listActiveServiceProblems: listActiveServiceProblemsMock,
-  listServiceInstances: listServiceInstancesMock,
-  listServiceInstancesForSession: listServiceInstancesForSessionMock,
-  listSessions: listSessionsMock,
-  readAvailableBacklogItems: readAvailableBacklogItemsMock,
-  readServiceInstance: readServiceInstanceMock,
-  readSession: readSessionMock,
-  readTelegramBindings: readTelegramBindingsMock,
-  readTelegramReplyTarget: readTelegramReplyTargetMock,
-  readArchivedSession: readArchivedSessionMock,
-  listTelegramTopicSessionIds: listTelegramTopicSessionIdsMock,
-  readTelegramTopicGcClock: readTelegramTopicGcClockMock,
-  writeTelegramTopicGcClock: writeTelegramTopicGcClockMock,
-  readTelegramTopicGcFailures: readTelegramTopicGcFailuresMock,
-  writeTelegramTopicGcFailures: writeTelegramTopicGcFailuresMock,
-  recordTelegramMessages: recordTelegramMessagesMock,
-  requestGitHubMergeConflictRestoreReplay: requestGitHubMergeConflictRestoreReplayMock,
-  writeTelegramBindings: writeTelegramBindingsMock,
-  writeTelegramReplyTarget: writeTelegramReplyTargetMock,
-  writeServiceInstance: writeServiceInstanceMock,
-  writeSession: writeSessionMock,
-}));
+// Real trigger-store and snapshot functions ride along for tests that run the
+// real triggers.ts against this service; session-service.ts uses none of them.
+vi.mock("../../src/metadata.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof metadataModule>();
+  actualMetadataModule = actual;
+  return {
+    observeSessionWrites: actual.observeSessionWrites,
+    withSessionWriteGuard: actual.withSessionWriteGuard,
+    deletePendingSendBatch: actual.deletePendingSendBatch,
+    deletePendingSendBatchConditional: actual.deletePendingSendBatchConditional,
+    deletePendingSpawnWork: actual.deletePendingSpawnWork,
+    deleteWorkItemLifecycle: actual.deleteWorkItemLifecycle,
+    readGitHubSourceSnapshot: actual.readGitHubSourceSnapshot,
+    readPendingSendBatch: actual.readPendingSendBatch,
+    readPendingSendBatches: actual.readPendingSendBatches,
+    readPendingSpawnWork: actual.readPendingSpawnWork,
+    readReviewSourceSnapshot: actual.readReviewSourceSnapshot,
+    readWorkItemLifecycles: actual.readWorkItemLifecycles,
+    recordPendingSendBatch: actual.recordPendingSendBatch,
+    recordWorkItemLifecycle: actual.recordWorkItemLifecycle,
+    updatePendingSendBatchConditional: actual.updatePendingSendBatchConditional,
+    writePendingSpawnWork: actual.writePendingSpawnWork,
+    readInterfaceConsent: readInterfaceConsentMock,
+    writeInterfaceConsent: writeInterfaceConsentMock,
+    writeTelegramOffer: writeTelegramOfferMock,
+    retireTelegramLegacyState: vi.fn(),
+    telegramBindingKey: (chatId: number, messageThreadId?: number) =>
+      `${chatId}:${messageThreadId ?? "main"}`,
+    archiveSessions: archiveSessionsMock,
+    clearGitHubPollDisabledSession: clearGitHubPollDisabledSessionMock,
+    listGitHubPollDisabledSourceIds: (...args: unknown[]): string[] =>
+      (listGitHubPollDisabledSourceIdsMock(...args) as string[] | undefined) ?? [],
+    deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
+    deleteServiceInstance: deleteServiceInstanceMock,
+    deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
+    deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
+    deleteServiceSourceStatesForSession: deleteServiceSourceStatesForSessionMock,
+    deleteTelegramSourceStateForSession: deleteTelegramSourceStateForSessionMock,
+    deleteTelegramReplyTarget: deleteTelegramReplyTargetMock,
+    hasPendingTelegramSend: hasPendingTelegramSendMock,
+    pendingTriggerSendWorkIds: pendingTriggerSendWorkIdsMock,
+    listActiveServiceProblems: listActiveServiceProblemsMock,
+    listServiceInstances: listServiceInstancesMock,
+    listServiceInstancesForSession: listServiceInstancesForSessionMock,
+    listSessions: listSessionsMock,
+    listArchivedSessions: actual.listArchivedSessions,
+    readAvailableBacklogItems: readAvailableBacklogItemsMock,
+    readServiceInstance: readServiceInstanceMock,
+    readSession: readSessionMock,
+    readTelegramBindings: readTelegramBindingsMock,
+    readTelegramReplyTarget: readTelegramReplyTargetMock,
+    readArchivedSession: readArchivedSessionMock,
+    listTelegramTopicSessionIds: listTelegramTopicSessionIdsMock,
+    readTelegramTopicGcClock: readTelegramTopicGcClockMock,
+    writeTelegramTopicGcClock: writeTelegramTopicGcClockMock,
+    readTelegramTopicGcFailures: readTelegramTopicGcFailuresMock,
+    writeTelegramTopicGcFailures: writeTelegramTopicGcFailuresMock,
+    recordTelegramMessages: recordTelegramMessagesMock,
+    requestGitHubMergeConflictRestoreReplay: requestGitHubMergeConflictRestoreReplayMock,
+    writeTelegramBindings: writeTelegramBindingsMock,
+    writeTelegramReplyTarget: writeTelegramReplyTargetMock,
+    writeServiceInstance: writeServiceInstanceMock,
+    writeSession: writeSessionMock,
+  };
+});
 
 vi.mock("../../src/review-interface-consent.js", async (importOriginal) => ({
   ...(await importOriginal<typeof interfaceConsentModule>()),
@@ -768,6 +920,7 @@ vi.mock("../../src/agent-hook-state.js", () => ({
 vi.mock("../../src/agents/codex.js", async (importOriginal) => ({
   ...(await importOriginal<typeof codexModule>()),
   codexHookHomePath: codexHookHomePathMock,
+  readCodexUserConfig: readCodexUserConfigMock,
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
   readCodexRolloutState: readCodexRolloutStateMock,
@@ -946,6 +1099,10 @@ vi.mock("../../src/session-artifacts.js", () => ({
     mkdirSync(dir, { recursive: true });
     return dir;
   }),
+  SESSION_WORK_DIR: ".spur-work",
+  sessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) =>
+    artifactDirForSession(sessionId),
+  ),
   deleteSessionArtifactById: deleteSessionArtifactByIdMock,
   deleteSessionArtifactsExcept: deleteSessionArtifactsExceptMock,
   deleteSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
@@ -991,6 +1148,8 @@ vi.mock("../../src/workspace.js", () => ({
   isGitWorktree: isGitWorktreeMock,
   pruneRepoWorktrees: pruneRepoWorktreesMock,
   readCurrentBranch: readCurrentBranchMock,
+  readWorktreeHead: readWorktreeHeadMock,
+  countCommitsSince: countCommitsSinceMock,
   readBranchDestination: readBranchDestinationMock,
   readRemoteUrls: readRemoteUrlsMock,
   removeWorktree: removeWorktreeMock,
@@ -1268,6 +1427,7 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 type SessionServiceInternals = {
+  sendAuthChangePing(sessionId: string, key: string): Promise<void>;
   captureAgentSessionId(session: SessionRecord, timeoutMs: number): Promise<SessionRecord>;
   agentSessionIdPersistBackoffUntil: Map<string, number>;
   lastSuccessfulTodoNudgeAt: Map<string, number>;
@@ -1279,6 +1439,7 @@ type SessionServiceInternals = {
     windowMs: number,
   ): Promise<{ found: boolean; lastScannedFile: string | null }>;
   paneGenerationMatches(session: SessionRecord, expected: unknown): Promise<boolean>;
+  retainLaunchedError(session: SessionRecord, error: unknown): Promise<SessionRecord>;
   sendAgentMessage(
     session: {
       id: string;
@@ -1292,10 +1453,11 @@ type SessionServiceInternals = {
     options?: { interrupt?: boolean; freshLaunch?: boolean; interactive?: boolean },
   ): Promise<AgentSendOutcome>;
   writeAgentMessage: SessionServiceInternals["sendAgentMessage"];
-  scheduleTodoNudge(session: SessionRecord): void;
+  scheduleTodoNudge(session: SessionRecord, agentActivityAt: Date | null): void;
   waitForQueuedMessage(sessionId: string): Promise<string>;
   queuedDeliveryAckedAt: Map<string, number>;
   withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
+  withSessionLifecycleLocks<T>(sessionIds: readonly string[], task: () => Promise<T>): Promise<T>;
   enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
   classifySessionRecord(
     session: SessionRecord,
@@ -1323,7 +1485,10 @@ type SessionServiceInternals = {
     message: string,
     options: { entryPoint: "send" | "deliver" | "flush" },
   ): Promise<unknown>;
-  maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  maybeNudgeTodo(
+    session: SessionRecord,
+    options?: { detached?: boolean; agentActivityAt?: Date | null },
+  ): Promise<void>;
   enrichWithClassified(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
@@ -1353,6 +1518,7 @@ type SessionServiceInternals = {
   lastObservedRunStates: Map<string, SessionState>;
   todoNudgeDisabled: Map<string, { kind: "ledger_corrupt" | "target_gone"; reason: string }>;
   todoNudgeBackoff: Map<string, { failures: number; nextRetryAtMs: number }>;
+  snapshotCorruptLogged: Map<string, number>;
   scheduleHealedSidecarRestart(session: SessionRecord): void;
   sidecarHealTasks: Map<string, Promise<void>>;
   settleSubmitHold(
@@ -1382,6 +1548,11 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   // launch-command assertions. Same reason agents-claude.test.ts clears it.
   delete process.env["SPUR_CLAUDE_BIN"];
   TEST_DATA_DIR = mkdtempSync(join(tmpdir(), "spur-session-service-"));
+  // Managed Claude homes link from ~/.claude; never let a test reach the real host home.
+  hostHome ??= process.env["HOME"];
+  TEST_HOME = join(TEST_DATA_DIR, "home");
+  mkdirSync(TEST_HOME);
+  process.env["HOME"] = TEST_HOME;
   nextUuid = 1;
   vi.mocked(randomUUID).mockReset().mockImplementation(fixtureUuid);
   ({ normalizeSessionPrBinding } = await import("../../src/session-pr.js"));
@@ -1399,6 +1570,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   timerPromisesSleepMock.mockReset().mockImplementation((ms) => timersPromises.setTimeout(ms));
   rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
   resetAccountStoreMocks(accounts);
+  readCodexUserConfigMock.mockReset().mockResolvedValue("");
 
   upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
   addUnconfiguredProjectMock.mockReset().mockReturnValue([]);
@@ -1753,7 +1925,12 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   findForeignAgentProcessesForSessionMock.mockReset().mockResolvedValue({ status: "unavailable" });
   killTmuxSessionTreeMock.mockReset().mockResolvedValue(true);
   sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
-  sendInterruptKeysToTmuxMock.mockReset().mockResolvedValue(true);
+  sendInterruptKeysToTmuxMock
+    .mockReset()
+    .mockImplementation(async (_session, _agent, onInterrupt?: () => void) => {
+      onInterrupt?.();
+      return true;
+    });
   sendSensitiveMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
   sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
   sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);
@@ -1779,6 +1956,8 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   hasUnpushedCommitsMock.mockReset().mockResolvedValue(false);
   isGitWorktreeMock.mockReset().mockResolvedValue(true);
   readCurrentBranchMock.mockReset().mockResolvedValue("main");
+  readWorktreeHeadMock.mockReset().mockResolvedValue({ branch: null, headSha: null, dirty: null });
+  countCommitsSinceMock.mockReset().mockResolvedValue(null);
   readBranchDestinationMock
     .mockReset()
     .mockImplementation(async (_path: string, branch: string) => ({
@@ -1976,6 +2155,16 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   });
 }
 
+// Tests whose launch really writes under the slot tool dir (managed Claude home) must call this,
+// or they write to the host-shared /tmp/spur-tools, which another OS user may own.
+export function isolateSessionSlotTool(): void {
+  ensureSessionSlotToolMock.mockImplementation(({ sessionId }: { sessionId: string }) => {
+    const dir = join(TEST_DATA_DIR, "session-tools", sessionId);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  });
+}
+
 // afterEach body: drain and dispose every SessionService the test built.
 export async function disposeSessionServiceHarness(): Promise<void> {
   for (const service of activeSessionServices.splice(0)) {
@@ -1987,6 +2176,8 @@ export async function disposeSessionServiceHarness(): Promise<void> {
   vi.clearAllTimers();
   rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
   rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  if (hostHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = hostHome;
   vi.useRealTimers();
   vi.restoreAllMocks();
 }
@@ -2112,6 +2303,8 @@ export {
   isGitWorktreeMock,
   hasUnpushedCommitsMock,
   readCurrentBranchMock,
+  readWorktreeHeadMock,
+  countCommitsSinceMock,
   readBranchDestinationMock,
   removeWorktreeMock,
   pruneRepoWorktreesMock,
@@ -2154,6 +2347,23 @@ export {
   ensureDefaultAccountMock,
   seedSessionHomeMock,
   swapSessionCredentialsMock,
+  authAccountsReadMock,
+  authAccountsRemoveMock,
+  authProxyConfigureMock,
+  authAccountsRecordIdentitiesMock,
+  authProxyGetStateMock,
+  authProxyGetUsageMock,
+  authProxySetApiKeyMock,
+  authProxyRegisterSessionMock,
+  authProxySwitchSessionMock,
+  authProxyRevokeSessionMock,
+  authProxyRecoverMock,
+  authProxyDisposeMock,
+  authProxyLoginMock,
+  authProxyLoginStatusMock,
+  authProxyCancelLoginMock,
+  authProxyRemoveAccountMock,
+  authProxyRotationHandler,
   readCursorJsonlStateMock,
   readCursorTokenUsageMock,
   sendDesktopNotificationMock,
@@ -2165,6 +2375,7 @@ export {
   TEST_ARTIFACTS_ROOT,
   artifactDirForSession,
   TEST_DATA_DIR,
+  TEST_HOME,
   writeTelegramOfferMock,
   readInterfaceConsentMock,
   writeInterfaceConsentMock,
@@ -2202,6 +2413,7 @@ export {
   serviceKey,
   mockClaudeJsonlState,
   mockClaudeSessionStatus,
+  findLatestClaudeSessionFileMock,
   runningSession,
   sessionServiceInternals,
   SUBMITTED,

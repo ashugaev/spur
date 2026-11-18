@@ -36,6 +36,7 @@ describe("spur help", () => {
     expect(help).toContain("session-memory <sessionId>");
     expect(help).toContain("memory <set|get|list|rm>");
     expect(help).toContain("usage [options]");
+    expect(help).toContain("rate-limit");
     expect(help).toContain("service");
     expect(help).toContain("source");
     expect(help).toContain("subscribe [options] [targetSessionId]");
@@ -57,6 +58,14 @@ describe("spur help", () => {
       "hold",
       "resume",
     ]);
+  });
+
+  it("documents rate-limit clear and its quota override", () => {
+    const parent = buildProgram().commands.find((command) => command.name() === "rate-limit");
+    const clear = parent?.commands.find((command) => command.name() === "clear");
+    expect(clear?.helpInformation()).toContain("clear [options] <sessionId>");
+    expect(clear?.helpInformation()).toContain("--force");
+    expect(clear?.helpInformation()).toContain("--json");
   });
 
   it("documents the doctor scaffold flow and follow-up command path", () => {
@@ -120,7 +129,7 @@ describe("spur help", () => {
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
     );
     expect(help).toContain(
-      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c close, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
     );
     expect(help).toContain(
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",

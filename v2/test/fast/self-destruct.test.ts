@@ -40,6 +40,10 @@ describe("self destruct", () => {
     const defaultPrompt = withSelfDestructInstructions("Do work", { enabled: true });
     expect(defaultPrompt).toContain(SELF_DESTRUCT_TOOL_NAME);
     expect(defaultPrompt).toContain(DEFAULT_SELF_DESTRUCT_CONDITION);
+    expect(defaultPrompt).toContain("\n\nSelf-destruct:\n");
+    expect(defaultPrompt).toContain(
+      "This closes and removes the temporary Spur agent session. Run it only after the condition above is satisfied.",
+    );
 
     const customPrompt = withSelfDestructInstructions("Do work", {
       enabled: true,
