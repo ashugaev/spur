@@ -27,7 +27,7 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 
 ## usage
 
-`spur usage [--json]`: quota windows per Claude account and Codex (one row per ready OAuth managed account, `pending` until its quota is cached; the host login row is hidden when the provider has a ready managed account, or a managed account in any state has the same email and organization/account id), token totals today/7d/30d by provider and launch model; read-only, saved logins never refreshed; failing source prints an error row; quota cached 3 min per source; tokens from unarchived sessions dated by last activity — `v2/src/usage-report.ts`. Web: the footer Usage button shows the same report.
+`spur usage [--json]`: quota windows per Claude account and Codex (one row per ready OAuth managed account, `pending` until its quota is cached; the host login row is hidden when the provider has a ready managed account, or a managed account in any state has the same email, and the same organization/account id when both have one), token totals today/7d/30d by provider and launch model; read-only, saved logins never refreshed; failing source prints an error row; quota cached 3 min per source; tokens from unarchived sessions dated by last activity — `v2/src/usage-report.ts`. Web: the footer Usage button shows the same report.
 `spur rate-limit clear <sessionId> [--force] [--json]`: clear a limited live session; unknown or exhausted same-account quota, or a managed-account session, refuses unless `--force`; `v2/src/cli.ts`.
 
 ## disk-gc, artifacts-gc, cache

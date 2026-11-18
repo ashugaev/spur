@@ -23783,7 +23783,15 @@ describe("SessionService", () => {
         });
       createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
       lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      // Killing the fresh pane ends its process, as in production.
+      killTmuxSessionMock.mockImplementation(async () => {
+        created = false;
+      });
       const service = await createDisposedSessionService();
+      const refresh = vi.spyOn(
+        service as unknown as { refreshDashboardCacheEntry: (record: unknown) => Promise<void> },
+        "refreshDashboardCacheEntry",
+      );
 
       await expect(
         service.switchAuth("api-1", "backup", { reason: "manual" }),
@@ -23795,6 +23803,14 @@ describe("SessionService", () => {
       expect(createTmuxSessionMock).toHaveBeenCalledTimes(2);
       expect(sessions.get("api-1")).not.toHaveProperty("auth");
       expect(sessions.get("api-1")?.agentSessionId).toBe("native-session-uuid");
+      // Parked, not left running: the dashboard shows the stop at once.
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "stopped",
+        stopReason: "auth_switch_unresumable",
+      });
+      expect(refresh).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: "stopped", stopReason: "auth_switch_unresumable" }),
+      );
       expect(authProxyRevokeSessionMock).toHaveBeenCalledWith("api-1");
       service.dispose();
     });
@@ -24339,13 +24355,39 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      const codexSession = (overrides: Parameters<typeof runningSession>[0] = {}) =>
+        runningSession({ id: "cx-1", agent: "codex", ...overrides });
+      const boundAuth = {
+        sessionId: "cx-1",
+        provider: "codex" as const,
+        mode: "auto" as const,
+        accountId: null,
+        effectiveAccountId: "c",
+        generation: 1,
+      };
+
       it.each([
-        ["the same user", "c@x.com", "acct-1", []],
-        ["another user", "other@x.com", "acct-1", ["host:codex"]],
-        ["the same email in another account", "c@x.com", "acct-2", ["host:codex"]],
+        ["the same user", "c@x.com", "acct-1", [], []],
+        ["another user", "other@x.com", "acct-1", [], ["host:codex"]],
+        ["the same email in another account", "c@x.com", "acct-2", [], ["host:codex"]],
+        [
+          "the same user while a live unbound session uses the host login",
+          "c@x.com",
+          "acct-1",
+          [codexSession()],
+          ["host:codex"],
+        ],
+        [
+          "the same user with only bound or stopped sessions",
+          "c@x.com",
+          "acct-1",
+          [codexSession({ auth: boundAuth }), codexSession({ id: "cx-2", status: "stopped" })],
+          [],
+        ],
       ])(
         "raises a host alert unless a managed account is the same user: managed account of %s",
-        async (_label, email, accountId, expected) => {
+        async (_label, email, accountId, existing, expected) => {
+          createSessionStore(...existing);
           stored("codex", ["c"]);
           authProxyGetStateMock.mockResolvedValue({
             accounts: [
@@ -24374,8 +24416,7 @@ describe("SessionService", () => {
             "fetch",
             vi.fn(async () => new Response("rejected", { status: 401 })),
           );
-          const { SessionService } = await loadSessionServiceModule();
-          const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+          const service = await createDisposedSessionService();
           const { alerts } = await service.listAuthAlerts();
           expect(alerts.filter((alert) => alert.kind === "host").map((alert) => alert.id)).toEqual(
             expected,

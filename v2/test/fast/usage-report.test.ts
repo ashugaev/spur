@@ -386,6 +386,33 @@ describe("buildUsageReport quotas", () => {
     },
   );
 
+  it.each([
+    ["in another organization", "org-2", ["claude:default", "codex:codex"]],
+    ["without an organization id", undefined, ["codex:codex"]],
+  ])(
+    "matches the Claude host row on email alone only when a side has no organization: same email %s",
+    async (_label, organizationId, hostRows) => {
+      const s = await setup();
+      await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+      await writeHostIdentities(s.home, "a@example.com", "c@example.com");
+      const fetchMock = vi.fn(async () => json(CLAUDE_BODY));
+      const report = await buildUsageReport({
+        ...s.deps(fetchMock as unknown as typeof fetch),
+        managedAccounts: [
+          {
+            id: "m-claude",
+            provider: "claude",
+            displayName: "a@example.com",
+            identity: { email: "a@example.com", ...(organizationId ? { organizationId } : {}) },
+            credential: "oauth",
+            status: "sign_in_required",
+          },
+        ],
+      });
+      expect(report.quotas.map((q) => `${q.provider}:${q.source}`)).toEqual(hostRows);
+    },
+  );
+
   it("hides the host rows for a ready managed account of another user", async () => {
     const s = await setup();
     await writeClaudeCreds(join(s.home, ".claude"), FUTURE);

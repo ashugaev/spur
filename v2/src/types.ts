@@ -1379,7 +1379,13 @@ export interface SessionRecord {
   taskStatus?: TaskStatusDeclaration;
   status: SessionStatus;
   /** "memory_shed" is written only by the critical memory shed's session stop. */
-  stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget" | "runtime_lost";
+  stopReason?:
+    | "manual_pause"
+    | "stale_timeout"
+    | "memory_shed"
+    | "token_budget"
+    | "runtime_lost"
+    | "auth_switch_unresumable";
   tokenBudgetOverride?: boolean;
   tokenUsage?: SessionTokenUsageRecord;
   preflightTokenUsage?: PreflightTokenUsageRecord;

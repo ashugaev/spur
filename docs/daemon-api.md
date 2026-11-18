@@ -2,7 +2,7 @@
 
 - `GET /info` — `lifecycleInstanceId`, runtime `buildId`: process/build identity; `v2/src/session-lifecycle.ts`, `v2/src/build-identity.ts`.
 - `GET /headroom`
-- `GET /usage` — quota windows per Claude account and Codex (one row per ready OAuth managed account from the cached quota, `pending` error row until cached; the host login row is hidden when the provider has a ready managed account, or a managed account in any state has the same email and organization/account id, read from `~/.claude.json` `oauthAccount` and the `~/.codex/auth.json` id_token claims; companion failure falls back to host rows), per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
+- `GET /usage` — quota windows per Claude account and Codex (one row per ready OAuth managed account from the cached quota, `pending` error row until cached; the host login row is hidden when the provider has a ready managed account, or a managed account in any state has the same email, and the same organization/account id when both have one, read from `~/.claude.json` `oauthAccount` and the `~/.codex/auth.json` id_token claims; companion failure falls back to host rows), per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
 - `GET /models` — model and default reasoning capabilities; discovery in `v2/src/agents/models.ts`.
 - `GET /api/pr-status` — web PR status, nullable reviewer names, native review requirement; `packages/web/src/app/api/pr-status/route.ts`, `packages/web/src/lib/pr-status-shape.ts`.
 - `POST /api/pr-status/batch` — web PR statuses, reviewer/native requirement metadata; `packages/web/src/app/api/pr-status/batch/route.ts`.
@@ -21,7 +21,7 @@
 - `DELETE /auth-accounts/:id` — remove unused profile; `v2/src/server.ts`.
 - `POST /auth-accounts/:id/login` — start sign-in; body `{method?}` `oauth` (Claude default), `device` (Codex default), `browser`; other provider combinations `400`; `v2/src/server.ts`.
 - `POST /auth-accounts/:id/api-key` — body `{apiKey}`; saves only after a test request succeeds; key never returned; `v2/src/server.ts`.
-- `GET /auth-alerts` — `{alerts}` one per broken managed account or host login, none for a host login whose email and organization/account id match a managed account of the provider; event `session.auth.failed` once per breakage; `v2/src/auth-alerts.ts`.
+- `GET /auth-alerts` — `{alerts}` one per broken managed account or host login, none for a host login with the same email as a managed account of the provider (and the same organization/account id when both have one) while no live unbound session of the provider uses it; event `session.auth.failed` once per breakage; `v2/src/auth-alerts.ts`.
 - `POST /auth-terminal-logins` — body `{accountId}` or `{host:"claude"|"codex"}`; native CLI sign-in in tmux; repeat restarts; response carries `command`, the display string of the native login command; `v2/src/auth-terminal-login.ts`.
 - `GET /auth-terminal-logins/:id` — status `running|verifying|ready|not_signed_in`, `reason` (`duplicate` when the account is already saved), `command`; `404` unknown; `v2/src/auth-terminal-login.ts`.
 - `DELETE /auth-terminal-logins/:id` — stop and delete the throwaway home; `v2/src/auth-terminal-login.ts`.

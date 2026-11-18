@@ -25644,14 +25644,15 @@ export class SessionService {
       await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
         const latest = readSession(this.config.dataDir, sessionId);
         if (!latest) return;
-        // A fresh launch is a blank conversation: stop it and point the record back at the original.
+        // A fresh launch is a blank conversation: stop it, point the record back at the original
+        // conversation and park the session so a restore resumes it on its previous account.
         if (freshLaunch) {
           await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false }).catch(
             () => undefined,
           );
         }
         const { auth: _boundAuth, ...unbound } = latest;
-        writeSession(this.config.dataDir, {
+        const rolledBack: SessionRecord = {
           ...(boundWritten ? unbound : latest),
           ...(boundWritten && session.claudeAccountId !== undefined
             ? { claudeAccountId: session.claudeAccountId }
@@ -25659,8 +25660,17 @@ export class SessionService {
           ...(freshLaunch && session.agentSessionId
             ? { agentSessionId: session.agentSessionId }
             : {}),
-        });
+          ...(freshLaunch
+            ? {
+                status: "stopped" as const,
+                stopReason: "auth_switch_unresumable" as const,
+                updatedAt: nowIso(),
+              }
+            : {}),
+        };
+        writeSession(this.config.dataDir, rolledBack);
         this.stateCache.delete(sessionId);
+        await this.refreshDashboardCacheEntry(rolledBack);
       });
       await this.authProxy.revokeSession(sessionId).catch(() => undefined);
       this.authSnapshot = undefined;
@@ -25918,18 +25928,27 @@ export class SessionService {
         ),
       ),
     );
-    // A host login that a managed account of the same user covers raises no alert of its own.
+    const sessions = listSessions(this.config.dataDir);
+    // A host login that a managed account of the same user covers raises no alert of its own,
+    // unless a live unbound session of the provider still runs on that login.
     const host = (await readHostCredentialSources(this.usageReportDeps())).map((source) => ({
       provider: source.provider,
-      observation: hostDuplicatesManaged(
-        hostIdentities.get(source.provider) ?? null,
-        source.provider,
-        identified,
-      )
-        ? ("ok" as const)
-        : observeHostSource(source),
+      observation:
+        hostDuplicatesManaged(
+          hostIdentities.get(source.provider) ?? null,
+          source.provider,
+          identified,
+        ) &&
+        !sessions.some(
+          (candidate) =>
+            candidate.agent === source.provider &&
+            !candidate.auth &&
+            (candidate.status === "running" || candidate.status === "spawning"),
+        )
+          ? ("ok" as const)
+          : observeHostSource(source),
     }));
-    return { managed, host, sessions: listSessions(this.config.dataDir) };
+    return { managed, host, sessions };
   }
 
   startTerminalLogin(
