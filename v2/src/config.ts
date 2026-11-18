@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { Cron } from "croner";
 import { deriveMinimumIntervalMs } from "./event-sources/cron.js";
+import { MAX_SNAPSHOT_BYTES_CEILING } from "./snapshots.js";
 import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
@@ -32,6 +33,7 @@ import {
   type ProjectConfig,
   type ProjectMcpConfig,
   type ProjectPreflightConfig,
+  type ProjectSnapshotsConfig,
   type ProjectSpawnConfig,
   type ProviderReasoningEffort,
   type ReviewProviderId,
@@ -1460,6 +1462,46 @@ function parseDevServer(projectId: string, value: unknown): DevServerConfig | un
   };
 }
 
+function parseProjectSnapshots(
+  projectId: string,
+  value: unknown,
+): ProjectSnapshotsConfig | undefined {
+  if (value === undefined) return undefined;
+  const label = `projects.${projectId}.snapshots`;
+  const raw = asObject(value, label);
+  const extraKeys = Object.keys(raw).filter(
+    (key) =>
+      key !== "enabled" &&
+      key !== "maxBytes" &&
+      key !== "requireFinal" &&
+      key !== "freshnessMinutes",
+  );
+  if (extraKeys.length > 0) {
+    throw new Error(
+      `${label} only supports "enabled", "maxBytes", "requireFinal" and "freshnessMinutes" (got: ${extraKeys.join(", ")})`,
+    );
+  }
+  const enabled = asOptionalBoolean(raw["enabled"], `${label}.enabled`);
+  const maxBytes = asOptionalPositiveInteger(raw["maxBytes"], `${label}.maxBytes`);
+  if (maxBytes !== undefined && maxBytes > MAX_SNAPSHOT_BYTES_CEILING) {
+    throw new Error(`${label}.maxBytes must be at most ${MAX_SNAPSHOT_BYTES_CEILING}`);
+  }
+  const requireFinal = asOptionalBoolean(raw["requireFinal"], `${label}.requireFinal`);
+  if (enabled === false && requireFinal === true) {
+    throw new Error(`${label}.requireFinal cannot be true when ${label}.enabled is false`);
+  }
+  const freshnessMinutes = asOptionalPositiveInteger(
+    raw["freshnessMinutes"],
+    `${label}.freshnessMinutes`,
+  );
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(maxBytes !== undefined ? { maxBytes } : {}),
+    ...(requireFinal !== undefined ? { requireFinal } : {}),
+    ...(freshnessMinutes !== undefined ? { freshnessMinutes } : {}),
+  };
+}
+
 function parseProjectMcp(projectId: string, value: unknown): ProjectMcpConfig | undefined {
   if (value === undefined) return undefined;
   const label = `projects.${projectId}.mcp`;
@@ -1862,6 +1904,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const branchNaming = parseProjectBranchNaming(projectId, raw["branchNaming"]);
+  const snapshots = parseProjectSnapshots(projectId, raw["snapshots"]);
   const workspaceAccess = parseWorkspaceAccess(projectId, raw["workspaceAccess"], projectEnv);
   const devServer = parseDevServer(projectId, raw["devServer"]);
   const hasDevServerKey = raw["devServer"] !== undefined;
@@ -1993,6 +2036,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
     ...(branchNaming !== undefined ? { branchNaming } : {}),
+    ...(snapshots !== undefined ? { snapshots } : {}),
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(mcp !== undefined ? { mcp } : {}),

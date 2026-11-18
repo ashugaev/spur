@@ -5,15 +5,17 @@ export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
 export const AUTOMATIC_REMINDER_MAX_ATTEMPTS = 3;
 
-export type SessionStatus =
-  | "spawning"
-  | "running"
-  | "stopped"
-  | "budget_limited"
-  | "paused"
-  | "errored"
-  | "completed"
-  | "killed";
+export const SESSION_STATUSES = [
+  "spawning",
+  "running",
+  "stopped",
+  "budget_limited",
+  "paused",
+  "errored",
+  "completed",
+  "killed",
+] as const;
+export type SessionStatus = (typeof SESSION_STATUSES)[number];
 export const SESSION_STATES = [
   "working",
   "waiting",
@@ -49,6 +51,39 @@ export type SessionLogScope = "all" | "runtime" | "service" | "sidecar";
 export interface SessionLink {
   label: string;
   url: string;
+}
+export interface SessionLinkFilter {
+  label: string;
+  url?: string;
+}
+
+interface SessionTransitionFields {
+  cursor: string;
+  sessionId: string;
+  project: string;
+  at: string;
+  links: SessionLink[];
+  reason?: string;
+  stopReason?: string;
+  error?: string;
+  rateLimitResetAt?: string;
+  successorId?: string;
+}
+export type SessionTransition = SessionTransitionFields &
+  (
+    | { kind: "status"; from: SessionStatus | null; to: SessionStatus }
+    | { kind: "state"; from: SessionState | null; to: SessionState }
+  );
+export interface SessionTransitionsQuery {
+  since?: string;
+  links?: SessionLinkFilter[];
+  limit?: number;
+  kinds?: ("status" | "state")[];
+}
+export interface SessionTransitionsResponse {
+  entries: SessionTransition[];
+  nextCursor: string;
+  hasMore: boolean;
 }
 export type SessionSlotTitleSource = "manual" | "agent";
 export interface SessionPrBinding {
@@ -846,6 +881,14 @@ export interface ProjectConfig {
   tokenBudget?: number;
   tokenBudgetWarnOnly?: boolean;
   staleAfterMinutes?: number;
+  snapshots?: ProjectSnapshotsConfig;
+}
+
+export interface ProjectSnapshotsConfig {
+  enabled?: boolean;
+  maxBytes?: number;
+  requireFinal?: boolean;
+  freshnessMinutes?: number;
 }
 
 export type ProviderReasoningEffort =
@@ -1195,6 +1238,13 @@ export interface CursorRestoreBoundary {
   offset: number;
 }
 
+export interface ClaudeStatusOwner {
+  agentLaunchId: string;
+  agentSessionId: string;
+  pid: number;
+  procStart?: string;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -1226,6 +1276,8 @@ export interface SessionRecord {
   prAlertTransfer?: PrAlertTransfer;
   claudeAccountId?: string;
   allowedTriggers?: string[];
+  /** Send trigger ids already announced to the owner; one notice per id. */
+  blockedTriggerNotices?: string[];
   agentSessionId?: string;
   /** Cursor transcript position before the latest restore; excludes earlier activity from state. */
   cursorRestoreBoundary?: CursorRestoreBoundary;
@@ -1258,6 +1310,8 @@ export interface SessionRecord {
   lastOpenedAt?: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  /** Distinguishes a captured empty terminal slot state from a legacy record. */
+  terminalSlotsCaptured?: true;
   selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
   // Sidecar names that were tmux-alive at park time (stale_timeout), replayed
@@ -1278,7 +1332,8 @@ export interface SessionRecord {
    * ISO time of a launch or send whose submit never confirmed. Every typed
    * send holds while set. A launch hold clears on the first transcript
    * activity after it; a send's hold (with `queuedMessageTyped`) clears only
-   * on the agent's ack of that text. Read from the legacy
+   * on the agent's ack of that text, or releases once it has stood past
+   * `SUBMIT_HOLD_CEILING_MS` with the agent at its prompt. Read from the legacy
    * `launchUnconfirmedAt` on older records.
    */
   submitUnconfirmedAt?: string;
@@ -1297,23 +1352,44 @@ export interface SessionRecord {
    */
   submitRequeuedMessage?: string;
   /**
-   * A send the agent never acked, after its one re-queue: the hold is
-   * released, the text shown with Retry and Dismiss until the user acts.
+   * A send the agent never acked, after its one re-queue or past the hold
+   * ceiling: the hold is released, the text shown with Retry and Dismiss until the user acts.
    */
   submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
+  /**
+   * Pid (and start time) of the pane's interactive claude that last reported
+   * agentSessionId for agentLaunchId; a session-id change is accepted only from
+   * it. Ignored when agentLaunchId differs.
+   */
+  claudeStatusOwner?: ClaudeStatusOwner;
   rateLimitedAt?: string;
+  /** Known active provider reset instant, ISO UTC; absent when unknown or cleared. */
+  rateLimitResetAt?: string;
+  rateLimitClearFence?: {
+    agentLaunchId: string | null;
+    /** Source key -> captured occurrence count; unkeyed readers use the file path. */
+    sourceOrdinals: Record<string, number>;
+    paneLatched: boolean;
+  };
   serverErrorAt?: string;
   serverErrorReactivationAttempts?: number;
   todoNudge?: { fingerprint: string; attempts: number };
+  snapshotNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
   /** Internal provenance for a retained session error; absent on legacy records. */
   errorSource?: "inferred_runtime_exit" | "runtime_probe" | "other";
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
   todoLedgerVersion?: 1;
+}
+
+export interface RateLimitClearResult {
+  sessionId: string;
+  state: SessionState;
+  deliveryScheduled: boolean;
 }
 
 // Terminal-for-lifecycle predicate. Gates ~16 session-service.ts call sites
@@ -1420,8 +1496,11 @@ export interface SessionView extends Omit<
   | "queuedMessages"
   | "prAlertTransfer"
   | "agentLaunchId"
+  | "claudeStatusOwner"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "blockedTriggerNotices"
+  | "spawnIntent"
   | "sidecarLaunches"
   | "tokenUsage"
   | "preflightTokenUsage"
@@ -1429,7 +1508,10 @@ export interface SessionView extends Omit<
   | "codexRestoreStartedAt"
   | "restoredAt"
   | "errorSource"
+  | "terminalSlotsCaptured"
+  | "snapshotNudge"
 > {
+  spawnIntent?: Omit<DurableSpawnIntent, "closeoutTakenFrom">;
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1456,6 +1538,10 @@ export interface SessionView extends Omit<
    * not waiting.
    */
   queuedAheadReason?: "no_interrupt";
+  /** Explicit immediate-interrupt send response only; never persisted. */
+  sendOutcome?:
+    | { kind: "sent"; interrupted: boolean }
+    | { kind: "queued"; reason: "interrupt_guard" | "no_interrupt" };
 }
 
 /**
@@ -1478,15 +1564,21 @@ export type DashboardOmittedField =
   | "allowedTriggers"
   | "agentSessionId"
   | "agentLaunchId"
+  | "claudeStatusOwner"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "blockedTriggerNotices"
+  | "spawnIntent"
   | "sidecarLaunches"
   | "branchSource"
   | "tokenUsage"
   | "preflightTokenUsage"
-  | "errorSource";
+  | "errorSource"
+  | "terminalSlotsCaptured"
+  | "snapshotNudge";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
+  spawnIntent?: SessionView["spawnIntent"];
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1622,6 +1714,8 @@ export interface DurableSpawnIntent {
   };
   pane?: { pid: number; starttime: number };
   telegramOrigin?: TelegramSpawnOrigin;
+  /** Closeout owners this launch took; given back if the launch finally fails. */
+  closeoutTakenFrom?: string[];
 }
 
 /**
@@ -1842,6 +1936,58 @@ export type TodoMutationRequest =
       requiredHumanAction?: string;
     }
   | { action: "resume"; itemId: string };
+
+export type WorkSnapshotTrigger = "manual" | "timer" | "hook" | "event" | "final";
+
+export interface WorkSnapshotMeta {
+  version: number;
+  at: string;
+  sessionId: string;
+  project: string;
+  agent: AgentName;
+  model: string | null;
+  branch: string | null;
+  headSha: string | null;
+  dirty: boolean | null;
+  todoRevision: string;
+  links: SessionLink[];
+  trigger: WorkSnapshotTrigger;
+  final: boolean;
+}
+
+export interface WorkSnapshot extends WorkSnapshotMeta {
+  content: string;
+}
+
+export interface WorkSnapshotFreshness {
+  /** Whole seconds since the snapshot, never negative. */
+  ageSeconds: number;
+  /** ISO instant of the agent's first own work after `at`; null when none. */
+  activitySince: string | null;
+  /** Commits on HEAD after the snapshot's headSha; null when not countable. */
+  commitsSince: number | null;
+  /** The agent worked more than freshnessMinutes after `at`. */
+  stale: boolean;
+}
+
+export interface WorkSnapshotRead extends WorkSnapshot {
+  freshness: WorkSnapshotFreshness;
+  /** Completed ToDo items; present only when requested. Null: ledger unreadable. */
+  done?: TodoItemProjection[] | null;
+}
+
+export interface LatestSnapshotEntry {
+  sessionId: string;
+  status: SessionStatus;
+  /** Last observed state, not re-checked; null when never observed. */
+  state: SessionState | null;
+  snapshot: WorkSnapshotRead;
+}
+
+export interface WriteSnapshotRequest {
+  content: string;
+  final?: boolean;
+}
 
 export interface KillSessionRequest {
   force?: boolean;
@@ -2177,6 +2323,8 @@ export type TranscriptEntry =
       inputSummary?: string;
       output?: string;
       timestampMs?: number;
+      /** Claude Bash call that touches the session's Spur tools; its input is not kept otherwise. */
+      spurCall?: true;
     }
   | { kind: "reasoning"; text: string; timestampMs?: number }
   | {

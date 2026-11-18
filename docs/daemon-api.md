@@ -1,7 +1,5 @@
 # Daemon HTTP API
 
-> Scope: route names only, one method + full path per line, every line `git grep`-able verbatim. Payload/status-code contracts: `v2/src/server.ts`. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
-
 - `GET /info` — `lifecycleInstanceId`, runtime `buildId`: process/build identity; `v2/src/session-lifecycle.ts`, `v2/src/build-identity.ts`.
 - `GET /headroom`
 - `GET /usage` — quota windows per Claude account and Codex, per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
@@ -36,9 +34,10 @@
 
 ## Session routes
 
-- `GET /sessions` — array body, `sidecars[].url` ready endpoint, `sidecars[].ports[].listening` host TCP listener true|false|null; `v2/src/types.ts`; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`; never `503` on lifecycle churn, a still-moving row carries its last build and that build's receipt.
-- `POST /sessions` — `201` accepted spawning identity under [admission pressure](configuration.md#admission-control); optional `allowedTriggers` (omitted = all sends, `[]` = none; carried by respawn/handoff), `reasoningEffort`, `prAlertOwner` (default `false`, [exclusive PR alerts](configuration.md#pr-alert-ownership)); `400 pr_alert_owner_invalid`, `409 pr_alert_owner_conflict` body `{ code, error }`; `v2/src/session-service.ts`, `v2/src/pr-alert-owner.ts`.
-- `POST /sessions/background` — `201` accepted spawning identity before [resource recovery](configuration.md#admission-control); same `allowedTriggers` and `prAlertOwner` contract as `POST /sessions`; `409 spawn_in_progress|spawn_committed|spawn_failed` body `{ code, sessionId, error }` for claimed `preflightBatchId`; `v2/src/session-service.ts`.
+- `GET /sessions` — array; `includeCompleted=1|true` adds completed; repeated `link=<label[=URL]>` uses AND (`label`: any URL, `URL`: normalized; invalid: 400); optional `rateLimitResetAt` ISO UTC, unknown omitted/cleared on limit exit; attention entry/exit immediate on fresh classification across GET/list, working/waiting hold retained; `sidecars[].url` ready endpoint, `sidecars[].ports[].listening` host TCP listener true|false|null; `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/server.ts`, `v2/src/session-lifecycle.ts`; no `503` on lifecycle churn, moving row carries last build and receipt.
+- `GET /sessions/transitions` — event-time S5 links, repeated `link` AND; OR: poll unfiltered and filter `entry.links`, or poll each link filter with its own cursor; default: all status edges (completed/killed/errored/stopped/park/resume), attention-state entry/reset/exit (needs_input/rate_limited/stale/stopped/error/killed); exclusive restart-safe `since`, `limit` default 200 (1..1000), optional `kinds=status,state`; invalid cursor 400, expired 410/full-list resync, refresh failure 500; hot + five uncompressed 16 MiB segments, no time guarantee; `v2/src/server.ts`, `v2/src/session-transitions.ts`.
+- `POST /sessions` — `201` accepted spawning identity under [admission pressure](configuration.md#admission-control); optional `allowedTriggers` (omitted = all sends, `[]` = none; carried by respawn/handoff), `reasoningEffort`, `prAlertOwner` (default `false`, [exclusive PR alerts](configuration.md#pr-alert-ownership)); writable `reuseWorkspaceSessionId` [closeout take](commands.md#session-tools-and-environment); `400 pr_alert_owner_invalid`, `409 pr_alert_owner_conflict` body `{ code, error }`; `v2/src/session-service.ts`, `v2/src/pr-alert-owner.ts`.
+- `POST /sessions/background` — `201` accepted spawning identity before [resource recovery](configuration.md#admission-control); same allowlist, PR-alert and closeout-take contracts as `POST /sessions`; `409 spawn_in_progress|spawn_committed|spawn_failed` body `{ code, sessionId, error }` for claimed `preflightBatchId`; `v2/src/session-service.ts`.
 - `POST /shepherd/spawn`
 - `POST /sidecars/sweep` — body `{ reap?: boolean }`, default `false`. Always `200`. Response `{ supported, leaked, reaped }`: `supported` is `false` when the process table or procfs is unreadable, in which case `leaked` and `reaped` are both `[]`. Each `leaked` row carries `kind: "worktree-tree" | "orphan-daemon"`; a `worktree-tree` row's `reapable` reflects proven Spur provenance and carries `rootPid`, `pgid`, `ageSeconds`, `worktreePath`, `args`, `sidecarName`, `tree` (descendant pids, root first), `treeRssKb`; an `orphan-daemon` row is always `reapable: false` and carries `configPath`/`cliEntryPath` instead of a `sidecarName`, plus `port: number | null` and `liveness: "serving" | "not-serving" | "unknown"`. `reap: true` signals only `reapable` rows — never an `orphan-daemon` row, serving or not — and populates `reaped`, one entry per `reapable` leaked tree it signaled: `{ sessionName, panePid, survivors, blindKill }` — `survivors` is the pids still alive after the SIGKILL confirmation window, and `blindKill` is `true` when tmux was killed with no verified process-tree signal (no pane pid, or an unusable snapshot, and no identity fallback confirmed a reap either) — a `survivors: []` alongside `blindKill: true` is not proof anything died, only that nothing was checked. See [Sidecars](commands.md#sidecars)
 - `GET /sessions/:id` — current row, `sidecars[].url` ready endpoint, `sidecars[].ports[].listening` host TCP listener true|false|null; Cursor `queuedMessageTyped.ackBaseline.deliveryId` optional UUIDv4, correlated `file:null` requires `size:0` and valid ID, malformed IDs drop baseline, legacy string-file floors retained; optional read-only `intervalWake.dispatchClaimId`: opaque correlation, absent on legacy records, ignored on input; optional `dailyWake.admissionDeferredOccurrence`: persisted retry occurrence; `v2/src/types.ts`, `v2/src/metadata.ts`; ephemeral `lifecycle` receipt; `v2/src/session-lifecycle.ts`.
@@ -47,7 +46,7 @@
 - `GET /sessions/:id/user-actions`
 - `GET /sessions/:id/subscriptions`
 - `GET /sessions/:id/logs` — `scope=runtime|sidecar|service|all`, `name`, `limit` (default 200 globally); retained pane and archived rows; existing session record and `limit>0`: 404 for named no-pane/no-archive or outputless stopped service, 502 for failed capture; absent record: archived rows (200); `v2/src/server.ts`.
-- `POST /sessions/:id/send` — response `queuedAheadReason: "no_interrupt"`: queued at the head
+- `POST /sessions/:id/send` — `{message,queue:false,interrupt:true}` interrupts active work; interrupt ignored without `queue:false`; repeats within 5 seconds queue at tail; explicit interrupt response `sendOutcome`: `{kind:"sent",interrupted:boolean}` or `{kind:"queued",reason:"interrupt_guard"|"no_interrupt"}`; `no_interrupt` retains `queuedAheadReason:"no_interrupt"` for head queue — `v2/src/session-service.ts`, `v2/src/daemon-contracts.ts`.
 - `POST /sessions/:id/source-poll-enable` — `{}`. Clears durable poll-disable registry (every file under the project, incl. removed sources) + live in-process gate per `github` source; `200 { ok, sessionId, projectId, cleared: { sourceId, prNumber }[] }`; `cleared: []` no-op; `404` unknown session. See [source](commands.md#source)
 - `POST /sessions/:id/answer`
 - `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt
@@ -57,16 +56,21 @@
 - `GET /sessions/:id/source-info` — read-only association and cached bot identity; `v2/src/server.ts`, `v2/src/session-service.ts`.
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
-- `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
-- `POST /sessions/:id/self-destruct`
+- `POST /sessions/:id/rate-limit/clear` — rejects MCP origin and caller-session header; optional `force`; `v2/src/server.ts`.
+- `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503, agent `409 work_snapshot_required`; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
+- `POST /sessions/:id/self-destruct` — `409 work_snapshot_required`
 - `POST /sessions/:id/kill`
 - `POST /sessions/:id/restore` — optional `operationId`; `restart` defaults false, replaces running terminal; settled receipt, lifecycle 409/503, 20-minute deadline 504, disconnect cancellation; `v2/src/server.ts`.
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
-- `POST /sessions/:id/handoff` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
+- `POST /sessions/:id/handoff` — agent `409 work_snapshot_required`; `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/switch-auth` — 404 unless `authRotation.switchAuth: true`
 - `GET /sessions/:id/todo`
-- `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo)
+- `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo-snapshot)
+- `GET /sessions/:id/snapshots` — metadata; `order=asc|desc` (default asc), `limit` 1..100, exclusive `before`/`after` versions; archived too; `400 invalid_snapshot_request|404|500 snapshot_corrupt`; `v2/src/snapshots.ts`
+- `POST /sessions/:id/snapshots` — `{content, final?}`; caller header, when set, must equal `:id`; `400|404|409 snapshot_conflict|413 snapshot_too_large`. See [snapshot](commands.md#todo-snapshot)
+- `GET /sessions/:id/snapshots/:version` — positive integer or `latest`; adds `freshness`; `includeDone=1` adds `done`; archived too, no wake; `400|404|500 snapshot_corrupt|500 todo_ledger_corrupt`. See [snapshots](snapshots.md#read)
+- `GET /snapshots/latest` — repeatable `link=label[=url]` (required, AND), `includeDone=1`; per matching session incl. completed, archived; `400 invalid_snapshot_request`, `500 snapshot_corrupt`. See [snapshots](snapshots.md#read)
 - `GET /sessions/:id/auto-ping-suppressions` — `?all=1` adds `history`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/mute` — `{handle, mode: until_change|for|forever, durationMs?, reason?}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/resume` — exactly one of `{handle}` or `{suppressionId}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
@@ -92,11 +96,9 @@
 - `POST /sessions/:id/shared-memory/:scope/:key`
 - `DELETE /sessions/:id/shared-memory/:scope/:key`
 
-## Store routes
+## Store routes, page routes
 
-`:store` = `page:<id>` or `session:<sid>`, `:` accepted as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`, `v2/src/store-agent.ts`, `v2/src/store-actions.ts`.
-
-- `GET /stores/:store/docs/:collection`
+- `GET /stores/:store/docs/:collection` — `:store` = `page:<id>` or `session:<sid>`, `:` accepted as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`, `v2/src/store-agent.ts`, `v2/src/store-actions.ts`.
 - `POST /stores/:store/docs/:collection`
 - `GET /stores/:store/docs/:collection/:docId`
 - `POST /stores/:store/docs/:collection/:docId`
@@ -109,9 +111,6 @@
 - `GET /stores/:store/agent/status`
 - `POST /stores/:store/actions`
 - `POST /stores/:store/actions/:actionId/complete` — CLI and agents only; the web proxy refuses it.
-
-## Page routes
-
 - `GET /pages` — title/icon catalogue; [pages.md](pages.md); `v2/src/pages.ts`.
 - `POST /pages`
 - `PATCH /pages/:id/source` — MCP `update_page_source`; `v2/src/server.ts`, `v2/src/daemon-contracts.ts`.

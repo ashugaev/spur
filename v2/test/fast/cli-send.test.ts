@@ -196,4 +196,84 @@ describe("send CLI", () => {
 
     expect(outputText()).toContain("Queued message for api-1 (2 pending).");
   });
+
+  it("interrupt send posts immediate interrupt flags and reports this send before older queued messages", async () => {
+    postJsonMock.mockResolvedValue(
+      baseSession({
+        queuedMessages: { messages: ["older"], awaitingPrompt: true },
+        sendOutcome: { kind: "sent", interrupted: true },
+      }),
+    );
+    await parseSend(["send", "api-1", "change", "course", "--interrupt"]);
+    expect(postJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/api-1/send",
+      { message: "change course", queue: false, interrupt: true },
+      "/tmp/spur.yaml",
+    );
+    expect(outputText()).toContain("Interrupted turn and delivered message to api-1.");
+    expect(outputText()).not.toContain("Queued message");
+  });
+
+  it("interrupt send reports delivery without interrupting", async () => {
+    postJsonMock.mockResolvedValue(
+      baseSession({ sendOutcome: { kind: "sent", interrupted: false } }),
+    );
+    await parseSend(["send", "api-1", "hello", "--interrupt"]);
+    expect(outputText()).toContain("Delivered message to api-1 without interrupting.");
+  });
+
+  it.each([true, false])(
+    "interrupt send preserves uncertain receipt with interrupted=%s",
+    async (interrupted) => {
+      postJsonMock.mockResolvedValue(
+        baseSession({
+          queuedMessages: { messages: ["older"], awaitingPrompt: true },
+          submitUnconfirmedAt: "2026-03-18T10:05:00.000Z",
+          sendOutcome: { kind: "sent", interrupted },
+        }),
+      );
+      await parseSend(["send", "api-1", "hello", "--interrupt"]);
+      expect(outputText()).toContain("the agent has not confirmed it yet.");
+      expect(outputText()).not.toContain("delivered");
+      expect(outputText()).not.toContain("Queued message");
+    },
+  );
+
+  it.each([
+    ["interrupt_guard", "interrupt guard suppressed a repeat"],
+    ["no_interrupt", "at the head; the agent has no interrupt key"],
+  ] as const)("interrupt send distinguishes %s queues", async (reason, text) => {
+    postJsonMock.mockResolvedValue(
+      baseSession({
+        queuedMessages: { messages: ["older", "hello"], awaitingPrompt: true },
+        sendOutcome: { kind: "queued", reason },
+      }),
+    );
+    await parseSend(["send", "api-1", "hello", "--interrupt"]);
+    expect(outputText()).toContain(text);
+  });
+
+  it("interrupt send JSON exposes outcome without a success line", async () => {
+    const response = baseSession({ sendOutcome: { kind: "sent", interrupted: true } });
+    postJsonMock.mockResolvedValue(response);
+    await parseSend(["send", "api-1", "hello", "--interrupt", "--json"]);
+    expect(JSON.parse(outputText())).toEqual(response);
+  });
+
+  it("interrupt send falls back without inventing interruption for an older daemon", async () => {
+    postJsonMock.mockResolvedValue(baseSession());
+    await parseSend(["send", "api-1", "hello", "--interrupt"]);
+    expect(outputText()).toContain("Delivered message to api-1.");
+    expect(outputText()).not.toContain("Interrupted");
+  });
+
+  it("interrupt send help names flag and tool-call cost", async () => {
+    const { createProgram } = await import("../../src/cli.js");
+    const help = createProgram("/tmp/dist/cli.js")
+      .commands.find((command) => command.name() === "send")
+      ?.helpInformation();
+    expect(help).toContain("--interrupt");
+    expect(help).toContain("tool call in flight");
+  });
 });

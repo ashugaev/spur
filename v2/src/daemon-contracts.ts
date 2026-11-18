@@ -139,7 +139,11 @@ const spawn = body("SpawnSessionRequest", [
     "Opt into exclusive native PR CI and conflict alerts; requires an allowed send route for each class.",
   ),
   overrides,
-  field("reuseWorkspaceSessionId", "string", "Reuse the named session workspace."),
+  field(
+    "reuseWorkspaceSessionId",
+    "string",
+    "Reuse the named session workspace. Takes closeout from a completed, killed, errored, budget-limited, token-budget-stopped or manually paused owner.",
+  ),
   field("originalTaskPrompt", "string", "Original task retained across task handoffs."),
   field("bareSpawnMessage", "boolean", "Use the supplied task without normal spawn wrapping."),
   field("configPath", "string", "Project configuration path."),
@@ -158,7 +162,11 @@ const send = body("SendMessageRequest", [
   field("message", "string", "Message text; attachments may accompany the message.", true),
   attachments,
   field("queue", "boolean", "Queue delivery while session is busy."),
-  field("interrupt", "boolean", "Interrupt active provider work before delivery."),
+  field(
+    "interrupt",
+    "boolean",
+    "Requires queue:false; interrupts active work, killing the tool call in flight. Repeats within 5 seconds queue at the tail; waiting sessions receive ordinary delivery.",
+  ),
 ]);
 const restore = body("RestoreSessionRequest", [
   field("operationId", "string", "Optional lifecycle operation ID for receipt reconciliation."),
@@ -303,6 +311,21 @@ const requestBodies = {
       "resume:{action,itemId}",
     ],
   ),
+  snapshot: body("WriteSnapshotRequest", [
+    field(
+      "content",
+      "string",
+      "Nonblank Markdown; at most projects.<id>.snapshots.maxBytes.",
+      true,
+    ),
+    field(
+      "final",
+      "boolean",
+      "Mark as the final snapshot; stored trigger becomes final.",
+      false,
+      false,
+    ),
+  ]),
   complete: body(
     "CompleteSessionRequest",
     [
@@ -565,9 +588,35 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
           false,
         ),
         field("view", '"full"|"dashboard"', "Session detail projection.", false, "full"),
+        field("link", "string[]", "Repeatable link label or label=URL; all must match."),
       ],
       examples: [{ query: { includeCompleted: "true", view: "full" } }],
       response: "SessionListView[]; x-spur-lifecycle-instance-id header",
+    },
+  ),
+  operation(
+    "list_session_transitions",
+    "GET",
+    "/sessions/transitions",
+    "Poll retained session lifecycle transitions with event-time links.",
+    {
+      query: [
+        field("since", "string", "Exclusive opaque cursor; omitted starts oldest retained."),
+        field("link", "string[]", "Repeatable S5 link label or label=URL; all must match."),
+        field("limit", "integer", "Matching entries per page, 1..1000.", false, 200),
+        field("kinds", "string", "Comma-separated status,state; omitted excludes live chatter."),
+      ],
+      examples: [{ query: { link: "tracker=https://example.com/tasks/42", limit: "200" } }],
+      response: "SessionTransitionsResponse {entries,nextCursor,hasMore}; invalid cursor 400.",
+      extraResponses: [
+        {
+          status: 410,
+          contentType: "application/json",
+          description:
+            "Expired cursor: {error,floorCursor,latestCursor}; full-list resync required.",
+        },
+      ],
+      source: "v2/src/session-transitions.ts",
     },
   ),
   operation(
@@ -981,12 +1030,15 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "Send task/message with full queue, interrupt and attachment options.",
     {
       body: send,
+      response:
+        "SessionView; explicit queue:false + interrupt:true adds sendOutcome: sent with interrupted:boolean, or queued with reason interrupt_guard (tail) / no_interrupt (head). Older queued messages follow a direct send; submitUnconfirmedAt means receipt is unconfirmed.",
       examples: [
         { body: { message: "Continue", queue: true } },
         {
           body: {
             message: "Inspect file",
             attachments: [{ name: "input.txt", data: "aGVsbG8=" }],
+            queue: false,
             interrupt: true,
           },
         },
@@ -1155,6 +1207,90 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "Mark session as opened.",
   ),
   operation("pause_session", "POST", "/sessions/{sessionId}/pause", "Pause session."),
+  operation(
+    "clear_session_rate_limit",
+    "POST",
+    "/sessions/{sessionId}/rate-limit/clear",
+    "Clear a live session's stale rate limit after checking provider quota.",
+    {
+      body: body("RateLimitClearRequest", [
+        field("force", "boolean", "Skip provider quota check.", false, false),
+      ]),
+      examples: [{ body: {} }, { body: { force: true } }],
+      response: "RateLimitClearResult",
+    },
+  ),
+  operation(
+    "list_snapshots",
+    "GET",
+    "/sessions/{sessionId}/snapshots",
+    "List work snapshot metadata, ascending by version unless order=desc; works for archived sessions.",
+    {
+      query: [
+        field("order", "string", "asc or desc.", false, "asc"),
+        field("limit", "integer", "Versions to return, 1..100; omitted returns all.", false),
+        field("before", "integer", "Exclusive upper version bound.", false),
+        field("after", "integer", "Exclusive lower version bound.", false),
+      ],
+      examples: [
+        { pathParams: { sessionId: "example-sessionId" }, query: { order: "desc", limit: "5" } },
+      ],
+      response: "WorkSnapshotMeta[]; content omitted; invalid query 400.",
+      source: "v2/src/snapshots.ts",
+    },
+  ),
+  operation(
+    "write_snapshot",
+    "POST",
+    "/sessions/{sessionId}/snapshots",
+    "Store a full Markdown work snapshot as the next version; Spur fills metadata.",
+    {
+      body: requestBodies.snapshot,
+      examples: [
+        { body: { content: "# Now\nWorking" } },
+        { body: { content: "# Done", final: true } },
+      ],
+      response: "WorkSnapshotMeta of the stored version.",
+      extraResponses: [
+        {
+          status: 413,
+          contentType: "application/json",
+          description:
+            "snapshot_too_large: {code,limitBytes,actualBytes,error}; content exceeds projects.<id>.snapshots.maxBytes.",
+        },
+      ],
+      source: "v2/src/snapshots.ts",
+    },
+  ),
+  operation(
+    "get_snapshot",
+    "GET",
+    "/sessions/{sessionId}/snapshots/{version}",
+    "Read one work snapshot with freshness; version is a positive integer or latest; works for archived sessions.",
+    {
+      query: [field("includeDone", "string", "1 adds the completed ToDo items as done.", false)],
+      examples: [{ pathParams: { sessionId: "example-sessionId", version: "latest" } }],
+      response:
+        "WorkSnapshotRead: WorkSnapshot with content plus freshness {ageSeconds,activitySince,commitsSince,stale}; 404 when none exists.",
+      source: "v2/src/snapshots.ts",
+    },
+  ),
+  operation(
+    "get_latest_snapshots_by_link",
+    "GET",
+    "/snapshots/latest",
+    "Latest snapshot of every session whose links match, newest first, for live, completed and archived sessions.",
+    {
+      query: [
+        field("link", "string[]", "Repeatable S5 link label or label=URL; all must match.", true),
+        field("includeDone", "string", "1 adds the completed ToDo items as done.", false),
+      ],
+      examples: [{ query: { link: "pr=https://example.com/pull/42" } }],
+      response:
+        "LatestSnapshotEntry[] {sessionId,status,state,snapshot: WorkSnapshotRead}; state is last observed, null when never observed; no link 400.",
+      source: "v2/src/snapshots.ts",
+    },
+  ),
   operation(
     "get_todo",
     "GET",

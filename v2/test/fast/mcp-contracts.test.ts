@@ -24,16 +24,18 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "42d0e9b7c99bbc187acc05bd4cabb7e1c0b703c912fd7954ab81a7cf3712846c",
-  "types.ts": "e7ba6a3467ef39112cb42c78817a5e75a95e5734935197a82b6e15e072646077",
+  "server.ts": "9bef63daebcc98c4f710dd6414c237b25977b016eeb5182bc6efc96782fe6221",
+  "types.ts": "4715153c81ea999a80d2542695a26079860cf1b094766a36a3aa8bc85f0493c8",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "e64a87eff731c0827e3ffce303fb78f19f3d00a5f0da834b8d9d43ccaf34554e",
+  "session-service.ts": "6332d159ead34f773bedfab087801e900ff275a3934162e6df22f0a029a801db",
+  "session-transitions.ts": "832771b8d95a6722cf67fc05685f2fd5f03e7a60a923c7a438e1b5b3bc0dcbb0",
+  "session-slots.ts": "0342572c1ed467dacb74b7caae22a8d43ae95b6685e5db85a422e4757971507e",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
-  "wake-schedule.ts": "7232e30422a546b50e136334c9737934370b2ac04bfc4ca3a62c03e811ba1452",
+  "wake-schedule.ts": "9362828bd94ab5d691118c8ec3539cd1c0c96c97def38a3a7de4ac495deed0e8",
   "agents/models.ts": "0ea72b5d8bfe02bb9f1cebb5d816091acdfa4ee579c9f441d1bda73c35bf8480",
-  "todo.ts": "2170888ce1a3527e303f5f6b27edd7ccbfabf2d9ad26d22cdc9518f891095288",
+  "todo.ts": "347419ef444bcd0adb99d723b0584a6a3db8a27ed92154a4f633ba33649395ce",
   "auto-ping.ts": "11ce2c85526d9fad940a4d15cd6564982b2ae34d25ff26bb9138cd81b1f65ccf",
   "review-interface.ts": "3cd868f605946f29e66e96b0721adddebd9b2783a9101924d8ec489a1e37122b",
   "review-interface-consent.ts": "03fc56319c45e14e4685e169387ee96677487abf12aaea0ad8a313090cda7d3d",
@@ -69,10 +71,17 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(103);
+    expect(routes).toHaveLength(109);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(103);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(109);
+    expect(getDaemonOperation("get_latest_snapshots_by_link")?.query).toContainEqual(
+      expect.objectContaining({ name: "link", type: "string[]", required: true }),
+    );
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
+    expect(getDaemonOperation("list_sessions")?.query).toContainEqual(
+      expect.objectContaining({ name: "link", type: "string[]", required: false }),
+    );
+    expect(getDaemonOperation("list_session_transitions")?.path).toBe("/sessions/transitions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
   });
@@ -246,6 +255,7 @@ describe("daemon MCP operation contracts", () => {
       ["complete_session", "CompleteSessionRequest"],
       ["kill_session", "KillSessionRequest"],
       ["save_cron_job_draft", "CronJobEditUpdate"],
+      ["write_snapshot", "WriteSnapshotRequest"],
     ] as const;
     for (const [id, dto] of mappings) {
       const actual = getDaemonOperation(id)?.body?.fields.map(({ name, required }) => ({
@@ -266,6 +276,25 @@ describe("daemon MCP operation contracts", () => {
       expect(
         getDaemonOperation(id)?.body?.fields.find((entry) => entry.name === "attachments")?.type,
       ).toContain("name:string,data:string");
+    }
+  });
+
+  it("exposes interrupt send outcomes in the successful response contract", () => {
+    const response = getDaemonOperation("send_message")?.responses.find(
+      ({ status }) => status === 200,
+    );
+    for (const field of ["sendOutcome", "interrupted", "interrupt_guard", "no_interrupt"])
+      expect(response?.description).toContain(field);
+  });
+
+  it("states reuseWorkspaceSessionId closeout take in the spawn contracts", () => {
+    for (const id of ["spawn_session", "spawn_background_session"]) {
+      expect(
+        getDaemonOperation(id)?.body?.fields.find(
+          (entry) => entry.name === "reuseWorkspaceSessionId",
+        )?.description,
+        id,
+      ).toContain("Takes closeout");
     }
   });
 
@@ -357,7 +386,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(103);
+      expect(page.total).toBe(109);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
@@ -402,6 +431,7 @@ describe("catalog examples at the real daemon router", () => {
       status: "stopped",
       createdAt: "2026-10-17T00:00:00.000Z",
       updatedAt: "2026-10-17T00:00:00.000Z",
+      slots: { links: [{ label: "pr", url: "https://example.com/pull/42" }] },
     });
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
     const request = (
@@ -428,6 +458,57 @@ describe("catalog examples at the real daemon router", () => {
     };
     return { server, request, configPath };
   }
+
+  it("writes and reads work snapshots through MCP operator rights", async () => {
+    const { server, request } = await fixture();
+    try {
+      const written = await request("write_snapshot", { content: "# Now\nMCP" });
+      expect(written.status).toBe(200);
+      expect(await written.json()).toMatchObject({ version: 1, final: false });
+      expect((await request("write_snapshot", { content: " " })).status).toBe(400);
+      const latest = await request("get_snapshot", undefined, { version: "latest" });
+      expect(latest.status).toBe(200);
+      expect(await latest.json()).toMatchObject({
+        version: 1,
+        content: "# Now\nMCP",
+        freshness: { activitySince: null, stale: false },
+      });
+      const list = await request("list_snapshots");
+      expect(await list.json()).toMatchObject([{ version: 1 }]);
+      const desc = await request("list_snapshots", undefined, {}, { order: "desc", limit: "1" });
+      expect(await desc.json()).toMatchObject([{ version: 1 }]);
+      const byLink = await request(
+        "get_latest_snapshots_by_link",
+        undefined,
+        {},
+        { link: "pr=https://example.com/pull/42", includeDone: "1" },
+      );
+      expect(byLink.status).toBe(200);
+      expect(await byLink.json()).toMatchObject([
+        {
+          sessionId: "test-contract",
+          status: "stopped",
+          snapshot: { version: 1, done: [], freshness: { stale: false } },
+        },
+      ]);
+      expect((await request("get_latest_snapshots_by_link")).status).toBe(400);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("denies a force clear sent through the MCP operation catalog", async () => {
+    const { server, request } = await fixture();
+    try {
+      const response = await request("clear_session_rate_limit", { force: true });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({
+        error: "Agent session cannot clear a rate limit",
+      });
+    } finally {
+      await server.stop();
+    }
+  });
 
   it("binds and detaches source through catalog requests and rejects malformed bodies without mutation", async () => {
     // Test owns the page-source cadence: start() is inert, checks fire via sync.reconcile().

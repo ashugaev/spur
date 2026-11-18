@@ -23,7 +23,7 @@ import {
   buildClaudeResumePlan,
   buildClaudeRestorePlan,
   claudeCommand,
-  ensureClaudeRestrictWritesSettings,
+  ensureClaudeSettings,
   findLatestSessionFile,
   findClaudeSessionId,
   sessionFileForId,
@@ -226,21 +226,49 @@ describe("sessionFileForId", () => {
   });
 });
 
-describe("ensureClaudeRestrictWritesSettings", () => {
+describe("ensureClaudeSettings", () => {
   beforeEach(() => {
     mockMkdir.mockResolvedValue(undefined);
     mockWriteFile.mockResolvedValue(undefined);
   });
 
-  it("writes a PreToolUse deny hook for write tools", async () => {
-    const settingsPath = await ensureClaudeRestrictWritesSettings("/session/tool");
+  type Settings = {
+    hooks: {
+      PreToolUse?: Array<{ matcher: string; hooks: Array<{ command: string }> }>;
+      UserPromptSubmit: Array<{ hooks: Array<{ type: string; command: string }> }>;
+      PostToolUse: Array<{ hooks: Array<{ type: string; command: string }> }>;
+      Stop: Array<{ hooks: Array<{ type: string; command: string }> }>;
+    };
+  };
+
+  it("writes a PreToolUse deny hook for write tools when restrictWrites is on", async () => {
+    const settingsPath = await ensureClaudeSettings("/session/tool", { restrictWrites: true });
 
     expect(settingsPath).toBe("/session/tool/claude/settings.json");
-    const content = JSON.parse(mockWriteFile.mock.calls[0]?.[1] as string) as {
-      hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }> };
-    };
-    expect(content.hooks.PreToolUse[0]?.matcher).toBe("Write|Edit|MultiEdit|NotebookEdit");
-    expect(content.hooks.PreToolUse[0]?.hooks[0]?.command).toContain("exit 2");
+    const content = JSON.parse(mockWriteFile.mock.calls[0]?.[1] as string) as Settings;
+    expect(content.hooks.PreToolUse?.[0]?.matcher).toBe("Write|Edit|MultiEdit|NotebookEdit");
+    expect(content.hooks.PreToolUse?.[0]?.hooks[0]?.command).toContain("exit 2");
+  });
+
+  it("always wires the snapshot hook to UserPromptSubmit, PostToolUse and Stop, and omits the deny hook without restrictWrites", async () => {
+    await ensureClaudeSettings("/session/tool", { restrictWrites: false });
+
+    const content = JSON.parse(mockWriteFile.mock.calls[0]?.[1] as string) as Settings;
+    const hook = { type: "command", command: "'/session/tool/spur-snapshot-hook'" };
+    expect(content.hooks.UserPromptSubmit).toEqual([{ hooks: [hook] }]);
+    expect(content.hooks.PostToolUse).toEqual([{ hooks: [hook] }]);
+    expect(content.hooks.Stop).toEqual([{ hooks: [hook] }]);
+    expect(content.hooks.PreToolUse).toBeUndefined();
+  });
+
+  it("resets the snapshot hook turn file on every call", async () => {
+    await ensureClaudeSettings("/session/tool", { restrictWrites: false });
+
+    expect(mockWriteFile).toHaveBeenCalledWith(
+      "/session/tool/snapshot-hook-turn",
+      '{"reminder":false,"worked":false}',
+      "utf8",
+    );
   });
 });
 

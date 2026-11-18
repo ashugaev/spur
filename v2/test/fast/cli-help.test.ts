@@ -36,6 +36,7 @@ describe("spur help", () => {
     expect(help).toContain("session-memory <sessionId>");
     expect(help).toContain("memory <set|get|list|rm>");
     expect(help).toContain("usage [options]");
+    expect(help).toContain("rate-limit");
     expect(help).toContain("service");
     expect(help).toContain("source");
     expect(help).toContain("subscribe [options] [targetSessionId]");
@@ -57,6 +58,14 @@ describe("spur help", () => {
       "hold",
       "resume",
     ]);
+  });
+
+  it("documents rate-limit clear and its quota override", () => {
+    const parent = buildProgram().commands.find((command) => command.name() === "rate-limit");
+    const clear = parent?.commands.find((command) => command.name() === "clear");
+    expect(clear?.helpInformation()).toContain("clear [options] <sessionId>");
+    expect(clear?.helpInformation()).toContain("--force");
+    expect(clear?.helpInformation()).toContain("--json");
   });
 
   it("documents the doctor scaffold flow and follow-up command path", () => {

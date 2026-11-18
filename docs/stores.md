@@ -1,6 +1,6 @@
 # Stores
 
-> Scope: page and session document stores — ids, collections, queries, limits, CLI. Routes: [daemon-api.md#store-routes](daemon-api.md#store-routes). Owner: `v2/src/stores.ts`.
+> Scope: page and session document stores — ids, collections, queries, limits, CLI. Routes: [daemon-api.md#store-routes-page-routes](daemon-api.md#store-routes-page-routes). Owner: `v2/src/stores.ts`.
 
 One SQLite file per store, Firestore-style documents.
 

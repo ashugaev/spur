@@ -10,7 +10,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, join, relative, sep } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isCursorDeliveryId } from "./agents/cursor-submit-ack.js";
 import { appendEventLog } from "./event-log.js";
@@ -1265,8 +1266,13 @@ function validateDurableSpawnFields(session: SessionRecord): void {
       "submission",
       "pane",
       "telegramOrigin",
+      "closeoutTakenFrom",
     ],
     "intent",
+  );
+  durableCheck(
+    intent["closeoutTakenFrom"] === undefined || durableStrings(intent["closeoutTakenFrom"]),
+    "intent closeoutTakenFrom",
   );
   durableCheck(
     intent["version"] === 1 &&
@@ -1495,6 +1501,48 @@ function validateDurableSpawnFields(session: SessionRecord): void {
   }
 }
 
+function normalizeRateLimitClearFence(value: unknown): SessionRecord["rateLimitClearFence"] {
+  if (
+    !isRecord(value) ||
+    (value["agentLaunchId"] !== null && typeof value["agentLaunchId"] !== "string") ||
+    typeof value["paneLatched"] !== "boolean" ||
+    !isRecord(value["sourceOrdinals"])
+  )
+    return undefined;
+  const sourceOrdinals: Record<string, number> = {};
+  for (const [path, ordinal] of Object.entries(value["sourceOrdinals"])) {
+    if (!path || !Number.isSafeInteger(ordinal) || (ordinal as number) < 0) return undefined;
+    sourceOrdinals[path] = ordinal as number;
+  }
+  return {
+    agentLaunchId: value["agentLaunchId"],
+    paneLatched: value["paneLatched"],
+    sourceOrdinals,
+  };
+}
+
+function normalizeClaudeStatusOwner(value: unknown): SessionRecord["claudeStatusOwner"] {
+  if (
+    !isRecord(value) ||
+    typeof value["agentLaunchId"] !== "string" ||
+    !value["agentLaunchId"] ||
+    typeof value["agentSessionId"] !== "string" ||
+    !value["agentSessionId"] ||
+    typeof value["pid"] !== "number" ||
+    !Number.isSafeInteger(value["pid"]) ||
+    value["pid"] <= 0
+  )
+    return undefined;
+  const procStart = value["procStart"];
+  if (procStart !== undefined && (typeof procStart !== "string" || !procStart)) return undefined;
+  return {
+    agentLaunchId: value["agentLaunchId"],
+    agentSessionId: value["agentSessionId"],
+    pid: value["pid"],
+    ...(procStart !== undefined ? { procStart } : {}),
+  };
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   validateDurableSpawnFields(session);
   const normalizedSession = normalizeSessionPrBinding(session);
@@ -1520,6 +1568,8 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   }
   const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
+  const rateLimitClearFence = normalizeRateLimitClearFence(normalizedSession.rateLimitClearFence);
+  const claudeStatusOwner = normalizeClaudeStatusOwner(normalizedSession.claudeStatusOwner);
   // Records written before the rename carry the hold as launchUnconfirmedAt;
   // read it once here so an existing hold survives, and write only the new name.
   const legacyUnconfirmed = (normalizedSession as { launchUnconfirmedAt?: unknown })
@@ -1575,6 +1625,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(prAlertTransfer ? { prAlertTransfer } : {}),
     ...(normalizedSession.allowedTriggers !== undefined
       ? { allowedTriggers: normalizedSession.allowedTriggers }
+      : {}),
+    ...(Array.isArray(normalizedSession.blockedTriggerNotices) &&
+    normalizedSession.blockedTriggerNotices.every((id) => typeof id === "string")
+      ? { blockedTriggerNotices: normalizedSession.blockedTriggerNotices }
       : {}),
     ...(normalizedSession.selfDestruct ? { selfDestruct: normalizedSession.selfDestruct } : {}),
     ...(normalizedSession.agentSessionId
@@ -1632,6 +1686,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     // stay legible, but nothing writes a fresh one.
     ...(normalizedSession.deskId ? { deskId: normalizedSession.deskId } : {}),
     ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),
+    ...(normalizedSession.terminalSlotsCaptured === true
+      ? { terminalSlotsCaptured: true as const }
+      : {}),
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
     ...(sidecarProcs ? { sidecarProcs } : {}),
@@ -1667,7 +1724,17 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
-    ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
+    ...(!isTerminalSessionStatus(normalizedSession.status) && normalizedSession.rateLimitedAt
+      ? { rateLimitedAt: normalizedSession.rateLimitedAt }
+      : {}),
+    ...(!isTerminalSessionStatus(normalizedSession.status) &&
+    normalizedSession.rateLimitedAt &&
+    typeof normalizedSession.rateLimitResetAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.rateLimitResetAt))
+      ? { rateLimitResetAt: new Date(normalizedSession.rateLimitResetAt).toISOString() }
+      : {}),
+    ...(rateLimitClearFence ? { rateLimitClearFence } : {}),
+    ...(claudeStatusOwner ? { claudeStatusOwner } : {}),
     ...(normalizedSession.serverErrorAt ? { serverErrorAt: normalizedSession.serverErrorAt } : {}),
     ...(typeof normalizedSession.serverErrorReactivationAttempts === "number" &&
     Number.isInteger(normalizedSession.serverErrorReactivationAttempts) &&
@@ -1682,6 +1749,14 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     normalizedSession.todoNudge.attempts >= 0 &&
     normalizedSession.todoNudge.attempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
       ? { todoNudge: normalizedSession.todoNudge }
+      : {}),
+    ...(normalizedSession.snapshotNudge &&
+    typeof normalizedSession.snapshotNudge.fingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test(normalizedSession.snapshotNudge.fingerprint) &&
+    Number.isInteger(normalizedSession.snapshotNudge.attempts) &&
+    normalizedSession.snapshotNudge.attempts >= 0 &&
+    normalizedSession.snapshotNudge.attempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+      ? { snapshotNudge: normalizedSession.snapshotNudge }
       : {}),
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
@@ -1714,9 +1789,33 @@ function normalizeServiceInstanceRecord(service: ServiceInstanceRecord): Service
   };
 }
 
+type SessionWriteObserver = (session: SessionRecord) => void;
+const sessionWriteObservers = new Map<string, Set<SessionWriteObserver>>();
+const sessionWriteGuard = new AsyncLocalStorage<() => void>();
+
+/** Fence writes made inside an asynchronous classification across config reloads. */
+export function withSessionWriteGuard<T>(guard: () => void, action: () => T): T {
+  return sessionWriteGuard.run(guard, action);
+}
+
+export function observeSessionWrites(dataDir: string, observer: SessionWriteObserver): () => void {
+  const key = resolve(dataDir);
+  const observers = sessionWriteObservers.get(key) ?? new Set<SessionWriteObserver>();
+  observers.add(observer);
+  sessionWriteObservers.set(key, observers);
+  return () => {
+    observers.delete(observer);
+    if (observers.size === 0) sessionWriteObservers.delete(key);
+  };
+}
+
 export function writeSession(dataDir: string, session: SessionRecord): void {
+  sessionWriteGuard.getStore()?.();
   const path = sessionFilePath(dataDir, session.project, session.id);
-  writeJsonFile(path, normalizeSessionRecord(session));
+  const observers = sessionWriteObservers.get(resolve(dataDir));
+  const normalized = normalizeSessionRecord(session);
+  writeJsonFile(path, normalized);
+  for (const observer of observers ?? []) observer(normalized);
   writeSessionIndexEntry(dataDir, session.id, path);
 }
 
@@ -1849,6 +1948,31 @@ export function readArchivedSession(dataDir: string, sessionId: string): Session
     if (existsSync(path)) return readSessionFile(path);
   }
   return null;
+}
+
+// Archived records whose (project, id) pass `include`, uncached. The predicate runs before the
+// file is parsed, so callers pay only for the sessions they want. Invalid files are skipped.
+export function listArchivedSessions(
+  dataDir: string,
+  include: (projectId: string, sessionId: string) => boolean,
+): SessionRecord[] {
+  const root = join(dataDir, "sessions-archive");
+  if (!existsSync(root)) return [];
+  const sessions: SessionRecord[] = [];
+  for (const projectEntry of readdirSync(root, { withFileTypes: true })) {
+    if (!projectEntry.isDirectory()) continue;
+    const projectDir = join(root, projectEntry.name);
+    for (const fileName of readdirSync(projectDir)) {
+      if (!fileName.endsWith(".json")) continue;
+      if (!include(projectEntry.name, fileName.slice(0, -".json".length))) continue;
+      try {
+        sessions.push(readSessionFile(join(projectDir, fileName)));
+      } catch (error) {
+        if (!(error instanceof InvalidSessionMetadataError)) throw error;
+      }
+    }
+  }
+  return sessions;
 }
 
 // Group-atomic archival for session GC: moves every member's record (and its

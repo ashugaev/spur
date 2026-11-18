@@ -20,6 +20,7 @@ import {
   LaunchPromptPendingError,
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
+  RateLimitClearError,
   SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
@@ -40,6 +41,70 @@ import {
 import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it("refuses agent rate-limit clear before mutation and accepts headerless force", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-rate-limit-clear-server-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const clear = vi.spyOn(SessionService.prototype, "clearRateLimit").mockResolvedValue({
+      sessionId: "api-1",
+      state: "waiting",
+      deliveryScheduled: false,
+    });
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const url = `http://127.0.0.1:${port}/sessions/api-1/rate-limit/clear`;
+      const denied = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-spur-caller-session": "agent-1" },
+        body: JSON.stringify({ force: true }),
+      });
+      expect(denied.status).toBe(403);
+      expect(clear).not.toHaveBeenCalled();
+      const deniedMcp = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-spur-origin": "mcp" },
+        body: JSON.stringify({ force: true }),
+      });
+      expect(deniedMcp.status).toBe(403);
+      expect(clear).not.toHaveBeenCalled();
+      const accepted = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-spur-origin": "cli" },
+        body: JSON.stringify({ force: true }),
+      });
+      expect(accepted.status).toBe(200);
+      expect(await accepted.json()).toEqual({
+        sessionId: "api-1",
+        state: "waiting",
+        deliveryScheduled: false,
+      });
+      expect(clear).toHaveBeenCalledWith("api-1", true, "cli");
+      clear.mockRejectedValueOnce(
+        new RateLimitClearError(
+          "Quota exhausted; reset 2026-03-18T11:00:00Z",
+          "2026-03-18T11:00:00Z",
+        ),
+      );
+      const exhausted = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(exhausted.status).toBe(409);
+      expect(await exhausted.json()).toEqual({
+        error: "Quota exhausted; reset 2026-03-18T11:00:00Z",
+        resetAt: "2026-03-18T11:00:00Z",
+      });
+    } finally {
+      await server.stop();
+      clear.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it.each([
     { method: "spawn", path: "/sessions", kind: "invalid", status: 400 },
     { method: "spawnInBackground", path: "/sessions/background", kind: "conflict", status: 409 },
@@ -1318,7 +1383,7 @@ describe("startServer", () => {
     );
 
     const originalList = SessionService.prototype.list;
-    const calls: Array<{ includeCompleted?: boolean; view?: "full" | "dashboard" }> = [];
+    const calls: Array<Parameters<SessionService["list"]>[0]> = [];
     SessionService.prototype.list = async function mockList(options = {}) {
       calls.push(options);
       return [
@@ -1363,15 +1428,37 @@ describe("startServer", () => {
       const dashboardResponse = await fetch(`http://127.0.0.1:${port}/sessions?view=dashboard`);
       expect(dashboardResponse.status).toBe(200);
       await expect(dashboardResponse.json()).resolves.toMatchObject([{ id: "demo-done" }]);
+
+      const query = new URLSearchParams({ includeCompleted: "1" });
+      query.append("link", "BOARD-TASK=https://example.com/task?a=b");
+      query.append("link", "board-role");
+      const filteredResponse = await fetch(`http://127.0.0.1:${port}/sessions?${query}`);
+      expect(filteredResponse.status).toBe(200);
+      expect(await filteredResponse.json()).toMatchObject([{ id: "demo-done" }]);
+      for (const invalid of ["board-role=reviewer", "=https://example.com/role", "board-role="]) {
+        const invalidResponse = await fetch(
+          `http://127.0.0.1:${port}/sessions?${new URLSearchParams({ link: invalid })}`,
+        );
+        expect(invalidResponse.status).toBe(400);
+      }
     } finally {
       SessionService.prototype.list = originalList;
       await server.stop();
     }
 
     expect(calls).toEqual([
-      { includeCompleted: false, view: "full", signal: expect.any(AbortSignal) },
-      { includeCompleted: true, view: "full", signal: expect.any(AbortSignal) },
-      { includeCompleted: false, view: "dashboard", signal: expect.any(AbortSignal) },
+      { includeCompleted: false, view: "full", links: [], signal: expect.any(AbortSignal) },
+      { includeCompleted: true, view: "full", links: [], signal: expect.any(AbortSignal) },
+      { includeCompleted: false, view: "dashboard", links: [], signal: expect.any(AbortSignal) },
+      {
+        includeCompleted: true,
+        view: "full",
+        links: [
+          { label: "board-task", url: "https://example.com/task?a=b" },
+          { label: "board-role" },
+        ],
+        signal: expect.any(AbortSignal),
+      },
     ]);
   });
 

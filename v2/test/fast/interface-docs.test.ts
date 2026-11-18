@@ -19,6 +19,41 @@ describe("published interface contracts", () => {
       await readRepoFile(".agents/skills/spur/SKILL.md"),
     );
   });
+  it("documents the work snapshot surface", async () => {
+    const [commands, configuration, daemonApi, skill, snapshots, readme, docsSkill, docsSkillCopy] =
+      await Promise.all([
+        readRepoFile("docs/commands.md"),
+        readRepoFile("docs/configuration.md"),
+        readRepoFile("docs/daemon-api.md"),
+        readRepoFile(".claude/skills/spur/SKILL.md"),
+        readRepoFile("docs/snapshots.md"),
+        readRepoFile("README.md"),
+        readRepoFile(".claude/skills/docs/SKILL.md"),
+        readRepoFile(".agents/skills/docs/SKILL.md"),
+      ]);
+    expect(commands).toContain("SPUR_SNAPSHOT_COMMAND");
+    expect(commands).toContain("spur snapshot write");
+    expect(commands).toContain("latest --link");
+    expect(snapshots).toContain("spur snapshot write");
+    expect(snapshots).toContain("freshnessMinutes");
+    expect(readme).toContain("docs/snapshots.md");
+    expect(configuration).toContain("snapshots.md");
+    expect(configuration).toContain("projects.<id>.snapshots.enabled");
+    expect(docsSkill).toContain("docs/snapshots.md");
+    expect(docsSkillCopy).toBe(docsSkill);
+    expect(configuration).toContain("projects.<id>.snapshots.maxBytes");
+    expect(configuration).toContain("projects.<id>.snapshots.requireFinal");
+    expect(configuration).toContain("projects.<id>.snapshots.freshnessMinutes");
+    for (const route of [
+      "GET /sessions/:id/snapshots",
+      "POST /sessions/:id/snapshots",
+      "GET /sessions/:id/snapshots/:version",
+      "GET /snapshots/latest",
+    ])
+      expect(daemonApi).toContain(`\`${route}\``);
+    expect(daemonApi).toContain("work_snapshot_required");
+    expect(skill).toContain("SPUR_SNAPSHOT_COMMAND");
+  });
   it("documents launcher-owned isolated UI discovery environment", async () => {
     const commands = await readRepoFile("docs/commands.md");
     expect(commands).toContain("SPUR_ISOLATED_CONFIG");
