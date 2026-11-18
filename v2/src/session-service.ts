@@ -1465,6 +1465,11 @@ const RESTRICT_WRITES_PROMPT_SUFFIX =
   "Restricted writes mode: do not modify, create, or delete files in the workspace. You may still post GitHub PR review comments via `gh` and call any MCP tool. Use these to communicate review feedback.";
 type ManualSessionStatus = "stopped" | "completed";
 type ManualStatusAction = "complete" | "pause" | "self_destruct" | "desk_complete" | "handoff";
+type AuthorizationSelection = Parameters<AuthProxy["registerSession"]>[0];
+type RestoreAuthorizationPlan = {
+  selection: AuthorizationSelection | undefined;
+  checkedCodexResumeId: string | null | undefined;
+};
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 /**
@@ -7666,8 +7671,24 @@ export class SessionService {
     project: ProjectConfig,
     accountId: string | null | undefined,
     managedBinding: boolean,
-    admitManaged?: () => Promise<void>,
   ): Promise<AuthRegistration | undefined> {
+    const selection = await this.selectSessionAuthorization(
+      sessionId,
+      agent,
+      project,
+      accountId,
+      managedBinding,
+    );
+    return selection ? this.authProxy.registerSession(selection) : undefined;
+  }
+
+  private async selectSessionAuthorization(
+    sessionId: string,
+    agent: AgentName,
+    project: ProjectConfig,
+    accountId: string | null | undefined,
+    managedBinding: boolean,
+  ): Promise<AuthorizationSelection | undefined> {
     if (agent !== "claude" && agent !== "codex") {
       if (accountId !== undefined && accountId !== null) {
         throw new AuthorizationError(`Saved authorization is not supported for ${agent}`, 400);
@@ -7698,11 +7719,75 @@ export class SessionService {
       // No ready managed account: launch with host authorization, as before managed pools.
       return undefined;
     }
-    await admitManaged?.();
-    return this.authProxy.registerSession({
+    return {
       sessionId,
       provider: agent,
       accountId: accountId ?? null,
+    };
+  }
+
+  private async prepareRestoreAuthorization(
+    current: SessionRecord,
+    project: ProjectConfig,
+    operation?: RestoreOperationContext,
+  ): Promise<RestoreAuthorizationPlan> {
+    const wait = <T>(pending: Promise<T>): Promise<T> => operation?.wait(pending) ?? pending;
+    try {
+      const selection = await wait(
+        this.selectSessionAuthorization(
+          current.id,
+          current.agent,
+          project,
+          current.auth ? current.auth.accountId : current.claudeAccountId,
+          current.auth !== undefined,
+        ),
+      );
+      operation?.assertActive();
+      let checkedCodexResumeId: string | null | undefined;
+      if (selection && current.agent === "codex") {
+        const sessionRootDir = join(
+          codexHookHomePath(slotToolDir(this.config.dataDir, current.id)),
+          "sessions",
+        );
+        checkedCodexResumeId =
+          current.agentSessionId ??
+          (await wait(
+            findAgentSessionId("codex", current.worktreePath, {
+              codexSessionRootDir: sessionRootDir,
+            }),
+          ));
+        operation?.assertActive();
+        if (checkedCodexResumeId) {
+          const provider = await wait(
+            readCodexResumeProvider(checkedCodexResumeId, { sessionRootDir }),
+          );
+          operation?.assertActive();
+          if (provider !== "spur_managed") {
+            const reason = provider
+              ? `saved provider ${provider} cannot change to spur_managed`
+              : "saved provider cannot be verified for spur_managed";
+            throw new AuthorizationError(
+              `Cannot restore Codex thread ${checkedCodexResumeId}: ${reason}. ` +
+                `Preserve its history and use spur handoff ${current.id} --agent codex.`,
+              400,
+            );
+          }
+        }
+      }
+      return { selection, checkedCodexResumeId };
+    } catch (error) {
+      this.logRestoreAuthorizationFailure(current, error);
+      throw error;
+    }
+  }
+
+  private logRestoreAuthorizationFailure(current: SessionRecord, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.logEvent("session.restore.failed", {
+      level: "error",
+      sessionId: current.id,
+      projectId: current.project,
+      message: `Failed to restore ${current.id}: ${message}`,
     });
   }
 
@@ -24378,6 +24463,7 @@ export class SessionService {
     return this.withPaneWriteLock(
       hint.tmuxSession,
       async () => {
+        let preparedAuthorization: RestoreAuthorizationPlan | undefined;
         const claim = await this.withSessionLifecycleLocks(
           this.lifecycleIdsFor(hint),
           async () => {
@@ -24396,6 +24482,19 @@ export class SessionService {
               }
               this.assertTokenBudgetAllowsActivation(current);
               this.assertAdmissible(current.project, "restore", { replacingSessionId: current.id });
+              const sourceStamp = this.lifecycleStamp(current);
+              preparedAuthorization = await this.prepareRestoreAuthorization(
+                current,
+                this.getProject(current.project),
+                operation,
+              );
+              operation?.assertActive();
+              const latest = readSession(this.config.dataDir, sessionId);
+              if (!latest || !this.lifecycleStampMatches(latest, sourceStamp)) {
+                const error = new Error(`Session ${sessionId} changed before restart teardown`);
+                this.logRestoreAuthorizationFailure(current, error);
+                throw error;
+              }
               await this.applyManualStatusLocked(
                 sessionId,
                 "stopped",
@@ -24414,7 +24513,13 @@ export class SessionService {
         );
         try {
           this.launchesInFlight.add(sessionId);
-          return await this.restoreLocked(sessionId, request, claim, operation);
+          return await this.restoreLocked(
+            sessionId,
+            request,
+            claim,
+            operation,
+            preparedAuthorization,
+          );
         } finally {
           this.launchesInFlight.delete(sessionId);
         }
@@ -24428,6 +24533,7 @@ export class SessionService {
     request: RestoreSessionRequest,
     claim: SessionLifecycleStamp,
     operation?: RestoreOperationContext,
+    preparedAuthorization?: RestoreAuthorizationPlan,
   ): Promise<SessionView> {
     operation?.assertActive();
     const wait = <T>(pending: Promise<T>): Promise<T> => operation?.wait(pending) ?? pending;
@@ -24646,51 +24752,19 @@ export class SessionService {
       : null;
     operation?.assertActive();
     if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
-    let checkedCodexResumeId: string | null | undefined;
+    const authorization =
+      preparedAuthorization ??
+      (await this.prepareRestoreAuthorization(current, restoreProjectConfig, operation));
+    operation?.assertActive();
+    const checkedCodexResumeId = authorization.checkedCodexResumeId;
     let authRegistration: AuthRegistration | undefined;
     try {
-      authRegistration = await this.prepareSessionAuthorization(
-        current.id,
-        current.agent,
-        restoreProjectConfig,
-        current.auth ? current.auth.accountId : current.claudeAccountId,
-        current.auth !== undefined,
-        current.agent === "codex"
-          ? async () => {
-              const sessionRootDir = join(
-                codexHookHomePath(slotToolDir(this.config.dataDir, current.id)),
-                "sessions",
-              );
-              checkedCodexResumeId =
-                current.agentSessionId ??
-                (await findAgentSessionId("codex", current.worktreePath, {
-                  codexSessionRootDir: sessionRootDir,
-                }));
-              if (!checkedCodexResumeId) return;
-              const provider = await readCodexResumeProvider(checkedCodexResumeId, {
-                sessionRootDir,
-              });
-              if (provider === "spur_managed") return;
-              const reason = provider
-                ? `saved provider ${provider} cannot change to spur_managed`
-                : "saved provider cannot be verified for spur_managed";
-              throw new AuthorizationError(
-                `Cannot restore Codex thread ${checkedCodexResumeId}: ${reason}. ` +
-                  `Preserve its history and use spur handoff ${sessionId} --agent codex.`,
-                400,
-              );
-            }
-          : undefined,
-      );
+      authRegistration = authorization.selection
+        ? await wait(this.authProxy.registerSession(authorization.selection))
+        : undefined;
       operation?.assertActive();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.restore.failed", {
-        level: "error",
-        sessionId,
-        projectId: current.project,
-        message: `Failed to restore ${sessionId}: ${message}`,
-      });
+      this.logRestoreAuthorizationFailure(current, error);
       throw error;
     }
     const codexRestoreStartedAt = current.agent === "codex" ? nowIso() : null;
