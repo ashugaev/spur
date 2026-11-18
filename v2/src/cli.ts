@@ -37,7 +37,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, Option, type Help } from "commander";
 import { registerReviewApp } from "./review-app.js";
-import { registerReviewGate } from "./review-gate.js";
 import { parseTaskStatusRequest } from "./task-status.js";
 import {
   connectProjectConfig,
@@ -2869,7 +2868,6 @@ async function ensureCliSpawnSubscriptionTargetsExist(
 export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
   registerReviewApp(program);
-  registerReviewGate(program);
 
   program
     .name("spur")

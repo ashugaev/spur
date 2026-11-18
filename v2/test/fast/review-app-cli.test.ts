@@ -41,6 +41,7 @@ test("registers daemon-free required status and publish inputs", () => {
     "block",
     "recover",
     "status",
+    "reply",
     "publish",
   ]);
   for (const child of command.commands)
@@ -397,6 +398,7 @@ test("dedicated import/program construction registers only inert review handlers
       "block",
       "recover",
       "status",
+      "reply",
       "publish",
     ]);
     const inspect = (command: Command) => {

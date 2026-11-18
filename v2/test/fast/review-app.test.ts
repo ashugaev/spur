@@ -28,6 +28,8 @@ import {
   publishReview,
   recoverReview,
   registerReviewApp,
+  nativeReviewBody,
+  replyThread,
 } from "../../src/review-app.js";
 import { publishLaneState, stateBody } from "../../src/review-state.js";
 import { execFileAsync } from "../helpers/common.js";
@@ -329,6 +331,10 @@ async function lifecycleFixture(ci: "pending" | "failure" = "pending") {
   }
   const history: Review[] = [];
   const endpoints: string[] = [];
+  const payloads: {
+    body: string;
+    comments?: { path: string; line: number; side: string; body: string }[];
+  }[] = [];
   let deny = false,
     posts = 0;
   let pause: (() => Promise<void>) | undefined;
@@ -366,12 +372,14 @@ async function lifecycleFixture(ci: "pending" | "failure" = "pending") {
       });
     if (path === "/repos/owner/repo/pulls/4/reviews" && options?.method === "POST") {
       posts++;
-      if (deny) return new Response("denial", { status: 422 });
       const payload = JSON.parse(String(options.body)) as {
         body: string;
         commit_id: string;
         event: string;
+        comments?: { path: string; line: number; side: string; body: string }[];
       };
+      payloads.push(payload);
+      if (deny) return new Response("denial", { status: 422 });
       const review = {
         id: history.length + 1,
         submitted_at: new Date(Date.UTC(2026, 9, 5, 10, 0, history.length)).toISOString(),
@@ -394,6 +402,7 @@ async function lifecycleFixture(ci: "pending" | "failure" = "pending") {
     request,
     history,
     endpoints,
+    payloads,
     transport,
     posts: () => posts,
     deny: () => {
@@ -2591,4 +2600,243 @@ test.each([
     expect(faults.writes).toBe(writes);
   }
   expect(f.calls).toEqual([]);
+});
+
+test("publish body hides the trailer in an HTML comment, drops evidence JSON and keeps the reconcile marker", async () => {
+  const f = await lifecycleFixture();
+  await publishReview(f.config, f.request, draft.session, f.transport);
+  const body = f.payloads[0]?.body ?? "";
+  const visible = body.replace(/<!--[\s\S]*?-->/g, "");
+  for (const text of ["H:", "B:", "ContractDigest:", "Lane:", "Scenario evidence", "Coverage"])
+    expect(visible).not.toContain(text);
+  expect(body.endsWith(`\n\nWritten by Spur · ${draft.session}`)).toBe(true);
+  expect(body).toContain(`\nSpur review attempt: ${draft.attempt}\n`);
+  expect(body).toBe(nativeReviewBody(parseRequest({ ...draft, receipt: "r" }), draft.session));
+});
+
+test("inline comments are forwarded with footers and invalid comments are rejected before network", async () => {
+  const f = await lifecycleFixture();
+  const comments = [
+    { path: "a.ts", line: 3, body: "[P1] Fix it." },
+    { path: "b.ts", line: 9, side: "LEFT", body: "[P2] Fix that." },
+  ];
+  await publishReview(
+    f.config,
+    parseRequest({ ...f.request, comments }),
+    draft.session,
+    f.transport,
+  );
+  expect(f.payloads[0]?.comments).toEqual([
+    {
+      path: "a.ts",
+      line: 3,
+      side: "RIGHT",
+      body: `[P1] Fix it.\n\nWritten by Spur · ${draft.session}`,
+    },
+    {
+      path: "b.ts",
+      line: 9,
+      side: "LEFT",
+      body: `[P2] Fix that.\n\nWritten by Spur · ${draft.session}`,
+    },
+  ]);
+  for (const bad of [
+    "x",
+    [{ path: "", line: 1, body: "b" }],
+    [{ path: "a", line: 0, body: "b" }],
+    [{ path: "a", line: 1.5, body: "b" }],
+    [{ path: "a", line: 1, body: "" }],
+    [{ path: "a", line: 1, side: "UP", body: "b" }],
+  ])
+    expect(() => parseRequest({ ...f.request, comments: bad })).toThrow("invalid-comments");
+});
+
+test("rerunning a published attempt with comments posts one review", async () => {
+  const f = await lifecycleFixture();
+  const request = parseRequest({
+    ...f.request,
+    comments: [{ path: "a.ts", line: 3, body: "[P1] Fix it." }],
+  });
+  await publishReview(f.config, request, draft.session, f.transport);
+  expect((await publishReview(f.config, request, draft.session, f.transport)).status).toBe(
+    "APPROVED",
+  );
+  expect(f.posts()).toBe(1);
+});
+
+test("422 on inline comments publishes nothing and the same attempt reruns with corrected comments", async () => {
+  const f = await lifecycleFixture();
+  f.deny();
+  const bad = parseRequest({
+    ...f.request,
+    comments: [{ path: "a.ts", line: 999, body: "[P1] Off diff." }],
+  });
+  const blocked = await publishReview(f.config, bad, draft.session, f.transport);
+  expect(blocked.status).toBe("BLOCKED");
+  expect(blocked.reason).toBe("http-422");
+  expect(JSON.parse(await readFile(f.request.receipt, "utf8"))).toMatchObject({
+    mutationStarted: false,
+    inputDigest: null,
+    reviewId: null,
+  });
+  f.allow();
+  const fixed = parseRequest({
+    ...f.request,
+    comments: [{ path: "a.ts", line: 3, body: "[P1] On diff." }],
+  });
+  expect((await publishReview(f.config, fixed, draft.session, f.transport)).status).toBe(
+    "APPROVED",
+  );
+  expect(f.posts()).toBe(2);
+  expect(f.history).toHaveLength(1);
+});
+
+async function replyFixture(
+  options: { owner?: string; existing?: boolean; graphql?: unknown } = {},
+) {
+  const dir = await mkdtemp(join(tmpdir(), "spur-reply-"));
+  dirs.push(dir);
+  const keyPath = join(dir, "key.pem");
+  await writeFile(
+    keyPath,
+    generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
+      type: "pkcs8",
+      format: "pem",
+    }),
+    { mode: 0o600 },
+  );
+  const config = parseConfig({
+    repositories: ["owner/repo"],
+    receiptRoot: dir,
+    code: { appId: 1, keyPath },
+    browser: { appId: 2, keyPath },
+  });
+  const request = {
+    repo: "owner/repo",
+    pr: 4,
+    lane: "code" as const,
+    session: "review-1",
+    comment: 77,
+    body: "Verified in abc1234.",
+    resolve: true,
+  };
+  const footed = `${request.body}\n\nWritten by Spur · ${request.session}`;
+  const calls: { method: string; path: string; body?: unknown }[] = [];
+  const transport: typeof fetch = async (url, init) => {
+    const path = new URL(String(url)).pathname;
+    const method = init?.method ?? "GET";
+    const body = init?.body ? (JSON.parse(String(init.body)) as unknown) : undefined;
+    if (path === "/app") return Response.json({ id: 1, slug: "code" });
+    if (path.endsWith("/installation")) return Response.json({ id: 2, app_id: 1 });
+    if (path.endsWith("/access_tokens"))
+      return Response.json({
+        token: "SECRET",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+        permissions: { pull_requests: "write", metadata: "read" },
+      });
+    if (path === "/repos/owner/repo") return Response.json({ id: 3, full_name: "owner/repo" });
+    calls.push({ method, path, body });
+    if (path === "/repos/owner/repo/pulls/comments/77")
+      return Response.json({
+        id: 77,
+        user: { login: options.owner ?? "code[bot]" },
+        pull_request_url: "https://api.github.com/repos/owner/repo/pulls/4",
+      });
+    if (path === "/repos/owner/repo/pulls/4/comments")
+      return Response.json(
+        options.existing
+          ? [{ id: 88, user: { login: "code[bot]" }, in_reply_to_id: 77, body: footed }]
+          : [],
+      );
+    if (path === "/repos/owner/repo/pulls/4/comments/77/replies") return Response.json({ id: 99 });
+    if (path === "/graphql") {
+      const query = String((body as { query: string }).query);
+      if (options.graphql !== undefined) return Response.json(options.graphql);
+      if (query.startsWith("mutation"))
+        return Response.json({
+          data: { resolveReviewThread: { thread: { id: "T1", isResolved: true } } },
+        });
+      return Response.json({
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [
+                  { id: "T0", isResolved: false, comments: { nodes: [{ databaseId: 1 }] } },
+                  { id: "T1", isResolved: false, comments: { nodes: [{ databaseId: 77 }] } },
+                ],
+              },
+            },
+          },
+        },
+      });
+    }
+    throw new Error(`unexpected endpoint: ${method} ${path}`);
+  };
+  const posts = () => calls.filter((call) => call.method === "POST" && call.path !== "/graphql");
+  return { config, request, transport, calls, posts, footed };
+}
+
+test("reply posts a footed answer and resolves own thread", async () => {
+  const f = await replyFixture();
+  expect(await replyThread(f.config, f.request, f.request.session, f.transport)).toEqual({
+    status: "RESOLVED",
+    replyId: 99,
+    threadId: "T1",
+  });
+  expect(f.posts()).toEqual([
+    {
+      method: "POST",
+      path: "/repos/owner/repo/pulls/4/comments/77/replies",
+      body: { body: f.footed },
+    },
+  ]);
+  expect(f.calls.filter((call) => call.path === "/graphql")).toHaveLength(2);
+});
+
+test("reply without resolve skips GraphQL", async () => {
+  const f = await replyFixture();
+  const result = await replyThread(
+    f.config,
+    { ...f.request, resolve: false },
+    f.request.session,
+    f.transport,
+  );
+  expect(result).toMatchObject({ status: "REPLIED", replyId: 99 });
+  expect(f.calls.some((call) => call.path === "/graphql")).toBe(false);
+});
+
+test("reply refuses a thread the lane App did not open and sends nothing", async () => {
+  const f = await replyFixture({ owner: "human" });
+  await expect(
+    replyThread(f.config, f.request, f.request.session, f.transport),
+  ).rejects.toMatchObject({ category: "thread-not-owned" });
+  expect(f.posts()).toEqual([]);
+  expect(f.calls.some((call) => call.path === "/graphql")).toBe(false);
+});
+
+test("reply rejects a session mismatch before network", async () => {
+  const f = await replyFixture();
+  await expect(replyThread(f.config, f.request, "other", f.transport)).rejects.toMatchObject({
+    category: "session-mismatch",
+  });
+  expect(f.calls).toEqual([]);
+});
+
+test("reply with an identical existing answer does not post again but still resolves", async () => {
+  const f = await replyFixture({ existing: true });
+  expect(await replyThread(f.config, f.request, f.request.session, f.transport)).toMatchObject({
+    status: "RESOLVED",
+    replyId: 88,
+  });
+  expect(f.posts()).toEqual([]);
+  expect(f.calls.filter((call) => call.path === "/graphql")).toHaveLength(2);
+});
+
+test("reply surfaces GraphQL errors as thread-resolve-failed", async () => {
+  const f = await replyFixture({ graphql: { data: null, errors: [{ message: "denied" }] } });
+  await expect(
+    replyThread(f.config, f.request, f.request.session, f.transport),
+  ).rejects.toMatchObject({ category: "thread-resolve-failed" });
 });
