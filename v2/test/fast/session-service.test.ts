@@ -23782,7 +23782,13 @@ describe("SessionService", () => {
           ...overrides,
         });
 
-      async function changeDefault(applyToActive: boolean, failing?: string, unchanged?: string) {
+      async function changeDefault(
+        applyToActive: boolean,
+        failing?: string,
+        unchanged?: string,
+        // Runs inside the first switch, after the target snapshot was taken.
+        interleave?: (sessions: Map<string, ReturnType<typeof runningSession>>) => void,
+      ) {
         seedManagedAccounts("claude");
         tmuxSessionExistsMock.mockImplementation(async (name: string) => name !== "offline-tmux");
         const sessions = createSessionStore(
@@ -23812,6 +23818,7 @@ describe("SessionService", () => {
         });
         authProxySwitchSessionMock.mockImplementation(async (sessionId: string) => {
           if (sessionId === failing) throw new Error("companion unavailable");
+          if (sessionId === "auto-run") interleave?.(sessions);
           return {
             ...registration("claude", sessionId === unchanged ? "primary" : "backup"),
             sessionId,
@@ -23869,6 +23876,34 @@ describe("SessionService", () => {
         );
         expect(failures).toHaveLength(1);
         expect(failures[0]?.[1]).toMatchObject({ sessionId: "auto-also" });
+      });
+
+      it("keeps a pin that lands after the snapshot and does not count it", async () => {
+        const { result, sessions } = await changeDefault(true, undefined, undefined, (store) => {
+          store.set("auto-also", managed("auto-also", "claude", "pinned", "primary"));
+        });
+
+        expect(result.moved).toBe(1);
+        expect(authProxySwitchSessionMock.mock.calls.map(([id]) => id)).toEqual(["auto-run"]);
+        expect(sessions.get("auto-also")?.auth).toMatchObject({
+          mode: "pinned",
+          accountId: "primary",
+          effectiveAccountId: "primary",
+        });
+      });
+
+      it("does not move a session stopped after the snapshot", async () => {
+        const { result, sessions } = await changeDefault(true, undefined, undefined, (store) => {
+          store.set(
+            "auto-also",
+            managed("auto-also", "claude", "auto", "primary", { status: "stopped" }),
+          );
+        });
+
+        expect(result.moved).toBe(1);
+        expect(authProxySwitchSessionMock.mock.calls.map(([id]) => id)).toEqual(["auto-run"]);
+        expect(sessions.get("auto-also")?.auth?.effectiveAccountId).toBe("primary");
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
       });
 
       it("excludes a switch that leaves the session on its effective account", async () => {

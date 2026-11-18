@@ -1494,6 +1494,13 @@ type PaneGeneration = {
   processStarttime: number;
 };
 
+type SwitchAuthOptions = {
+  reason: "manual" | "auto_rate_limit";
+  force?: boolean;
+  /** Skip, under the session lock, unless the session is still a live running Auto session of this provider. */
+  onlyLiveAutoOf?: AuthProvider;
+};
+
 type SessionLifecycleStamp = {
   id: string;
   workspaceId: string;
@@ -25482,7 +25489,7 @@ export class SessionService {
   async switchAuth(
     sessionId: string,
     accountId: string | null,
-    opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
+    opts: SwitchAuthOptions,
   ): Promise<SessionView> {
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -25498,10 +25505,25 @@ export class SessionService {
     });
   }
 
+  /** Running status and a live runtime: the same predicate as the web count. */
+  private async isLiveRunning(session: SessionRecord): Promise<boolean> {
+    return (
+      session.status === "running" && (await getTmuxSessionPresence(session.tmuxSession)).present
+    );
+  }
+
+  private async isLiveAutoOf(session: SessionRecord, provider: AuthProvider): Promise<boolean> {
+    return (
+      session.agent === provider &&
+      session.auth?.mode === "auto" &&
+      (await this.isLiveRunning(session))
+    );
+  }
+
   private async switchAuthLocked(
     sessionId: string,
     accountId: string | null,
-    opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
+    opts: SwitchAuthOptions,
     claim: SessionLifecycleStamp,
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
@@ -25532,6 +25554,9 @@ export class SessionService {
         const current = readSession(this.config.dataDir, sessionId);
         if (!current || !this.lifecycleStampMatches(current, claim)) {
           throw new Error(`Session ${sessionId} changed during auth selection`);
+        }
+        if (opts.onlyLiveAutoOf && !(await this.isLiveAutoOf(current, opts.onlyLiveAutoOf))) {
+          return current;
         }
         const registration = await this.authProxy.switchSession(sessionId, accountId);
         this.authSnapshot = undefined;
@@ -25661,14 +25686,19 @@ export class SessionService {
           continue;
         }
         const session = readSession(this.config.dataDir, binding.sessionId);
-        if (session?.status !== "running") continue;
-        if ((await getTmuxSessionPresence(session.tmuxSession)).present) targets.push(binding);
+        if (session && (await this.isLiveRunning(session))) targets.push(binding);
       }
       for (const binding of targets) {
         try {
-          await this.switchAuth(binding.sessionId, null, { reason: "manual" });
+          // The snapshot above is stale by now: the switch re-checks eligibility under its lock.
+          await this.switchAuth(binding.sessionId, null, {
+            reason: "manual",
+            onlyLiveAutoOf: provider,
+          });
           const after = readSession(this.config.dataDir, binding.sessionId)?.auth;
-          if (after && after.effectiveAccountId !== binding.effectiveAccountId) moved += 1;
+          if (after?.mode === "auto" && after.effectiveAccountId !== binding.effectiveAccountId) {
+            moved += 1;
+          }
         } catch (error) {
           this.logEvent("session.auth.switch_failed", {
             level: "warn",
