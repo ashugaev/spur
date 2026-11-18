@@ -1477,7 +1477,7 @@ type ManualStatusOptions = {
   closeoutReport?: CloseoutReport;
 };
 type ManualStatusCommit =
-  | { kind: "finished"; view: SessionView | void }
+  | { kind: "finished"; view: SessionView | undefined }
   | {
       kind: "committed";
       record: SessionRecord;
@@ -23183,7 +23183,7 @@ export class SessionService {
     };
   }
 
-  private async finishManualStatus(commit: ManualStatusCommit): Promise<SessionView | void> {
+  private async finishManualStatus(commit: ManualStatusCommit): Promise<SessionView | undefined> {
     if (commit.kind === "finished") return commit.view;
     const { record, targetStatus, eventAction } = commit;
     if (targetStatus === "completed") await this.terminateDetachedSessionProcesses(record);
