@@ -81228,7 +81228,11 @@ describe("SessionService", () => {
         } else {
           await expect(
             path === "handoff"
-              ? service.handoff("api-1", { agent: "claude", model: "opus", reasoningEffort: "high" })
+              ? service.handoff("api-1", {
+                  agent: "claude",
+                  model: "opus",
+                  reasoningEffort: "high",
+                })
               : service.spawn(request),
           ).rejects.toThrow("tmux create failed");
           if (path === "handoff") expect(sessions.get("api-1")?.status).toBe("stopped");
@@ -81271,19 +81275,25 @@ describe("SessionService", () => {
 
         const restored = await service.restore(sessionId);
 
-        expect.soft(restored).toMatchObject({ id: sessionId, model: "opus", reasoningEffort: "high" });
-        expect.soft(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
-          "claude",
-          expect.any(String),
-          expect.objectContaining({ model: "opus", reasoningEffort: "high" }),
-        );
+        expect
+          .soft(restored)
+          .toMatchObject({ id: sessionId, model: "opus", reasoningEffort: "high" });
+        expect
+          .soft(buildAgentLaunchPlanMock)
+          .toHaveBeenCalledWith(
+            "claude",
+            expect.any(String),
+            expect.objectContaining({ model: "opus", reasoningEffort: "high" }),
+          );
         expect.soft(createTmuxSessionMock).toHaveBeenLastCalledWith(
           expect.objectContaining({
             sessionName: sessionId,
             launchCommand: expect.stringContaining("--model 'opus'"),
           }),
         );
-        expect(createTmuxSessionMock.mock.calls.at(-1)?.[0].launchCommand).toContain("--effort high");
+        expect(createTmuxSessionMock.mock.calls.at(-1)?.[0].launchCommand).toContain(
+          "--effort high",
+        );
         service.dispose();
       },
     );
@@ -81291,11 +81301,12 @@ describe("SessionService", () => {
     it("preserves selected launch settings when background preparation fails after allocation", async () => {
       const sessions = createSessionStore();
       const service = await createDisposedSessionService();
-      vi.spyOn(service as unknown as { logUserInput(): void }, "logUserInput").mockImplementationOnce(
-        () => {
-          throw new Error("preparation failed");
-        },
-      );
+      vi.spyOn(
+        service as unknown as { logUserInput(): void },
+        "logUserInput",
+      ).mockImplementationOnce(() => {
+        throw new Error("preparation failed");
+      });
 
       await expect(
         service.spawnInBackground({
