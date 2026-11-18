@@ -23782,11 +23782,13 @@ describe("SessionService", () => {
           ...overrides,
         });
 
-      async function changeDefault(applyToActive: boolean, failing?: string) {
+      async function changeDefault(applyToActive: boolean, failing?: string, unchanged?: string) {
         seedManagedAccounts("claude");
+        tmuxSessionExistsMock.mockImplementation(async (name: string) => name !== "offline-tmux");
         const sessions = createSessionStore(
           managed("auto-run", "claude", "auto", "primary"),
           managed("auto-also", "claude", "auto", "primary"),
+          managed("auto-offline", "claude", "auto", "primary", { tmuxSession: "offline-tmux" }),
           managed("auto-on-new", "claude", "auto", "backup"),
           managed("pinned-run", "claude", "pinned", "primary"),
           managed("auto-stopped", "claude", "auto", "primary", { status: "stopped" }),
@@ -23801,6 +23803,7 @@ describe("SessionService", () => {
           sessions: [
             binding("auto-run", "claude", "auto", "primary"),
             binding("auto-also", "claude", "auto", "primary"),
+            binding("auto-offline", "claude", "auto", "primary"),
             binding("auto-on-new", "claude", "auto", "backup"),
             binding("pinned-run", "claude", "pinned", "primary"),
             binding("auto-stopped", "claude", "auto", "primary"),
@@ -23810,7 +23813,7 @@ describe("SessionService", () => {
         authProxySwitchSessionMock.mockImplementation(async (sessionId: string) => {
           if (sessionId === failing) throw new Error("companion unavailable");
           return {
-            ...registration("claude", "backup"),
+            ...registration("claude", sessionId === unchanged ? "primary" : "backup"),
             sessionId,
             mode: "auto",
             accountId: null,
@@ -23850,16 +23853,29 @@ describe("SessionService", () => {
         ]);
         expect(authProxySwitchSessionMock).toHaveBeenCalledWith("auto-run", null);
         expect(sessions.get("auto-run")?.auth?.effectiveAccountId).toBe("backup");
-        for (const id of ["pinned-run", "auto-stopped", "codex-run"]) {
+        for (const id of ["pinned-run", "auto-offline", "auto-stopped", "codex-run"]) {
           expect(sessions.get(id)?.auth?.effectiveAccountId).toBe("primary");
         }
       });
 
       it("counts only the sessions that actually moved when one switch fails", async () => {
+        logSpurEventMock.mockClear();
         const { result } = await changeDefault(true, "auto-also");
 
         expect(result.moved).toBe(1);
         expect(authProxySwitchSessionMock).toHaveBeenCalledTimes(2);
+        const failures = logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.auth.switch_failed",
+        );
+        expect(failures).toHaveLength(1);
+        expect(failures[0]?.[1]).toMatchObject({ sessionId: "auto-also" });
+      });
+
+      it("excludes a switch that leaves the session on its effective account", async () => {
+        const { result } = await changeDefault(true, undefined, "auto-also");
+
+        expect(authProxySwitchSessionMock).toHaveBeenCalledTimes(2);
+        expect(result.moved).toBe(1);
       });
     });
 

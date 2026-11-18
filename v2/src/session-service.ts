@@ -25650,13 +25650,20 @@ export class SessionService {
     // sessions of the provider move only here, one per-session switch to Auto at a time.
     let moved = 0;
     if (applyToActive && pool.defaultAccountId !== null) {
-      const targets = (await this.authProxy.getState()).sessions.filter(
-        (binding) =>
-          binding.provider === provider &&
-          binding.mode === "auto" &&
-          binding.effectiveAccountId !== pool.defaultAccountId &&
-          readSession(this.config.dataDir, binding.sessionId)?.status === "running",
-      );
+      // Same predicate as the web count: running status and a live runtime.
+      const targets = [];
+      for (const binding of (await this.authProxy.getState()).sessions) {
+        if (
+          binding.provider !== provider ||
+          binding.mode !== "auto" ||
+          binding.effectiveAccountId === pool.defaultAccountId
+        ) {
+          continue;
+        }
+        const session = readSession(this.config.dataDir, binding.sessionId);
+        if (session?.status !== "running") continue;
+        if ((await getTmuxSessionPresence(session.tmuxSession)).present) targets.push(binding);
+      }
       for (const binding of targets) {
         try {
           await this.switchAuth(binding.sessionId, null, { reason: "manual" });

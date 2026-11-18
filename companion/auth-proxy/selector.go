@@ -31,11 +31,11 @@ func authFileID(id string) string    { return id + ".json" }
 func profileID(authID string) string { return strings.TrimSuffix(authID, ".json") }
 
 // refreshAdmissionLocked adopts the saved binding while the admission still tracks it, so parallel
-// requests of one session share rotation and episode state. A manual switch or default change
-// (new generation) keeps the admitted snapshot. Reports whether the admission tracks saved state.
+// requests of one session share rotation and episode state. A switch (new session generation)
+// keeps the admitted snapshot. Reports whether the admission tracks saved state.
 func (r *router) refreshAdmissionLocked(a *admission) bool {
 	saved, exists := r.state.Sessions[a.SessionID]
-	if !exists || saved.Session.Generation != a.Binding.Session.Generation || saved.DefaultGeneration != a.Binding.DefaultGeneration {
+	if !exists || saved.Session.Generation != a.Binding.Session.Generation {
 		return false
 	}
 	a.Binding = saved
