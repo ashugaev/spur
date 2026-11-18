@@ -2692,7 +2692,15 @@ test("422 on inline comments publishes nothing and the same attempt reruns with 
 });
 
 async function replyFixture(
-  options: { owner?: string; existing?: boolean; graphql?: unknown } = {},
+  options: {
+    owner?: string;
+    existing?: boolean;
+    graphql?: unknown;
+    inReplyTo?: number;
+    pullUrl?: string;
+    resolved?: boolean;
+    paged?: boolean;
+  } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), "spur-reply-"));
   dirs.push(dir);
@@ -2740,7 +2748,8 @@ async function replyFixture(
       return Response.json({
         id: 77,
         user: { login: options.owner ?? "code[bot]" },
-        pull_request_url: "https://api.github.com/repos/owner/repo/pulls/4",
+        pull_request_url: options.pullUrl ?? "https://api.github.com/repos/owner/repo/pulls/4",
+        ...(options.inReplyTo === undefined ? {} : { in_reply_to_id: options.inReplyTo }),
       });
     if (path === "/repos/owner/repo/pulls/4/comments")
       return Response.json(
@@ -2756,16 +2765,26 @@ async function replyFixture(
         return Response.json({
           data: { resolveReviewThread: { thread: { id: "T1", isResolved: true } } },
         });
+      const cursor = (body as { variables: { cursor: string | null } }).variables.cursor;
+      const page1 = options.paged === true && cursor === null;
       return Response.json({
         data: {
           repository: {
             pullRequest: {
               reviewThreads: {
-                pageInfo: { hasNextPage: false, endCursor: null },
-                nodes: [
-                  { id: "T0", isResolved: false, comments: { nodes: [{ databaseId: 1 }] } },
-                  { id: "T1", isResolved: false, comments: { nodes: [{ databaseId: 77 }] } },
-                ],
+                pageInfo: page1
+                  ? { hasNextPage: true, endCursor: "C1" }
+                  : { hasNextPage: false, endCursor: null },
+                nodes: page1
+                  ? [{ id: "T0", isResolved: false, comments: { nodes: [{ databaseId: 1 }] } }]
+                  : [
+                      { id: "T0", isResolved: false, comments: { nodes: [{ databaseId: 1 }] } },
+                      {
+                        id: "T1",
+                        isResolved: options.resolved === true,
+                        comments: { nodes: [{ databaseId: 77 }] },
+                      },
+                    ],
               },
             },
           },
@@ -2839,4 +2858,45 @@ test("reply surfaces GraphQL errors as thread-resolve-failed", async () => {
   await expect(
     replyThread(f.config, f.request, f.request.session, f.transport),
   ).rejects.toMatchObject({ category: "thread-resolve-failed" });
+});
+
+test("reply refuses a root that is itself a reply and sends nothing", async () => {
+  const f = await replyFixture({ inReplyTo: 5 });
+  await expect(
+    replyThread(f.config, f.request, f.request.session, f.transport),
+  ).rejects.toMatchObject({ category: "thread-not-owned" });
+  expect(f.posts()).toEqual([]);
+});
+
+test("reply refuses a comment from a different PR and sends nothing", async () => {
+  const f = await replyFixture({ pullUrl: "https://api.github.com/repos/owner/repo/pulls/5" });
+  await expect(
+    replyThread(f.config, f.request, f.request.session, f.transport),
+  ).rejects.toMatchObject({ category: "thread-not-owned" });
+  expect(f.posts()).toEqual([]);
+});
+
+test("reply on an already-resolved thread skips the resolve mutation", async () => {
+  const f = await replyFixture({ resolved: true });
+  expect(await replyThread(f.config, f.request, f.request.session, f.transport)).toMatchObject({
+    status: "RESOLVED",
+    threadId: "T1",
+  });
+  const queries = f.calls
+    .filter((call) => call.path === "/graphql")
+    .map((call) => (call.body as { query: string }).query);
+  expect(queries).toHaveLength(1);
+  expect(queries.some((query) => query.startsWith("mutation"))).toBe(false);
+});
+
+test("reply finds the thread on page 2 via endCursor", async () => {
+  const f = await replyFixture({ paged: true });
+  expect(await replyThread(f.config, f.request, f.request.session, f.transport)).toMatchObject({
+    status: "RESOLVED",
+    threadId: "T1",
+  });
+  const cursors = f.calls
+    .filter((call) => call.path === "/graphql")
+    .map((call) => (call.body as { variables: { cursor?: string | null } }).variables.cursor);
+  expect(cursors.slice(0, 2)).toEqual([null, "C1"]);
 });

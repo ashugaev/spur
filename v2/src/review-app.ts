@@ -613,12 +613,12 @@ const RESOLVE_THREAD = `mutation($id:ID!){resolveReviewThread(input:{threadId:$i
 // Answers a thread this lane App opened and optionally resolves it; never touches another author's thread.
 export async function replyThread(
   config: Config,
-  request: ReplyRequest,
+  input: unknown,
   session: string | undefined,
   transport?: typeof fetch,
 ) {
+  const request = parseReply(input);
   if (session !== request.session) throw new ReviewAppError("session-mismatch");
-  request = parseReply(request);
   const app = client(config, request.repo, request.lane, transport);
   const access = await app.authenticate();
   const path = `/repos/${request.repo}/pulls`;
@@ -1276,17 +1276,12 @@ export function registerReviewApp(program: Command): void {
     .requiredOption("--request <file>")
     .option("--json")
     .action(async (options: { appConfig: string; request: string }) => {
-      try {
-        const result = await replyThread(
-          parseConfig(await readJson(options.appConfig)),
-          parseReply(await readJson(options.request)),
-          process.env["SPUR_SESSION"],
-        );
-        process.stdout.write(`${JSON.stringify(result)}\n`);
-      } catch (error) {
-        process.stderr.write(`${error instanceof ReviewAppError ? error.category : "internal"}\n`);
-        process.exitCode = 1;
-      }
+      const result = await replyThread(
+        parseConfig(await readJson(options.appConfig)),
+        await readJson(options.request),
+        process.env["SPUR_SESSION"],
+      );
+      process.stdout.write(`${JSON.stringify(result)}\n`);
     });
   command
     .command("publish")
