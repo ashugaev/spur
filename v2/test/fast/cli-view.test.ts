@@ -143,6 +143,15 @@ describe("cli-view.describeSession", () => {
     expect(output).not.toContain("stopped by user");
   });
 
+  it("labels a stop from an account switch that could not resume", () => {
+    const output = describeSession(
+      session({ status: "stopped", stopReason: "auth_switch_unresumable", state: "stopped" }),
+    );
+
+    expect(output).toContain("account switch could not resume; restore to continue");
+    expect(output).not.toContain("stopped by user");
+  });
+
   it("shows compact persisted link ids instead of full URLs", () => {
     const output = describeSession(
       session({

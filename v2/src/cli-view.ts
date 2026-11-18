@@ -240,6 +240,8 @@ export function describeSession(session: SessionListItemView): string {
     facts.push("stopped by token budget");
   } else if (session.stopReason === "memory_shed") {
     facts.push("paused by memory guard");
+  } else if (session.stopReason === "auth_switch_unresumable") {
+    facts.push("account switch could not resume; restore to continue");
   } else if (session.status === "paused") {
     facts.push("paused by user");
   } else if (session.status === "completed") {
