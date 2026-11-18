@@ -63,6 +63,7 @@ DOCS
   Native PR alert ownership: docs/configuration.md#pr-alert-ownership.
   Closeout takeover and blocked-trigger notices: docs/commands.md, docs/configuration.md.
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
+  Saved provider accounts, pools, rotation and per-session switch: docs/claude-accounts.md; `spur auth`: docs/commands.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
   Full-access MCP: Pages source binding, backend controls/logs, cached attached PR status; setup: docs/mcp.md
   Interactive session snippets: docs/snippets.md; SDK and components: docs/spur-sdk.md

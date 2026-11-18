@@ -2,7 +2,7 @@
 
 - `GET /info` — `lifecycleInstanceId`, runtime `buildId`: process/build identity; `v2/src/session-lifecycle.ts`, `v2/src/build-identity.ts`.
 - `GET /headroom`
-- `GET /usage` — quota windows per Claude account and Codex, per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
+- `GET /usage` — quota windows per Claude account and Codex (a provider with a ready managed account: one row per ready OAuth account from the cached quota, `pending` error row until cached, host login hidden; companion failure falls back to host rows), per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
 - `GET /models` — model and default reasoning capabilities; discovery in `v2/src/agents/models.ts`.
 - `GET /api/pr-status` — web PR status, nullable reviewer names, native review requirement; `packages/web/src/app/api/pr-status/route.ts`, `packages/web/src/lib/pr-status-shape.ts`.
 - `POST /api/pr-status/batch` — web PR statuses, reviewer/native requirement metadata; `packages/web/src/app/api/pr-status/batch/route.ts`.
@@ -11,11 +11,23 @@
 - `GET /deploy/switch/status`
 - `POST /deploy/switch` — see [Auto update](configuration.md#auto-update)
 - `POST /deploy/auto-update`
-- `GET /claude-accounts`
-- `POST /claude-accounts/add`
+- `GET /claude-accounts` — `label` is the display name.
+- `POST /claude-accounts/add` — body label ignored.
 - `POST /claude-accounts/remove`
 - `POST /claude-accounts/:id/finish-login`
 - `GET /claude-accounts/:id/login-status`
+- `GET /auth-accounts` — provider profiles (`identity`, `displayName`, `quota`, `quotaError` (last refresh failure kind while no quota is cached), status, `limited`, `cooldownUntil`, `credential` `oauth|api_key`) and pool preferences; `v2/src/server.ts`.
+- `POST /auth-accounts` — body `{provider}`; create Claude/Codex profile; `v2/src/server.ts`.
+- `DELETE /auth-accounts/:id` — remove unused profile; `v2/src/server.ts`.
+- `POST /auth-accounts/:id/login` — start sign-in; body `{method?}` `oauth` (Claude default), `device` (Codex default), `browser`; other provider combinations `400`; `v2/src/server.ts`.
+- `POST /auth-accounts/:id/api-key` — body `{apiKey}`; saves only after a test request succeeds; key never returned; `v2/src/server.ts`.
+- `GET /auth-alerts` — `{alerts}` one per broken managed account or host login; event `session.auth.failed` once per breakage; `v2/src/auth-alerts.ts`.
+- `POST /auth-terminal-logins` — body `{accountId}` or `{host:"claude"|"codex"}`; native CLI sign-in in tmux; repeat restarts; response carries `command`, the display string of the native login command; `v2/src/auth-terminal-login.ts`.
+- `GET /auth-terminal-logins/:id` — status `running|verifying|ready|not_signed_in`, `reason` (`duplicate` when the account is already saved), `command`; `404` unknown; `v2/src/auth-terminal-login.ts`.
+- `DELETE /auth-terminal-logins/:id` — stop and delete the throwaway home; `v2/src/auth-terminal-login.ts`.
+- `POST /auth-accounts/:id/login-input` — submit code or cancel; `v2/src/server.ts`.
+- `GET /auth-accounts/:id/login-status` — durable OAuth readiness; `v2/src/server.ts`.
+- `PATCH /auth-pools/:provider` — default account and quota rotation; creates a missing pool; `v2/src/server.ts`.
 - `GET /projects`
 - `GET /projects/cron?project=<id>` — cron sources, bound triggers, owner-file drift, last tick/action from the live event log; `project` optional; `404` unknown project; `v2/src/cron-jobs.ts`.
 - `GET /projects/cron/edit` — disk draft for a Cron spawn trigger; MCP `get_cron_job_draft`; `v2/src/cron-job-editor.ts`.
@@ -64,7 +76,7 @@
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/handoff` — caller from `x-spur-caller-session` (agent actor, may name another session), none = human; `403 handoff_target_not_stalled` body `{ code, sessionId, status, error }`; agent self-handoff `409 todo_ledger_empty`, `409 work_snapshot_required` (running source without rate-limit/server-error marker only); response adds `movedTodoItems`; `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; optional `idempotencyKey` (same format, scoped to the source): retry after success `200` successor view + `movedTodoItems` + `replayed: true`, other request `409 idempotency_key_conflict` with successor `sessionId`, same key while running waits for that result, other or no key on a completed source keeps the existing error; a handoff that fails after its successor started leaves the successor running and the source open with no stored key, a same-key retry starts another successor (check `spur list` first); `v2/src/session-service.ts`.
 - `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
-- `POST /sessions/:id/switch-auth` — 404 unless `authRotation.switchAuth: true`
+- `POST /sessions/:id/switch-auth` — next-request managed account or Auto; `v2/src/server.ts`.
 - `GET /sessions/:id/todo` — archived too; `404` without a ledger
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo-snapshot)
 - `GET /sessions/:id/snapshots` — metadata; `order=asc|desc` (default asc), `limit` 1..100, exclusive `before`/`after` versions; archived too; `400 invalid_snapshot_request|404|500 snapshot_corrupt`; `v2/src/snapshots.ts`

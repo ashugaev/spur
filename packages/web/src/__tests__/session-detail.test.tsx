@@ -331,6 +331,53 @@ describe("SessionDetail header", () => {
     expect(screen.getByRole("button", { name: "Copy task" })).toBeInTheDocument();
   });
 
+  it.each(["claude", "codex"] as const)(
+    "opens the managed %s account dialog from More",
+    async (provider) => {
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(
+              sessionFixture({
+                agent: provider,
+                auth: {
+                  sessionId: "api-a1",
+                  provider,
+                  mode: "auto",
+                  accountId: null,
+                  effectiveAccountId: "managed-account",
+                  generation: 1,
+                },
+              }),
+            ),
+          );
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()));
+        }
+        if (url === "/api/auth-accounts") {
+          return new Response(JSON.stringify({ accounts: [], pools: {} }));
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }));
+        }
+        return new Response(JSON.stringify({}));
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+
+      await screen.findByRole("button", { name: "More session actions" });
+      expect(screen.queryByRole("button", { name: "Switch account" })).not.toBeInTheDocument();
+      fireEvent.click(secondaryAction("Switch account"));
+      expect(screen.queryByRole("menu", { name: "Session actions" })).not.toBeInTheDocument();
+      expect(
+        await screen.findByRole("dialog", {
+          name: provider === "claude" ? "Switch Claude account" : "Switch Codex account",
+        }),
+      ).toBeVisible();
+    },
+  );
+
   it("shows the session model in the header meta row when present", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

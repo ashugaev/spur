@@ -1,9 +1,11 @@
 import type { HostMemory } from "./host-memory.js";
 import type { CursorPersistedSubmitBaseline } from "./agents/cursor-submit-ack.js";
+import type { AuthSession } from "./auth-proxy.js";
 
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
 export const AUTOMATIC_REMINDER_MAX_ATTEMPTS = 3;
+export const AUTH_CHANGE_PING_MAX_ATTEMPTS = 2;
 
 export const SESSION_STATUSES = [
   "spawning",
@@ -1172,7 +1174,7 @@ export interface AppConfig {
     autoRotateOnRateLimit: boolean;
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
-    // Manual "Switch auth" surface: daemon route plus SessionView.claudeAccounts.
+    // Legacy Claude session-menu visibility; managed selection is always available.
     switchAuth: boolean;
   };
   diskRetention: {
@@ -1350,6 +1352,7 @@ export interface SessionRecord {
   closeoutOwner?: boolean;
   prAlertTransfer?: PrAlertTransfer;
   claudeAccountId?: string;
+  auth?: AuthSession;
   allowedTriggers?: string[];
   /** Send trigger ids already announced to the owner; one notice per id. */
   blockedTriggerNotices?: string[];
@@ -1451,6 +1454,8 @@ export interface SessionRecord {
     sourceOrdinals: Record<string, number>;
     paneLatched: boolean;
   };
+  /** One continue ping per account change: key is `generation:effectiveAccountId`, written before the send. */
+  authChangePing?: { key: string; attempts: number; pinged: boolean };
   serverErrorAt?: string;
   serverErrorReactivationAttempts?: number;
   todoNudge?: { fingerprint: string; attempts: number };
@@ -1610,6 +1615,7 @@ export interface SessionView extends Omit<
   deskGroupMembers?: SessionDeskMember[];
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
+  authError?: string;
   queuedMessages?: SessionQueuedMessagesView;
   tokenUsageView?: SessionTokenUsageView;
   preflightTokenUsageView?: PreflightTokenUsageView;
@@ -1766,9 +1772,9 @@ export interface SpawnSessionRequest {
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
-  // Claude account whose CLAUDE_CONFIG_DIR the launch binds to. Carried across
-  // respawn so a rotated session relaunches onto its current account instead of
-  // falling back to the (still-rate-limited) default.
+  /** Saved provider account; omitted or null selects the managed Auto pool. */
+  authAccountId?: string | null;
+  /** Compatibility alias for a Claude profile. */
   claudeAccountId?: string;
   subscriptions?: SubscribeSessionStatesRequest[];
   idempotencyKey?: string;

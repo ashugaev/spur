@@ -3112,7 +3112,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         actionDialogs.openSwitchAuth(session);
                       }}
                     >
-                      Switch auth
+                      Switch account
                     </button>
                   ) : null}
                   {canPause(session) ? (

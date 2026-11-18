@@ -2165,7 +2165,9 @@ projects:
         ]),
       ).rejects.toMatchObject({
         stderr: expect.stringContaining(
-          `branch "${occupiedBranch}" is already checked out in worktree ${occupiedWorktreePath}`,
+          JSON.stringify({
+            error: `branch "${occupiedBranch}" is already checked out in worktree ${occupiedWorktreePath}`,
+          }),
         ),
       });
     } finally {

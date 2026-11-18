@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { authSessionSchema } from "./auth-proxy.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -19,6 +20,7 @@ import { parseConsent, type InterfaceConsent } from "./review-interface-consent.
 import {
   isSessionState,
   isTerminalSessionStatus,
+  AUTH_CHANGE_PING_MAX_ATTEMPTS,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   DELIVERY_MAX_ATTEMPTS,
   type AvailableBacklogItem,
@@ -1588,6 +1590,16 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
   const rateLimitClearFence = normalizeRateLimitClearFence(normalizedSession.rateLimitClearFence);
   const claudeStatusOwner = normalizeClaudeStatusOwner(normalizedSession.claudeStatusOwner);
+  const parsedAuth =
+    normalizedSession.auth === undefined
+      ? undefined
+      : authSessionSchema.safeParse(normalizedSession.auth);
+  if (parsedAuth && !parsedAuth.success) {
+    throw new InvalidSessionMetadataError(
+      `Invalid session metadata auth for ${normalizedSession.id}: ${parsedAuth.error.message}`,
+    );
+  }
+  const auth = parsedAuth?.data;
   // Records written before the rename carry the hold as launchUnconfirmedAt;
   // read it once here so an existing hold survives, and write only the new name.
   const legacyUnconfirmed = (normalizedSession as { launchUnconfirmedAt?: unknown })
@@ -1765,6 +1777,15 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     normalizedSession.serverErrorReactivationAttempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
       ? { serverErrorReactivationAttempts: normalizedSession.serverErrorReactivationAttempts }
       : {}),
+    ...(normalizedSession.authChangePing &&
+    typeof normalizedSession.authChangePing.key === "string" &&
+    normalizedSession.authChangePing.key !== "" &&
+    typeof normalizedSession.authChangePing.pinged === "boolean" &&
+    Number.isInteger(normalizedSession.authChangePing.attempts) &&
+    normalizedSession.authChangePing.attempts >= 0 &&
+    normalizedSession.authChangePing.attempts <= AUTH_CHANGE_PING_MAX_ATTEMPTS
+      ? { authChangePing: normalizedSession.authChangePing }
+      : {}),
     ...(normalizedSession.todoNudge &&
     typeof normalizedSession.todoNudge.fingerprint === "string" &&
     /^[a-f0-9]{64}$/.test(normalizedSession.todoNudge.fingerprint) &&
@@ -1784,6 +1805,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
+    ...(auth ? { auth } : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
     ...(normalizedSession.error &&

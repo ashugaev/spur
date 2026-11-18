@@ -159,6 +159,22 @@ describe("UsageModal load states", () => {
     expect(screen.queryByRole("button", { name: /refresh/i })).not.toBeInTheDocument();
   });
 
+  it("shows one labeled row per managed account of one provider", async () => {
+    const managed = (source: string, label: string): QuotaSourceResult => ({
+      ...okSource,
+      source,
+      label,
+      plan: null,
+    });
+    await renderReady({
+      ...REPORT,
+      quotas: [managed("acc-a", "alice@example.com"), managed("acc-b", "bob@example.com")],
+    });
+    expect(screen.getByText("alice@example.com")).toBeInTheDocument();
+    expect(screen.getByText("bob@example.com")).toBeInTheDocument();
+    expect(screen.getAllByText("5h")).toHaveLength(2);
+  });
+
   it("aborts the in-flight request on unmount", () => {
     let signal: AbortSignal | undefined;
     vi.stubGlobal(

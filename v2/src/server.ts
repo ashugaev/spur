@@ -11,6 +11,9 @@ import {
   RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
+import { z } from "zod";
+import { AuthorizationError, authProviderSchema } from "./auth-accounts.js";
+import { authLoginMethodSchema } from "./auth-proxy.js";
 import { agentPaneChildFallbackEnabled } from "./agents/executable.js";
 import {
   AgentModelError,
@@ -920,8 +923,15 @@ function parseSpawnStateSubscriptions(raw: unknown): SubscribeSessionStatesReque
 }
 
 function mergeSpawnStateSubscriptions(body: SpawnSessionRequest): SpawnSessionRequest {
+  const account = z.string().trim().min(1).nullable().optional().safeParse(body.authAccountId);
+  if (!account.success)
+    throw new AuthorizationError("authAccountId must be a nonblank string or null", 400);
   const subscriptions = parseSpawnStateSubscriptions(body.subscriptions);
-  return { ...body, ...(subscriptions ? { subscriptions } : {}) };
+  return {
+    ...body,
+    ...(account.data !== undefined ? { authAccountId: account.data } : {}),
+    ...(subscriptions ? { subscriptions } : {}),
+  };
 }
 
 export async function startServer(
@@ -1021,6 +1031,7 @@ export async function startServer(
     setGhEventSink(cfg.dataDir);
   };
   applyLogConfigs(service.config);
+  await service.recoverManagedAuthorization();
   service.startBackgroundLoops();
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
@@ -1040,6 +1051,8 @@ export async function startServer(
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
+  // GET /usage logs a managed-account read failure once per run of failures.
+  let managedUsageFailing = false;
   // Single owner of a failed request: the status sets the response code and the
   // log level from one argument, so the two can never drift.
   const failRequest = (
@@ -1253,6 +1266,23 @@ export async function startServer(
         const nowMs = Date.now();
         const todayStart = new Date(nowMs);
         todayStart.setHours(0, 0, 0, 0);
+        let managedAccounts: Awaited<
+          ReturnType<typeof service.listAuthorizationAccounts>
+        >["accounts"] = [];
+        try {
+          managedAccounts = (await service.listAuthorizationAccounts(undefined, { quota: true }))
+            .accounts;
+          managedUsageFailing = false;
+        } catch (error) {
+          if (!managedUsageFailing) {
+            logEvent("usage.managed_accounts.unavailable", {
+              level: "warn",
+              message: "Managed accounts unavailable; usage shows host logins",
+              details: { error: error instanceof Error ? error.message : String(error) },
+            });
+          }
+          managedUsageFailing = true;
+        }
         sendJson(
           response,
           200,
@@ -1262,6 +1292,7 @@ export async function startServer(
             dataDir: service.config.dataDir,
             nowMs,
             todayStartMs: todayStart.getTime(),
+            managedAccounts,
           }),
         );
         return;
@@ -1415,15 +1446,153 @@ export async function startServer(
         }
       }
 
+      if (method === "GET" && path === "/auth-accounts") {
+        const provider = authProviderSchema
+          .optional()
+          .safeParse(url.searchParams.get("agent") ?? undefined);
+        if (!provider.success) throw new AuthorizationError("agent must be claude or codex", 400);
+        sendJson(
+          response,
+          200,
+          await service.listAuthorizationAccounts(provider.data, { quota: true }),
+        );
+        return;
+      }
+
+      if (method === "POST" && path === "/auth-accounts") {
+        const body = z
+          .object({ provider: authProviderSchema })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("provider must be claude or codex", 400);
+        sendJson(response, 201, {
+          account: await service.addAuthorizationAccount(body.data.provider),
+        });
+        return;
+      }
+
+      const authPoolProvider = path.match(/^\/auth-pools\/([^/]+)$/)?.[1];
+      if (method === "PATCH" && authPoolProvider) {
+        const provider = authProviderSchema.safeParse(authPoolProvider);
+        if (!provider.success)
+          throw new AuthorizationError("provider must be claude or codex", 400);
+        const body = z
+          .object({
+            defaultAccountId: z.string().min(1).nullable().optional(),
+            autoRotate: z.boolean().optional(),
+          })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Invalid authorization pool update", 400);
+        sendJson(response, 200, {
+          pool: await service.updateAuthorizationPool(provider.data, {
+            ...(body.data.defaultAccountId !== undefined
+              ? { defaultAccountId: body.data.defaultAccountId }
+              : {}),
+            ...(body.data.autoRotate !== undefined ? { autoRotate: body.data.autoRotate } : {}),
+          }),
+        });
+        return;
+      }
+
+      const managedAccountId = path.match(/^\/auth-accounts\/([^/]+)$/)?.[1];
+      if (method === "DELETE" && managedAccountId) {
+        await service.removeAuthorizationAccount(managedAccountId);
+        sendJson(response, 200, { removed: managedAccountId });
+        return;
+      }
+
+      const managedLoginId = path.match(/^\/auth-accounts\/([^/]+)\/login$/)?.[1];
+      if (method === "POST" && managedLoginId) {
+        const body = z
+          .object({ method: authLoginMethodSchema.optional() })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) {
+          throw new AuthorizationError("method must be oauth, device or browser", 400);
+        }
+        sendJson(
+          response,
+          200,
+          await service.startAuthorizationLogin(managedLoginId, body.data.method),
+        );
+        return;
+      }
+      const managedApiKeyId = path.match(/^\/auth-accounts\/([^/]+)\/api-key$/)?.[1];
+      if (method === "POST" && managedApiKeyId) {
+        const body = z
+          .object({ apiKey: z.string() })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Supply an apiKey string", 400);
+        sendJson(
+          response,
+          200,
+          await service.setAuthorizationApiKey(managedApiKeyId, body.data.apiKey),
+        );
+        return;
+      }
+      if (method === "GET" && path === "/auth-alerts") {
+        sendJson(response, 200, await service.listAuthAlerts());
+        return;
+      }
+      if (method === "POST" && path === "/auth-terminal-logins") {
+        const body = z
+          .union([
+            z.object({ accountId: z.string().min(1) }).strict(),
+            z.object({ host: authProviderSchema }).strict(),
+          ])
+          .safeParse(await readJsonBody(request));
+        if (!body.success) {
+          throw new AuthorizationError("Supply accountId or host (claude or codex)", 400);
+        }
+        sendJson(response, 200, await service.startTerminalLogin(body.data));
+        return;
+      }
+      const terminalLoginId = path.match(/^\/auth-terminal-logins\/([^/]+)$/)?.[1];
+      if (method === "GET" && terminalLoginId) {
+        sendJson(response, 200, service.getTerminalLogin(terminalLoginId));
+        return;
+      }
+      if (method === "DELETE" && terminalLoginId) {
+        await service.stopTerminalLogin(terminalLoginId);
+        sendJson(response, 200, { stopped: terminalLoginId });
+        return;
+      }
+      const managedLoginInputId = path.match(/^\/auth-accounts\/([^/]+)\/login-input$/)?.[1];
+      if (method === "POST" && managedLoginInputId) {
+        const body = z
+          .union([
+            z.object({ input: z.string().trim().min(1) }).strict(),
+            z.object({ cancel: z.literal(true) }).strict(),
+          ])
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Supply input or cancel:true", 400);
+        sendJson(
+          response,
+          200,
+          await service.authorizationLoginInput(
+            managedLoginInputId,
+            "input" in body.data ? body.data.input : null,
+          ),
+        );
+        return;
+      }
+      const managedLoginStatusId = path.match(/^\/auth-accounts\/([^/]+)\/login-status$/)?.[1];
+      if (method === "GET" && managedLoginStatusId) {
+        sendJson(response, 200, await service.authorizationLoginStatus(managedLoginStatusId));
+        return;
+      }
+
       if (method === "GET" && path === "/claude-accounts") {
-        sendJson(response, 200, { accounts: service.listClaudeAccounts() });
+        sendJson(response, 200, { accounts: await service.listClaudeAccounts() });
         return;
       }
 
       if (method === "POST" && path === "/claude-accounts/add") {
-        const body = await readJsonBody<{ label?: unknown }>(request);
-        const label = typeof body.label === "string" ? body.label.trim() : "";
-        const account = service.addClaudeAccount(label ? { label } : {});
+        // A label in the body is ignored: accounts are named from provider identity.
+        await readJsonBody(request);
+        const account = await service.addClaudeAccount();
         const { loginTmuxSession } = await service.startAccountLogin(account.id);
         // Return the summary shape (no absolute configDir) to match GET /claude-accounts.
         sendJson(response, 201, {
@@ -1431,7 +1600,6 @@ export async function startServer(
             id: account.id,
             label: account.label,
             authenticated: false,
-            lastUsedAt: account.lastUsedAt,
           },
           loginTmuxSession,
         });
@@ -1446,7 +1614,7 @@ export async function startServer(
           return;
         }
         try {
-          service.removeClaudeAccount(id);
+          await service.removeClaudeAccount(id);
         } catch (error) {
           // In-use guard rejection is a client-correctable conflict, not a 500.
           const message = error instanceof Error ? error.message : String(error);
@@ -2779,20 +2947,16 @@ export async function startServer(
 
       const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
       if (method === "POST" && switchAuthSessionId) {
-        if (!service.config.authRotation.switchAuth) {
-          sendError(response, 404, "switch-auth is disabled; set authRotation.switchAuth: true");
-          return;
-        }
         const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
-        const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
-        if (!accountId) {
-          sendJson(response, 400, { error: "accountId must be a non-empty string" });
+        const account = z.string().trim().min(1).nullable().safeParse(body.accountId);
+        if (!account.success) {
+          sendJson(response, 400, { error: "accountId must be a non-empty string or null" });
           return;
         }
         sendJson(
           response,
           200,
-          await service.switchAuth(switchAuthSessionId, accountId, {
+          await service.switchAuth(switchAuthSessionId, account.data, {
             reason: "manual",
             force: body.force === true,
           }),
@@ -3192,6 +3356,7 @@ export async function startServer(
         return;
       }
       if (
+        error instanceof AuthorizationError ||
         error instanceof AgentReasoningEffortError ||
         error instanceof AgentModelError ||
         error instanceof SessionResourceNotFoundError ||

@@ -226,6 +226,17 @@ describe("DirectTerminal header agent and model", () => {
     expect(within(header).getByText(/claude/)).toBeInTheDocument();
     expect(header.textContent).not.toContain("undefined");
   });
+
+  it("omits its own header when embedded with hideHeader", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal hideHeader agent="claude" sessionId="embedded-session" />);
+    });
+
+    expect(screen.queryByTestId("direct-terminal-header")).toBeNull();
+    expect(screen.getByTestId("direct-terminal-surface")).toBeInTheDocument();
+  });
 });
 
 describe("DirectTerminal controls safe-area", () => {
@@ -255,5 +266,42 @@ describe("DirectTerminal controls safe-area", () => {
     expect(controls.className).toContain(
       "pr-[max(0.5rem,env(safe-area-inset-right),env(safe-area-inset-bottom))]",
     );
+  });
+});
+
+describe("DirectTerminal key bar", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    MockWebSocket.mockClear();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("is absent unless asked for", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="no-key-bar" />);
+    });
+
+    expect(screen.queryByTestId("terminal-key-bar")).toBeNull();
+  });
+
+  it("sends Esc, up and down to the terminal, has no second Enter, and is hidden from sm up", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+    await act(async () => {
+      render(<DirectTerminal agent="claude" keyBar sessionId="key-bar" />);
+    });
+    await waitFor(() => expect(MockWebSocket).toHaveBeenCalledTimes(1));
+    const socket = MockWebSocket.mock.results[0]?.value as { send: ReturnType<typeof vi.fn> };
+    await waitFor(() => expect((socket as unknown as { readyState: number }).readyState).toBe(1));
+    const bar = within(screen.getByTestId("terminal-key-bar"));
+    expect(screen.getByTestId("terminal-key-bar").className).toContain("sm:hidden");
+    socket.send.mockClear();
+
+    expect(bar.queryByRole("button", { name: "Enter" })).toBeNull();
+    for (const name of ["Escape", "Arrow Up", "Arrow Down"]) {
+      fireEvent.click(bar.getByRole("button", { name }));
+    }
+
+    expect(socket.send.mock.calls.map((call) => call[0])).toEqual(["\x1b", "\x1b[A", "\x1b[B"]);
   });
 });

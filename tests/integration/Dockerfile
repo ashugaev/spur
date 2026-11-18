@@ -1,4 +1,8 @@
+FROM golang:1-bookworm AS go-bootstrap
+
 FROM node:22-bookworm
+
+COPY --from=go-bootstrap /usr/local/go /opt/spur-build-go
 
 RUN apt-get update && apt-get install -y \
     git \
