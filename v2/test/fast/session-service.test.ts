@@ -81184,6 +81184,165 @@ describe("SessionService", () => {
       },
     );
 
+    it.each(["foreground", "handoff", "trigger background"] as const)(
+      "preserves selected launch settings through a failed %s spawn and same-identity restore",
+      async (path) => {
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        const sessionId = path === "handoff" ? "api-2" : "api-1";
+        if (path === "handoff") {
+          sessions.set("api-1", sessionRecord({ id: "api-1", agent: "codex" }));
+          workspaceExistsMock.mockReturnValue(true);
+          reserveNextSessionIdMock.mockResolvedValue("api-2");
+        }
+        createTmuxSessionMock.mockRejectedValue(new Error("tmux create failed"));
+        getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
+        getTmuxPanePresenceMock.mockResolvedValue({ dead: true, unresponsive: false });
+        probeTmuxProcessMatchMock.mockResolvedValue({
+          alive: false,
+          matchedByName: false,
+          unresponsive: false,
+        });
+        const service = await createDisposedSessionService();
+        const request = {
+          project: "api",
+          prompt: "hello",
+          model: "opus",
+          reasoningEffort: "high" as const,
+          overrides: { worktree: false },
+        };
+        if (path === "trigger background") {
+          lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null, paneDead: false });
+          captureAgentProcessesForLaunchMock.mockResolvedValue({
+            status: "ok",
+            processes: [],
+            complete: true,
+          });
+          await service.spawnFromRequest(
+            { ...request, idempotencyKey: "failed-selection" },
+            "background",
+          );
+          await service.settleBackgroundSpawns();
+          expect(sessions.get(sessionId)?.triggerBirthKey).toBe("api:failed-selection");
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(3);
+        } else {
+          await expect(
+            path === "handoff"
+              ? service.handoff("api-1", { agent: "claude", model: "opus", reasoningEffort: "high" })
+              : service.spawn(request),
+          ).rejects.toThrow("tmux create failed");
+          if (path === "handoff") expect(sessions.get("api-1")?.status).toBe("stopped");
+        }
+
+        expect.soft(sessions.get(sessionId)).toMatchObject({
+          status: "errored",
+          model: "opus",
+          reasoningEffort: "high",
+        });
+        const { buildClaudePlan } = await vi.importActual<typeof claudeModule>(
+          "../../src/agents/claude.js",
+        );
+        buildAgentLaunchPlanMock.mockImplementation(
+          (_agent: string, prompt: string, options: Parameters<typeof buildClaudePlan>[1]) =>
+            buildClaudePlan(prompt, options),
+        );
+        buildAgentLaunchPlanMock.mockClear();
+        buildAgentRestorePlanMock.mockResolvedValue(null);
+        findAgentSessionIdMock.mockResolvedValue(null);
+        mockTimerPromisesSleepWithFakeTimers();
+        let restoredPaneCreated = false;
+        createTmuxSessionMock.mockImplementation(async () => {
+          restoredPaneCreated = true;
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => restoredPaneCreated);
+        getTmuxSessionPresenceMock.mockImplementation(async () => ({
+          present: restoredPaneCreated,
+          unresponsive: false,
+        }));
+        getTmuxPanePresenceMock.mockImplementation(async () => ({
+          dead: !restoredPaneCreated,
+          unresponsive: false,
+        }));
+        probeTmuxProcessMatchMock.mockImplementation(async () => ({
+          alive: restoredPaneCreated,
+          matchedByName: restoredPaneCreated,
+          unresponsive: false,
+        }));
+
+        const restored = await service.restore(sessionId);
+
+        expect.soft(restored).toMatchObject({ id: sessionId, model: "opus", reasoningEffort: "high" });
+        expect.soft(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+          "claude",
+          expect.any(String),
+          expect.objectContaining({ model: "opus", reasoningEffort: "high" }),
+        );
+        expect.soft(createTmuxSessionMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            sessionName: sessionId,
+            launchCommand: expect.stringContaining("--model 'opus'"),
+          }),
+        );
+        expect(createTmuxSessionMock.mock.calls.at(-1)?.[0].launchCommand).toContain("--effort high");
+        service.dispose();
+      },
+    );
+
+    it("preserves selected launch settings when background preparation fails after allocation", async () => {
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      vi.spyOn(service as unknown as { logUserInput(): void }, "logUserInput").mockImplementationOnce(
+        () => {
+          throw new Error("preparation failed");
+        },
+      );
+
+      await expect(
+        service.spawnInBackground({
+          project: "api",
+          prompt: "hello",
+          model: "opus",
+          reasoningEffort: "high",
+        }),
+      ).rejects.toThrow("preparation failed");
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        model: "opus",
+        reasoningEffort: "high",
+        error: "preparation failed",
+      });
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["project model", "no selection"] as const)(
+      "preserves %s without inventing explicit effort after allocated spawn failure",
+      async (selection) => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: {
+            api: {
+              ...baseConfig().projects.api,
+              defaultModels: selection === "project model" ? { codex: "gpt-custom" } : {},
+            },
+          },
+        });
+        const sessions = createSessionStore();
+        createWorktreeMock.mockRejectedValueOnce(new Error("worktree failed"));
+        const service = await createDisposedSessionService();
+
+        await expect(
+          service.spawn({ project: "api", agent: "codex", prompt: "hello" }),
+        ).rejects.toThrow("worktree failed");
+
+        expect(sessions.get("api-1")?.status).toBe("errored");
+        expect(sessions.get("api-1")?.model).toBe(
+          selection === "project model" ? "gpt-custom" : undefined,
+        );
+        expect(sessions.get("api-1")).not.toHaveProperty("reasoningEffort");
+      },
+    );
+
     it("keeps messages queued during a failed spawn on the errored record and reports them", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
