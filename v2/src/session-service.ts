@@ -34,6 +34,26 @@ import {
   SessionLifecycleRegister,
 } from "./session-lifecycle.js";
 import { homedir, userInfo } from "node:os";
+import { fileURLToPath } from "node:url";
+import {
+  AuthorizationError,
+  AuthAccounts,
+  authDisplayNames,
+  withCompanionIdentity,
+  type AuthProvider,
+  type AuthAccountSummary,
+} from "./auth-accounts.js";
+import { AuthQuota } from "./auth-quota.js";
+import {
+  AuthProxy,
+  authProxyBinaryPath,
+  type AuthRegistration,
+  type AuthLogin,
+  type AuthLoginMethod,
+  type AuthProxyState,
+  type AuthRotation,
+} from "./auth-proxy.js";
+import { managedAuthLaunch, publicAuthSession, scrubManagedClaudeHome } from "./auth-launch.js";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
 import {
@@ -123,17 +143,21 @@ import {
 } from "./branch-name.js";
 import {
   findLatestSessionFile as findLatestClaudeSessionFile,
-  claudeCommand,
   DEFAULT_CLAUDE_MODEL,
+  claudeCommand,
 } from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
   CODEX_HOME_DIR,
+  codexArgsSelectProvider,
+  codexCommand,
   codexHookHomePath,
+  codexUsesCustomProvider,
   findLatestCodexSessionFile,
   readCodexConversationTail,
   readCodexRolloutState,
   readCodexTranscriptEntries,
+  readCodexUserConfig,
   type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
@@ -156,7 +180,21 @@ import {
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
-import { readFreshSessionQuota, type QuotaSourceResult } from "./usage-report.js";
+import {
+  readFreshSessionQuota,
+  readHostCredentialSources,
+  type QuotaSourceResult,
+  type UsageReportDeps,
+} from "./usage-report.js";
+import {
+  AuthAlerts,
+  logAuthFailed,
+  observeHostSource,
+  type AlertEvaluationInput,
+  type AuthAlert,
+  type ManagedBreakage,
+} from "./auth-alerts.js";
+import { AuthTerminalLogins, type TerminalLogin } from "./auth-terminal-login.js";
 import {
   ACTIVITY_WINDOW_MS,
   CONVERSATION_PAGE_ENTRIES,
@@ -177,20 +215,7 @@ import {
   historyStampKey,
   historyStampSessionId,
 } from "./agent-history-delta.js";
-import {
-  addAccount,
-  ensureDefaultAccount,
-  findAccount,
-  isAccountAuthenticated,
-  isAccountReady,
-  listAccounts,
-  removeAccount,
-  seedSessionHome,
-  sessionClaudeHome,
-  swapSessionCredentials,
-  touchAccountUsed,
-  type ClaudeAccount,
-} from "./claude-accounts.js";
+import { findAccount, seedSessionHome, sessionClaudeHome } from "./claude-accounts.js";
 import {
   buildSidecarLinkUrl,
   DEFAULT_PROJECT_CONFIG_FILES,
@@ -624,6 +649,7 @@ import {
   type UpdateSessionSlotsRequest,
   type UpdateSessionSlotsResponse,
   type TodoActor,
+  AUTH_CHANGE_PING_MAX_ATTEMPTS,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
   type TodoProjection,
@@ -771,6 +797,7 @@ const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
 const CLAUDE_SERVER_ERROR_REACTIVATION_MS = 30 * 60 * 1000;
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
+const AUTH_CHANGE_PING_MESSAGE = "Account changed. Continue.";
 const SIDECAR_REAPER_INTERVAL_MS = 60_000;
 const MEMORY_SHED_INTERVAL_MS = 1_000;
 // Consecutive 1s ticks above the restore floor plus margin required before
@@ -2204,6 +2231,7 @@ async function setupSessionAgentHooks(args: {
   sessionToolDir: string;
   restrictWrites: boolean;
   modelsCacheHome: string;
+  managedAuth?: boolean;
   model?: string;
   reasoningEffort?: ProviderReasoningEffort;
   reasoningVariantNames?: string[];
@@ -2215,9 +2243,10 @@ async function setupSessionAgentHooks(args: {
   // servers below. Default (no bound account, or record not yet
   // written at spawn time) falls back to homedir() inside setup().
   const session = readSession(args.dataDir, args.sessionId);
-  const claudeConfigDir = session
-    ? resolveClaudeAuthPlanOptions(args.dataDir, session).claudeConfigDir
-    : undefined;
+  const claudeConfigDir =
+    session && !session.auth && !args.managedAuth
+      ? resolveClaudeAuthPlanOptions(args.dataDir, session).claudeConfigDir
+      : undefined;
   const hookArgs = {
     agent: args.agent,
     worktreePath: args.worktreePath,
@@ -2228,6 +2257,7 @@ async function setupSessionAgentHooks(args: {
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
     ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
+    ...(args.managedAuth || session?.auth ? { managedAuth: true } : {}),
     ...(args.mcpExclude?.length ? { mcpExclude: args.mcpExclude } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
@@ -2872,11 +2902,7 @@ function removeFirstOccurrence(list: string[], value: string): string[] {
   return [...list.slice(0, index), ...list.slice(index + 1)];
 }
 
-// Resolve the CLAUDE_CONFIG_DIR for a claude session from the runtime account
-// store. When an account is bound, seeds the per-session claude home under
-// session-tools/<id>/claude-home and returns it as claudeConfigDir. Session
-// homes isolate credential writeback from the source account directory.
-// Returns {} when no account is bound or the account no longer exists.
+// Retain native homes for legacy direct sessions; managed launches use auth-launch.ts.
 export function resolveClaudeAuthPlanOptions(
   dataDir: string,
   session: Pick<SessionRecord, "agent" | "claudeAccountId" | "id">,
@@ -3641,6 +3667,28 @@ function resolveCarriedSpawnModel(
   return explicitModel ?? (targetAgent === session.agent ? session.model : undefined);
 }
 
+function requestedAuthAccount(
+  request: Pick<SpawnSessionRequest, "authAccountId" | "claudeAccountId">,
+  agent: AgentName,
+): string | null | undefined {
+  if (
+    request.authAccountId === undefined &&
+    request.claudeAccountId !== undefined &&
+    agent !== "claude"
+  ) {
+    throw new AuthorizationError(
+      "claudeAccountId is only valid for Claude; use authAccountId",
+      400,
+    );
+  }
+  return request.authAccountId !== undefined ? request.authAccountId : request.claudeAccountId;
+}
+
+/** The predecessor's managed account (null = Auto) when the successor uses the same provider. */
+function carriedAuthAccountId(session: SessionRecord, agent: AgentName): string | null | undefined {
+  return session.auth && agent === session.agent ? session.auth.accountId : undefined;
+}
+
 export function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
@@ -3661,6 +3709,7 @@ export function resolveRespawnRequest(
       : agent === session.agent
         ? session.reasoningEffort
         : undefined;
+  const authAccountId = carriedAuthAccountId(session, agent);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -3669,7 +3718,10 @@ export function resolveRespawnRequest(
     agent,
     ...(model !== undefined ? { model } : {}),
     ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
-    ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
+    ...(session.claudeAccountId && !session.auth && agent === "claude"
+      ? { claudeAccountId: session.claudeAccountId }
+      : {}),
+    ...(authAccountId !== undefined ? { authAccountId } : {}),
     ...(session.mode !== undefined ? { mode: session.mode } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
@@ -3710,6 +3762,7 @@ function resolveHandoffSpawnRequest(
     originalTaskPrompt: string;
     attachments?: SendMessageAttachment[];
     pipelineSteps?: string[];
+    authAccountId?: string;
   },
 ): SpawnSessionRequest {
   const reasoningEffort =
@@ -3724,6 +3777,7 @@ function resolveHandoffSpawnRequest(
     agent: options.agent,
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    ...(options.authAccountId !== undefined ? { authAccountId: options.authAccountId } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
     ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
@@ -3939,6 +3993,12 @@ function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" |
 
 export class SessionService {
   private readonly preflightUsageStore: PreflightUsageStore;
+  private readonly authAccounts: AuthAccounts;
+  private readonly authProxy: AuthProxy;
+  private readonly authQuota: AuthQuota;
+  private readonly authAlerts: AuthAlerts;
+  private readonly authTerminals: AuthTerminalLogins;
+  private authSnapshot: { at: number; run: Promise<AuthProxyState> } | undefined;
   readonly bootstrapConfigPath: string;
   readonly startedAt: string;
   config: AppConfig;
@@ -4309,10 +4369,6 @@ export class SessionService {
   private readonly prCheckRuns = new Set<Promise<void>>();
   /** Git wall clock spent by the current sweep resolving PR discovery targets. */
   private prCheckGitSpentMs = 0;
-  // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
-  // considered rate-limited; sessionId -> per-episode rotation count.
-  private readonly claudeAccountRateLimit = new Map<string, number>();
-  private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarEndpoints = new Map<string, SidecarEndpointEntry>();
   private readonly sidecarViewClaims = new WeakMap<
@@ -4459,6 +4515,54 @@ export class SessionService {
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);
     this.config = bootstrap.config;
+    this.authAccounts = new AuthAccounts(
+      this.config.dataDir,
+      () => this.config.authRotation.autoRotateOnRateLimit,
+    );
+    this.authProxy = new AuthProxy(
+      this.config.dataDir,
+      () => ({
+        state: this.authAccounts.read(),
+        policy: {
+          cooldownMinutes: this.config.authRotation.cooldownMinutes,
+          maxRotationsPerEpisode: this.config.authRotation.maxRotationsPerEpisode,
+        },
+      }),
+      authProxyBinaryPath,
+      (rotation) => void this.recordAuthRotation(rotation),
+    );
+    this.authQuota = new AuthQuota({
+      dataDir: this.config.dataDir,
+      fetchUsage: (accountIds) => this.authProxy.getUsage(accountIds),
+      now: () => Date.now(),
+      onSaveError: (error) =>
+        this.logEvent("auth.quota.cache_error", {
+          level: "warn",
+          message: `Account quota cache failed: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+    });
+    this.authAlerts = new AuthAlerts({
+      dataDir: this.config.dataDir,
+      onOpened: (entry) => logAuthFailed(this.config.dataDir, entry),
+    });
+    this.authTerminals = new AuthTerminalLogins({
+      dataDir: this.config.dataDir,
+      homeDir: homedir(),
+      createTmuxCommandSession,
+      killTmuxSession: (name) => killTmuxSession(name),
+      tmuxPaneDead: (name, options) => tmuxPaneDead(name, options),
+      accountProvider: (accountId) => this.requireAuthorizationAccount(accountId).provider,
+      cancelLogin: (accountId) => this.authProxy.cancelLogin(accountId),
+      importNativeLogin: (accountId, provider) =>
+        this.authProxy.importNativeLogin(accountId, provider),
+      loginStatus: (accountId) => this.authProxy.loginStatus(accountId),
+      hostProbe: async (provider) =>
+        (await readHostCredentialSources(this.usageReportDeps(), true)).find(
+          (source) => source.provider === provider,
+        ) ?? null,
+      agentCommand: (provider) => (provider === "claude" ? claudeCommand() : codexCommand()),
+      now: () => Date.now(),
+    });
     this.preflightUsageStore = new PreflightUsageStore(this.config.dataDir);
     void this.preflightUsageStore.prune();
     // Before any classification: a restart mid-command must already know
@@ -4539,6 +4643,8 @@ export class SessionService {
       completion.reject(new SpawnAdmissionCancelledError("disposed"));
     }
     this.spawnCompletions.clear();
+    this.authProxy.dispose();
+    this.authTerminals.dispose();
     // Settles every queued lookup as skipped:cancelled so a prCheckRuns drain
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
@@ -6082,35 +6188,8 @@ export class SessionService {
         }
 
         const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
-        // Auto-rotate a rate-limited claude session onto a fresh authenticated
-        // account PROMPTLY, independent of rateLimitReactivation.afterHours. The
-        // helper is fully self-gating (autoRotateOnRateLimit toggle, per-account
-        // cooldown, per-episode cap, and all-accounts-limited fall-through) and
-        // returns true only when a rotation happened. A successful rotation
-        // suppresses the afterHours nudge below.
-        // switchAuth (invoked inside tryAutoRotateClaudeAccount) can throw on a
-        // dirty-worktree kill-confirmation, a stale-liveState race, or a
-        // concurrently-removed account. Scope the catch to this session so one
-        // bad session does not propagate out of the loop and starve every later
-        // session of its wake this tick. On error treat rotated=false so the
-        // afterHours nudge fallback below still runs.
-        let rotated = false;
-        if (!this.memoryHold.engaged && liveState === "rate_limited") {
-          try {
-            rotated = await this.tryAutoRotateClaudeAccount(session);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.wake.failed", {
-              level: "warn",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to auto-rotate claude account for ${session.id}: ${message}`,
-            });
-          }
-        }
-
         const afterHours = this.config.rateLimitReactivation.afterHours;
-        if (!this.memoryHold.engaged && !rotated && afterHours > 0 && session.rateLimitedAt) {
+        if (!this.memoryHold.engaged && afterHours > 0 && session.rateLimitedAt) {
           const thresholdMs = afterHours * 60 * 60 * 1000;
           if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
             // Undefined liveState means classification has not populated stateHistory
@@ -7389,19 +7468,22 @@ export class SessionService {
   }
 
   private async freshQuotaForClear(session: SessionRecord): Promise<QuotaSourceResult | null> {
+    // Host credentials do not describe a managed session's proxy account; clear needs --force.
+    if (session.auth) return null;
+    return readFreshSessionQuota(this.usageReportDeps(), session);
+  }
+
+  private usageReportDeps(): UsageReportDeps {
     const nowMs = Date.now();
     const todayStart = new Date(nowMs);
     todayStart.setHours(0, 0, 0, 0);
-    return readFreshSessionQuota(
-      {
-        fetch: globalThis.fetch,
-        homeDir: homedir(),
-        dataDir: this.config.dataDir,
-        nowMs,
-        todayStartMs: todayStart.getTime(),
-      },
-      session,
-    );
+    return {
+      fetch: globalThis.fetch,
+      homeDir: homedir(),
+      dataDir: this.config.dataDir,
+      nowMs,
+      todayStartMs: todayStart.getTime(),
+    };
   }
 
   async clearRateLimit(
@@ -7440,7 +7522,9 @@ export class SessionService {
         current.agentLaunchId !== initial.agentLaunchId ||
         current.agentSessionId !== initial.agentSessionId ||
         (current.agent === "claude" &&
-          (current.claudeAccountId ?? "default") !== (initial.claudeAccountId ?? "default"))
+          (current.claudeAccountId ?? "default") !== (initial.claudeAccountId ?? "default")) ||
+        (current.auth?.accountId ?? null) !== (initial.auth?.accountId ?? null) ||
+        (current.auth?.effectiveAccountId ?? null) !== (initial.auth?.effectiveAccountId ?? null)
       )
         throw new RateLimitClearError(`Session/account changed; retry clear`);
       let release!: () => void;
@@ -7547,6 +7631,242 @@ export class SessionService {
       sessionId: session.id,
       restrictWrites: resolveRestrictWrites(session),
     });
+  }
+
+  async recoverManagedAuthorization(): Promise<void> {
+    await this.authTerminals.sweep(this.authAccounts.read().accounts.map((account) => account.id));
+    await this.authProxy.recover();
+  }
+
+  private readAuthorizationState(): Promise<AuthProxyState> {
+    if (!this.authSnapshot || Date.now() - this.authSnapshot.at >= 500) {
+      const snapshot = { at: Date.now(), run: this.authProxy.getState() };
+      this.authSnapshot = snapshot;
+      void snapshot.run.then(
+        (state) => {
+          // Best effort: a failed identity write must not fail the state read.
+          try {
+            this.authAccounts.recordIdentities(state.accounts);
+          } catch {
+            // The next snapshot retries.
+          }
+        },
+        () => {
+          if (this.authSnapshot === snapshot) this.authSnapshot = undefined;
+        },
+      );
+    }
+    return this.authSnapshot.run;
+  }
+
+  private async prepareSessionAuthorization(
+    sessionId: string,
+    agent: AgentName,
+    project: ProjectConfig,
+    accountId: string | null | undefined,
+    managedBinding: boolean,
+  ): Promise<AuthRegistration | undefined> {
+    if (agent !== "claude" && agent !== "codex") {
+      if (accountId !== undefined && accountId !== null) {
+        throw new AuthorizationError(`Saved authorization is not supported for ${agent}`, 400);
+      }
+      return undefined;
+    }
+    const state = this.authAccounts.read();
+    if (!state.pools[agent] && (accountId === null || accountId === undefined)) return undefined;
+    if (
+      agent === "codex" &&
+      (codexArgsSelectProvider(project.codexArgs ?? []) ||
+        codexUsesCustomProvider(await readCodexUserConfig()))
+    ) {
+      if (accountId !== null && accountId !== undefined) {
+        throw new AuthorizationError(
+          "Saved authorization conflicts with the explicit Codex provider",
+          400,
+        );
+      }
+      return undefined;
+    }
+    if (accountId !== null && accountId !== undefined) {
+      const account = state.accounts.find((entry) => entry.id === accountId);
+      if (!account || account.provider !== agent) {
+        throw new AuthorizationError(`Unknown ${agent} authorization account: ${accountId}`, 400);
+      }
+    } else if (!managedBinding && !(await this.hasReadyAuthorizationAccount(sessionId, agent))) {
+      // No ready managed account: launch with host authorization, as before managed pools.
+      return undefined;
+    }
+    return this.authProxy.registerSession({
+      sessionId,
+      provider: agent,
+      accountId: accountId ?? null,
+    });
+  }
+
+  /** Revokes the routing key and drops host config copies from the session's managed home. */
+  private async revokeManagedAuthorization(sessionId: string): Promise<void> {
+    await this.authProxy.revokeSession(sessionId);
+    scrubManagedClaudeHome(slotToolDir(this.config.dataDir, sessionId));
+  }
+
+  /**
+   * Claim for the one continue ping owed to a session that was rate limited when its effective
+   * account changed. Undefined: nothing owed (no change, not limited, or this key already claimed).
+   * Written with the auth change, so the claim exists before any send and survives a restart.
+   */
+  private authChangePingClaim(
+    current: SessionRecord,
+    next: NonNullable<SessionRecord["auth"]>,
+  ): SessionRecord["authChangePing"] | undefined {
+    if (
+      current.status !== "running" ||
+      !current.auth ||
+      current.auth.effectiveAccountId === next.effectiveAccountId ||
+      !this.isLiveStateRateLimited(current)
+    )
+      return undefined;
+    const key = `${next.generation}:${next.effectiveAccountId}`;
+    return current.authChangePing?.key === key ? undefined : { key, attempts: 0, pinged: false };
+  }
+
+  /**
+   * Under the lifecycle lock: applies `update` to the unsent claim for `key` on a running session.
+   * Returns false, writing nothing, when the claim is gone or sent, the session is not running,
+   * or `update` returns null.
+   */
+  private async updateAuthChangePing(
+    sessionId: string,
+    key: string,
+    update: (
+      claim: NonNullable<SessionRecord["authChangePing"]>,
+    ) => SessionRecord["authChangePing"] | null,
+  ): Promise<boolean> {
+    return this.withSessionLifecycleLock(sessionId, async () => {
+      const current = readSession(this.config.dataDir, sessionId);
+      const claim = current?.authChangePing;
+      if (!current || current.status !== "running" || claim?.key !== key || claim.pinged)
+        return false;
+      const next = update(claim);
+      if (!next) return false;
+      writeSession(this.config.dataDir, { ...current, authChangePing: next });
+      return true;
+    });
+  }
+
+  /**
+   * Sends the one continue ping for a claimed account change, at most AUTH_CHANGE_PING_MAX_ATTEMPTS
+   * tries. Sends only when the forced rate-limit clear succeeds and leaves the agent waiting at its
+   * prompt; any clear error or other state spends the claim without a send.
+   */
+  private async sendAuthChangePing(sessionId: string, key: string): Promise<void> {
+    const spend = () =>
+      this.updateAuthChangePing(sessionId, key, (claim) => ({
+        ...claim,
+        attempts: AUTH_CHANGE_PING_MAX_ATTEMPTS,
+      }));
+    for (let attempt = 0; attempt < AUTH_CHANGE_PING_MAX_ATTEMPTS; attempt += 1) {
+      const counted = await this.updateAuthChangePing(sessionId, key, (claim) =>
+        claim.attempts >= AUTH_CHANGE_PING_MAX_ATTEMPTS
+          ? null
+          : { ...claim, attempts: claim.attempts + 1 },
+      );
+      if (!counted) return;
+      try {
+        const cleared = await this.clearRateLimit(sessionId, true, "auth-change").catch(
+          (error: unknown) => {
+            if (error instanceof RateLimitClearError) return null;
+            throw error;
+          },
+        );
+        if (cleared?.state !== "waiting") {
+          await spend();
+          return;
+        }
+        // Re-checked under the lock: a session paused or stopped during the clear is never sent to.
+        if (!(await this.updateAuthChangePing(sessionId, key, (claim) => claim))) return;
+        await this.send(sessionId, { message: AUTH_CHANGE_PING_MESSAGE });
+        await this.updateAuthChangePing(sessionId, key, (claim) => ({ ...claim, pinged: true }));
+        return;
+      } catch (error) {
+        this.logEvent("session.auth.ping_failed", {
+          level: "warn",
+          sessionId,
+          message: "Could not send the continue ping after the account change",
+          details: { error: error instanceof Error ? error.message : String(error), attempt },
+        });
+      }
+    }
+  }
+
+  /** Persists a companion-reported effective-account change and logs it once. */
+  private async recordAuthRotation(rotation: AuthRotation): Promise<void> {
+    this.authSnapshot = undefined;
+    const matches = (
+      record: SessionRecord | null | undefined,
+    ): record is SessionRecord & { auth: NonNullable<SessionRecord["auth"]> } =>
+      record?.auth?.generation === rotation.generation &&
+      record.auth.effectiveAccountId !== rotation.toAccountId;
+    if (!matches(readSession(this.config.dataDir, rotation.sessionId))) return;
+    let pingKey: string | undefined;
+    try {
+      const project = await this.withSessionLifecycleLock(rotation.sessionId, async () => {
+        const current = readSession(this.config.dataDir, rotation.sessionId);
+        if (!matches(current)) return null;
+        const auth = { ...current.auth, effectiveAccountId: rotation.toAccountId };
+        const authChangePing = this.authChangePingClaim(current, auth);
+        writeSession(this.config.dataDir, {
+          ...current,
+          auth,
+          ...(authChangePing ? { authChangePing } : {}),
+          updatedAt: nowIso(),
+        });
+        this.stateCache.delete(rotation.sessionId);
+        if (authChangePing) pingKey = authChangePing.key;
+        return current.project;
+      });
+      if (project === null) return;
+      if (pingKey) void this.sendAuthChangePing(rotation.sessionId, pingKey);
+      this.logEvent("session.auth.rotated", {
+        level: "info",
+        sessionId: rotation.sessionId,
+        projectId: project,
+        message: `Switched ${rotation.provider} authorization to another account`,
+        details: {
+          fromAccountId: rotation.fromAccountId,
+          toAccountId: rotation.toAccountId,
+          generation: rotation.generation,
+        },
+      });
+    } catch (error) {
+      this.logEvent("session.auth.rotated", {
+        level: "warn",
+        sessionId: rotation.sessionId,
+        message: "Could not record authorization account change",
+        details: { error: error instanceof Error ? error.message : String(error) },
+      });
+    }
+  }
+
+  private async hasReadyAuthorizationAccount(
+    sessionId: string,
+    provider: AuthProvider,
+  ): Promise<boolean> {
+    if (!this.authAccounts.read().accounts.some((account) => account.provider === provider)) {
+      return false;
+    }
+    try {
+      return (await this.readAuthorizationState()).accounts.some(
+        (account) => account.provider === provider && account.status === "ready",
+      );
+    } catch (error) {
+      this.logEvent("session.auth.direct", {
+        level: "warn",
+        sessionId,
+        message: `Managed ${provider} authorization unavailable; launching with host authorization`,
+        details: { error: error instanceof Error ? error.message : String(error) },
+      });
+      return false;
+    }
   }
 
   private resolveClaudeAuthPlanOptions(
@@ -8203,7 +8523,7 @@ export class SessionService {
       // risk of being evicted on this same pass.
       const liveIds = new Set(liveSessions.map((session) => session.id));
       this.pruneSessionScopedState(liveIds);
-      const claudeAccounts = this.computeClaudeAccountsView();
+      const claudeAccounts = await this.computeClaudeAccountsView();
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         if (this.isDeliveryStopped()) return;
@@ -8473,11 +8793,6 @@ export class SessionService {
     for (const sessionId of this.usageMenuConfirmedAt.keys()) {
       if (!liveIds.has(sessionId)) {
         this.usageMenuConfirmedAt.delete(sessionId);
-      }
-    }
-    for (const sessionId of this.claudeRotationEpisode.keys()) {
-      if (!liveIds.has(sessionId)) {
-        this.claudeRotationEpisode.delete(sessionId);
       }
     }
     for (const sessionId of this.queuedMessageDeliveryLastFailure.keys()) {
@@ -12540,8 +12855,8 @@ export class SessionService {
     }
     const sessions = allSessions.filter(included);
     // Compute the claude accounts snapshot once for the whole batch instead of
-    // per-session inside enrich (N listAccounts reads + N×M existsSync).
-    const claudeAccounts = this.computeClaudeAccountsView();
+    // per-session inside enrich.
+    const claudeAccounts = await this.computeClaudeAccountsView();
     const rows = await Promise.all(
       sessions.map(async (session) => {
         const receipt = this.lifecycle.snapshot(session.id);
@@ -12605,7 +12920,7 @@ export class SessionService {
   ): Promise<void> {
     assertCurrent();
     binding.store.flushPending();
-    const accounts = this.computeClaudeAccountsView();
+    const accounts = await this.computeClaudeAccountsView();
     const seen = new Set<string>();
     const rows: {
       view: Omit<SessionListItemView, "lifecycle">;
@@ -14197,16 +14512,6 @@ export class SessionService {
     return carried;
   }
 
-  private assertSpawnAccountReady(accountId?: string): void {
-    if (!accountId) return;
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account || !isAccountReady(account)) {
-      throw new Error(
-        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
-      );
-    }
-  }
-
   async spawn(request: SpawnSessionRequest, options?: SessionSpawnOptions): Promise<SessionView> {
     if (options?.triggerBirthKey) {
       const key = options.triggerBirthKey;
@@ -14322,6 +14627,8 @@ export class SessionService {
     let prAlertBirthConfirmed = false;
     let inheritedWritten = false;
     let launchedRecord: SessionRecord | undefined;
+    let authRegistration: AuthRegistration | undefined;
+    let authorizationRollbackWarning: string | undefined;
     let launchCandidate: SessionRecord | undefined;
     let resolvedModel: string | undefined;
     let launchSelection: AgentLaunchSelection;
@@ -14371,7 +14678,6 @@ export class SessionService {
           this.config.models.codexHome,
         ));
       resolvedModel = launchSelection.model;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       if (request.branch && !reuseCtx) {
         await resolveSpawnBranch({
           repoPath: project.path,
@@ -14451,6 +14757,13 @@ export class SessionService {
         this.config.dataDir,
         request.project,
         project.sessionPrefix,
+      );
+      authRegistration = await this.prepareSessionAuthorization(
+        sessionId,
+        agent,
+        project,
+        requestedAuthAccount(request, agent),
+        false,
       );
       preflightTokenUsage = preflightBatchId
         ? await this.preflightUsageStore.claim(preflightBatchId, request.project, sessionId)
@@ -14561,6 +14874,7 @@ export class SessionService {
         ...(restrictWrites ? { restrictWrites: true } : {}),
         closeoutOwner,
         ...(options?.prAlertOwnerTransfer ? { prAlertTransfer: options.prAlertOwnerTransfer } : {}),
+        ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
@@ -14732,6 +15046,7 @@ export class SessionService {
         sessionToolDir,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
+        ...(authRegistration ? { managedAuth: true } : {}),
         ...launchSelection,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
@@ -14753,14 +15068,14 @@ export class SessionService {
       // sharing one worktree bind to their own transcript instead of guessing
       // by newest mtime.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchOptions = {
         ...planOptions,
-        ...this.resolveClaudeAuthPlanOptions({
-          id: sessionId,
-          agent,
-          ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
-        }),
+        ...managedAuthLaunch(
+          authRegistration,
+          sessionToolDir,
+          planOptions.codexArgs,
+          workspacePath,
+        ),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -14789,7 +15104,6 @@ export class SessionService {
         launchCommand: launchPlan.launchCommand,
         agentLaunchId,
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
-        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         status: "running",
         updatedAt: nowIso(),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -14813,7 +15127,10 @@ export class SessionService {
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
         agentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        extraEnv: {
+          ...sessionAgentConfig.env,
+          ...managedAuthLaunch(authRegistration, sessionToolDir).env,
+        },
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -15008,6 +15325,23 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
+      if (authRegistration && sessionId && agent && !placeholderState.written) {
+        authorizationRollbackWarning =
+          "Saved authorization retained: process exit or revocation could not be confirmed";
+        try {
+          const processes = await findForeignAgentProcessesForSession({
+            sessionId,
+            processMatchers: sessionProcessMatchers({ agent, launchCommand: "" }),
+            excludePanePids: [],
+          });
+          if (processes.status === "ok" && processes.pids.length === 0) {
+            await this.revokeManagedAuthorization(sessionId);
+            authorizationRollbackWarning = undefined;
+          }
+        } catch {
+          // Preserve the registration when cleanup cannot confirm ownership or revoke it.
+        }
+      }
       // Handoff copies must not outlive a failed successor: the source keeps the open items.
       const inheritedItems = options?.inheritedTodo;
       const failedLifecycleIds = (failedId: string): string[] =>
@@ -15128,6 +15462,13 @@ export class SessionService {
           const erroredRecord: SessionRecord = {
             id: sessionId,
             project: request.project,
+            ...(authRegistration
+              ? {
+                  auth:
+                    readSession(this.config.dataDir, sessionId)?.auth ??
+                    publicAuthSession(authRegistration),
+                }
+              : {}),
             ...(closeoutTakenFrom ? { closeoutOwner: true } : {}),
             ...(options?.prAlertOwnerTransfer
               ? { prAlertTransfer: options.prAlertOwnerTransfer }
@@ -15241,6 +15582,7 @@ export class SessionService {
         details: {
           stage,
           requestedAgent: request.agent ?? null,
+          ...(authorizationRollbackWarning ? { authorizationRollbackWarning } : {}),
         },
       });
       throw error;
@@ -15911,6 +16253,7 @@ export class SessionService {
     let selfDestruct: SelfDestructConfig | undefined;
     let resolvedModel: string | undefined;
     let launchSelection: AgentLaunchSelection;
+    let authRegistration: AuthRegistration | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -15944,7 +16287,6 @@ export class SessionService {
           this.config.models.codexHome,
         ));
       resolvedModel = launchSelection.model;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       if (worktree && request.branch && !reuseCtx) {
         await resolveSpawnBranch({
           repoPath: project.path,
@@ -15961,6 +16303,13 @@ export class SessionService {
         project.sessionPrefix,
       );
       this.spawnsPreparing.add(sessionId);
+      authRegistration = await this.prepareSessionAuthorization(
+        sessionId,
+        agent,
+        project,
+        requestedAuthAccount(request, agent),
+        false,
+      );
       const preflightBatchId = await this.preflightUsageStore.resolve(
         request.project,
         request.preflightBatchId,
@@ -16010,7 +16359,6 @@ export class SessionService {
           : {}),
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
-        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(request.reasoningEffort !== undefined
           ? { reasoningEffort: request.reasoningEffort }
@@ -16026,6 +16374,7 @@ export class SessionService {
         ...(placeholderBranchSource ? { branchSource: placeholderBranchSource } : {}),
         worktree,
         worktreePath: placeholderWorktreePath,
+        ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
         tmuxSession: sessionId,
         launchCommand: "",
         status: "spawning",
@@ -16506,12 +16855,28 @@ export class SessionService {
         { ...spawnPlaceholder, worktreePath: workspacePath },
         project,
       );
+      const authRegistration = await this.prepareSessionAuthorization(
+        sessionId,
+        agent,
+        project,
+        prepared.placeholder.auth
+          ? prepared.placeholder.auth.accountId
+          : requestedAuthAccount(request, agent),
+        prepared.placeholder.auth !== undefined,
+      );
+      const managedLaunch = managedAuthLaunch(
+        authRegistration,
+        sessionToolDir,
+        project.codexArgs,
+        workspacePath,
+      );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
         sessionId,
         worktreePath: workspacePath,
         sessionToolDir,
+        ...(authRegistration ? { managedAuth: true } : {}),
         ...prepared.launchSelection,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
@@ -16525,7 +16890,6 @@ export class SessionService {
       });
       // Fresh native identity per attempt avoids reusing an existing transcript.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
-      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(
           withProjectAgentOptions(project, {
@@ -16535,7 +16899,7 @@ export class SessionService {
           }),
           { planMode, restrictWrites },
         ),
-        ...this.resolveClaudeAuthPlanOptions(prepared.placeholder),
+        ...managedLaunch,
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -16556,6 +16920,7 @@ export class SessionService {
       const agentLaunchId = newAgentLaunchId();
       let runningRecord: SessionRecord = {
         ...sessionForMcp,
+        ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
         planMode,
         restrictWrites,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -16584,7 +16949,9 @@ export class SessionService {
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
         agentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        ...(sessionAgentConfig.env || managedLaunch.env
+          ? { extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env } }
+          : {}),
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -17144,7 +17511,6 @@ export class SessionService {
         assertPrAlertRoutes(project, record.allowedTriggers);
       this.claimPrAlertsLocked(record, "resume");
     }
-    this.assertSpawnAccountReady(record.claudeAccountId);
     const startupAttachments = intent.startupAttachments.map(({ id, name }) => {
       const artifact = readSessionArtifact(this.config.dataDir, workspaceIdOf(record), id);
       if (!artifact) throw new Error(`Missing startup artifact ${id} for ${record.id}`);
@@ -22721,6 +23087,9 @@ export class SessionService {
           ...(options?.restoreOperation ? { operation: options.restoreOperation } : {}),
         });
         await this.cleanupSessionServices(session);
+        if (targetStatus === "completed" && session.auth) {
+          await this.revokeManagedAuthorization(session.id);
+        }
       }
       if (targetStatus === "completed") {
         terminalSlots = this.captureTerminalSlots(session);
@@ -22871,6 +23240,7 @@ export class SessionService {
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.terminateDetachedSessionProcesses(session);
       await this.cleanupSessionServices(session);
+      if (session.auth) await this.revokeManagedAuthorization(session.id);
       if (currentSession.status !== "killed") terminalSlots = this.captureTerminalSlots(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
       if (closeoutTakenFrom) {
@@ -23469,6 +23839,21 @@ export class SessionService {
     assertActive();
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
+    const authRegistration = session.auth
+      ? await this.prepareSessionAuthorization(
+          session.id,
+          session.agent,
+          project,
+          session.auth.accountId,
+          true,
+        )
+      : undefined;
+    const managedLaunch = managedAuthLaunch(
+      authRegistration,
+      sessionToolDir,
+      project.codexArgs,
+      session.worktreePath,
+    );
     const { session: mcpSidecarUpdate, mcpBindings } = await this.startMcpSidecars(
       session,
       project,
@@ -23528,7 +23913,7 @@ export class SessionService {
         }),
         { planMode, restrictWrites },
       ),
-      ...this.resolveClaudeAuthPlanOptions(session),
+      ...(authRegistration ? managedLaunch : this.resolveClaudeAuthPlanOptions(session)),
     };
     const baseLaunchPlan = buildAgentLaunchPlan(
       session.agent,
@@ -23575,7 +23960,7 @@ export class SessionService {
         symlinks: this.getProject(session.project).symlinks,
         closeoutOwner: session.closeoutOwner === true,
         agentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env },
       });
     let agentLaunchId = newAgentLaunchId();
     let env = buildLaunchEnv(agentLaunchId);
@@ -24278,6 +24663,19 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
+      const authRegistration = await this.prepareSessionAuthorization(
+        current.id,
+        current.agent,
+        restoreProjectConfig,
+        current.auth ? current.auth.accountId : current.claudeAccountId,
+        current.auth !== undefined,
+      );
+      const managedLaunch = managedAuthLaunch(
+        authRegistration,
+        sessionToolDir,
+        restoreProjectConfig.codexArgs,
+        current.worktreePath,
+      );
       operation?.assertActive();
       const mcpStart = await this.startMcpSidecars(current, restoreProjectConfig, operation);
       operation?.assertActive();
@@ -24290,6 +24688,7 @@ export class SessionService {
         sessionId: current.id,
         worktreePath: current.worktreePath,
         sessionToolDir,
+        ...(authRegistration ? { managedAuth: true } : {}),
         restrictWrites: resolveRestrictWrites(current),
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
@@ -24345,7 +24744,7 @@ export class SessionService {
           }),
           { planMode, restrictWrites },
         ),
-        ...this.resolveClaudeAuthPlanOptions(current),
+        ...(authRegistration ? managedLaunch : this.resolveClaudeAuthPlanOptions(current)),
       };
       const resolvedModel = launchSelection.model;
       const launchPlanOptions = {
@@ -24464,7 +24863,7 @@ export class SessionService {
         symlinks: this.getProject(current.project).symlinks,
         closeoutOwner: current.closeoutOwner === true,
         agentLaunchId: restoreAgentLaunchId,
-        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+        extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env },
       });
 
       await createTmuxSession({
@@ -24495,6 +24894,7 @@ export class SessionService {
             ...latest,
             status: "running",
             launchCommand: restoredLaunchCommand,
+            ...(authRegistration ? { auth: publicAuthSession(authRegistration) } : {}),
             ...(restoreAgentLaunchId ? { agentLaunchId: restoreAgentLaunchId } : {}),
             updatedAt: nowIso(),
           },
@@ -25081,7 +25481,7 @@ export class SessionService {
 
   async switchAuth(
     sessionId: string,
-    accountId: string,
+    accountId: string | null,
     opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
   ): Promise<SessionView> {
     const hint = readSession(this.config.dataDir, sessionId);
@@ -25100,7 +25500,7 @@ export class SessionService {
 
   private async switchAuthLocked(
     sessionId: string,
-    accountId: string,
+    accountId: string | null,
     opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
     claim: SessionLifecycleStamp,
   ): Promise<SessionView> {
@@ -25111,300 +25511,348 @@ export class SessionService {
     if (!this.lifecycleStampMatches(session, claim)) {
       throw new Error(`Session ${sessionId} changed before auth migration`);
     }
-    if (session.agent !== "claude") {
-      throw new Error(
-        `switch-auth is only supported for claude sessions (session ${sessionId} runs ${session.agent})`,
+    if (!session.auth) {
+      throw new AuthorizationError(
+        "Direct authorization cannot switch in place; restore or respawn with a managed account",
       );
     }
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
-    if (!isAccountReady(account)) {
-      throw new Error(
-        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
-      );
-    }
-
-    const force = opts.force === true;
-    let activeClaim = claim;
-    if (!force) {
-      const state = await this.classifySessionState(session);
-      if (state === "working") {
-        throw new Error(
-          `Session ${sessionId} is working; retry when idle or pass force to switch auth`,
+    if (accountId !== null) {
+      const account = this.authAccounts.read().accounts.find((entry) => entry.id === accountId);
+      if (!account || account.provider !== session.agent) {
+        throw new AuthorizationError(
+          `Unknown ${session.agent} authorization account: ${accountId}`,
+          400,
         );
       }
-      activeClaim = await this.withSessionLifecycleLocks(
-        this.lifecycleIdsFor(session),
-        async () => {
-          const latest = readSession(this.config.dataDir, sessionId);
-          if (!latest) {
-            throw new Error(`Session ${sessionId} changed during auth migration`);
-          }
-          const reconciledDeadRuntime =
-            (claim.status === "running" || claim.status === "spawning") &&
-            (latest.status === "stopped" || latest.status === "errored") &&
-            latest.stopReason === undefined;
-          if (!this.lifecycleStateMatches(latest, claim) && !reconciledDeadRuntime) {
-            throw new Error(`Session ${sessionId} changed during auth migration`);
-          }
-          return this.lifecycleStamp(latest);
-        },
-      );
     }
-    const sessionToolDir = join(this.config.dataDir, "session-tools", sessionId);
-    const sessionHome = sessionClaudeHome(sessionToolDir);
-    const usesSessionHome = session.launchCommand.startsWith(
-      `CLAUDE_CONFIG_DIR=${shellEscape(sessionHome)} `,
-    );
-
-    if (usesSessionHome) {
-      return this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
-        const latest = readSession(this.config.dataDir, sessionId);
-        if (!latest || !this.lifecycleStampMatches(latest, activeClaim)) {
-          throw new Error(`Session ${sessionId} changed during auth migration`);
-        }
-        const updated: SessionRecord = {
-          ...latest,
-          claudeAccountId: accountId,
-          updatedAt: nowIso(),
-        };
-        swapSessionCredentials(sessionHome, account);
-        writeSession(this.config.dataDir, updated);
-        touchAccountUsed(this.config.dataDir, accountId);
-        this.logEvent("session.auth.switched", {
-          level: "info",
-          sessionId,
-          projectId: latest.project,
-          message: `Switched claude account for ${sessionId} to ${accountId}`,
-          details: { accountId, reason: opts.reason, forced: force, method: "in_place" },
-        });
-        return this.enrich(updated);
-      });
-    }
-
-    await this.ensureKillDirtyWorktreeAllowed(session, force);
-    // Install target credentials before persisting the record or killing the pane.
-    // If the swap throws, the persisted account and running pane remain old.
-    const prepared = await this.withSessionLifecycleLocks(
+    let pingKey: string | undefined;
+    const updated = await this.withSessionLifecycleLocks(
       this.lifecycleIdsFor(session),
       async () => {
-        const latest = readSession(this.config.dataDir, sessionId);
-        if (!latest || !this.lifecycleStampMatches(latest, activeClaim)) {
-          throw new Error(`Session ${sessionId} changed during auth migration`);
+        const current = readSession(this.config.dataDir, sessionId);
+        if (!current || !this.lifecycleStampMatches(current, claim)) {
+          throw new Error(`Session ${sessionId} changed during auth selection`);
         }
-        const updated: SessionRecord = {
-          ...latest,
-          claudeAccountId: accountId,
+        const registration = await this.authProxy.switchSession(sessionId, accountId);
+        this.authSnapshot = undefined;
+        const { claudeAccountId: _legacyAccountId, ...base } = current;
+        const auth = publicAuthSession(registration);
+        const authChangePing = this.authChangePingClaim(current, auth);
+        pingKey = authChangePing?.key;
+        const next: SessionRecord = {
+          ...base,
+          auth,
+          ...(authChangePing ? { authChangePing } : {}),
           updatedAt: nowIso(),
         };
-        mkdirSync(sessionHome, { recursive: true });
-        swapSessionCredentials(sessionHome, account);
-        writeSession(this.config.dataDir, updated);
-        touchAccountUsed(this.config.dataDir, accountId);
-        await this.killAgentPaneAndConfirmExit(updated, { failOnSurvivors: true });
-        const relaunched = await this.ensureSessionReadyForSend(updated, {
-          paneAlreadyConfirmedGone: true,
-          paneAlreadyOwned: true,
-        });
-        const generation = await this.capturePaneGeneration(relaunched.session);
-        const persisted = readSession(this.config.dataDir, sessionId);
-        if (!persisted || !(await this.paneGenerationMatches(persisted, generation))) {
-          throw new Error(`Session ${sessionId} changed during auth migration`);
-        }
-        return {
-          relaunched,
-          generation,
-          stamp: this.lifecycleStamp(persisted),
-        };
+        writeSession(this.config.dataDir, next);
+        this.stateCache.delete(sessionId);
+        return next;
       },
     );
-    const { relaunched, generation } = prepared;
-    if (relaunched.recoveryMessage) {
-      const submission = await this.beginAgentMessage(
-        relaunched.recoveryMessage.session,
-        relaunched.recoveryMessage.message,
-        {
-          ...relaunched.recoveryMessage.options,
-          authorizeInput: (send) =>
-            this.withWorkspaceLifecycleLocks(sessionId, async () => {
-              const current = readSession(this.config.dataDir, sessionId);
-              if (
-                !current ||
-                !this.lifecycleStampMatches(current, prepared.stamp) ||
-                !(await this.paneGenerationMatches(current, generation))
-              ) {
-                return false;
-              }
-              await send();
-              return true;
-            }),
-        },
-      );
-      const outcome = await this.completeAgentMessage(submission, {
-        authorizeResend: (send) =>
-          this.withWorkspaceLifecycleLocks(sessionId, async () => {
-            const current = readSession(this.config.dataDir, sessionId);
-            if (
-              !current ||
-              !this.lifecycleStampMatches(current, prepared.stamp) ||
-              !(await this.paneGenerationMatches(current, generation))
-            ) {
-              return false;
-            }
-            await send();
-            return true;
-          }),
-        recoveryGenerationMatches: () =>
-          this.withWorkspaceLifecycleLocks(sessionId, async () => {
-            const current = readSession(this.config.dataDir, sessionId);
-            return Boolean(
-              current &&
-              this.lifecycleStampMatches(current, prepared.stamp) &&
-              (await this.paneGenerationMatches(current, generation)),
-            );
-          }),
-      });
-      if (outcome === "stale") {
-        throw new Error(`Session ${sessionId} changed during auth migration`);
-      }
-    }
-    const current = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
-      const latest = readSession(this.config.dataDir, sessionId);
-      if (
-        !latest ||
-        !this.lifecycleStampMatches(latest, prepared.stamp) ||
-        !(await this.paneGenerationMatches(latest, generation))
-      ) {
-        return null;
-      }
-      return latest;
-    });
-    if (!current) throw new Error(`Session ${sessionId} changed during auth migration`);
+    if (pingKey) void this.sendAuthChangePing(sessionId, pingKey);
     this.logEvent("session.auth.switched", {
       level: "info",
       sessionId,
       projectId: session.project,
-      message: `Switched claude account for ${sessionId} to ${accountId}`,
-      details: { accountId, reason: opts.reason, forced: force, method: "relaunch" },
+      message: `Selected ${session.agent} authorization for the next request`,
+      details: { accountId, reason: opts.reason, method: "proxy" },
     });
-    return this.enrich(current);
+    return this.enrich(updated);
   }
 
-  // Rotate a rate-limited claude session onto the next ready account.
-  // Returns true when a rotation happened; false when disabled, capped, or no
-  // fresh candidate exists (caller then falls through to the reactivation nudge).
-  private async tryAutoRotateClaudeAccount(session: SessionRecord): Promise<boolean> {
-    if (!this.config.authRotation.autoRotateOnRateLimit || session.agent !== "claude") {
-      return false;
-    }
-    const now = Date.now();
-    const cooldownMs = this.config.authRotation.cooldownMinutes * 60_000;
-    // Mark the current account rate-limited so later rotations skip it until it
-    // is likely reset. The usage-limit menu does not expose a reset time, so use
-    // the configured cooldown.
-    if (session.claudeAccountId) {
-      this.claudeAccountRateLimit.set(session.claudeAccountId, now + cooldownMs);
-    }
-    const episode = String(session.rateLimitedAt);
-    const tracker = this.claudeRotationEpisode.get(session.id);
-    const count = tracker?.episode === episode ? tracker.count : 0;
-    if (count >= this.config.authRotation.maxRotationsPerEpisode) {
-      return false;
-    }
-    const next = listAccounts(this.config.dataDir).find((account) => {
-      if (account.id === session.claudeAccountId) return false;
-      if (!isAccountReady(account)) return false;
-      const limitedUntil = this.claudeAccountRateLimit.get(account.id);
-      return limitedUntil === undefined || limitedUntil <= now;
+  /**
+   * Managed accounts with status, identity and display name. Quota rides only on opts.quota: it is
+   * read from the cache and never waits on a provider, and session list paths must not start usage reads.
+   */
+  async listAuthorizationAccounts(
+    provider?: AuthProvider,
+    opts?: { quota?: boolean },
+  ): Promise<{
+    accounts: AuthAccountSummary[];
+    pools: ReturnType<AuthAccounts["read"]>["pools"];
+  }> {
+    const state = this.authAccounts.read();
+    const statuses =
+      state.accounts.length > 0 ? (await this.readAuthorizationState()).accounts : [];
+    const identified = withCompanionIdentity(state.accounts, statuses);
+    const names = authDisplayNames(identified);
+    const all = identified.map((account): AuthAccountSummary => {
+      const entry = statuses.find((candidate) => candidate.id === account.id);
+      const status = entry?.status ?? "sign-in-required";
+      return {
+        ...account,
+        displayName: names.get(account.id) ?? account.id,
+        limited: entry?.cooldownUntil !== undefined,
+        ...(entry?.cooldownUntil ? { cooldownUntil: entry.cooldownUntil } : {}),
+        ...(entry?.credential ? { credential: entry.credential } : {}),
+        authenticated: status === "ready",
+        status:
+          status === "sign-in-required"
+            ? "sign_in_required"
+            : status === "failed"
+              ? "error"
+              : status,
+      };
     });
-    if (!next) {
-      return false;
+    // The cache sees every store account: pruning against a provider subset would drop the others.
+    const quotas = opts?.quota
+      ? this.authQuota.read(
+          all.map((account) => ({
+            id: account.id,
+            provider: account.provider,
+            status: account.status,
+            ...(account.credential ? { credential: account.credential } : {}),
+          })),
+        )
+      : undefined;
+    const quotaErrors = quotas ? this.authQuota.lastErrors() : undefined;
+    return {
+      accounts: all
+        .filter((account) => !provider || account.provider === provider)
+        .map((account) => {
+          const quota = quotas?.get(account.id);
+          if (quota) return { ...account, quota };
+          const quotaError = quotaErrors?.get(account.id);
+          return quotaError ? { ...account, quotaError } : account;
+        }),
+      pools: state.pools,
+    };
+  }
+
+  async addAuthorizationAccount(provider: AuthProvider) {
+    const account = this.authAccounts.add(provider);
+    await this.authProxy.configure();
+    this.authSnapshot = undefined;
+    return account;
+  }
+
+  async updateAuthorizationPool(
+    provider: AuthProvider,
+    update: { defaultAccountId?: string | null; autoRotate?: boolean },
+  ) {
+    if (update.defaultAccountId !== null && update.defaultAccountId !== undefined) {
+      const { accounts } = await this.listAuthorizationAccounts(provider);
+      if (
+        !accounts.some((account) => account.id === update.defaultAccountId && account.authenticated)
+      ) {
+        throw new AuthorizationError(
+          "Default authorization account must be ready and match the provider",
+          400,
+        );
+      }
     }
-    await this.switchAuth(session.id, next.id, { reason: "auto_rate_limit" });
-    this.claudeRotationEpisode.set(session.id, { episode, count: count + 1 });
-    this.logEvent("session.auth.auto_rotated", {
-      level: "info",
-      sessionId: session.id,
-      projectId: session.project,
-      message: `Auto-rotated ${session.id} to claude account ${next.id} after rate limit`,
-      details: {
-        ...(session.claudeAccountId ? { fromAccountId: session.claudeAccountId } : {}),
-        toAccountId: next.id,
-        episode,
+    const pool = this.authAccounts.updatePool(provider, update);
+    await this.authProxy.configure();
+    this.authSnapshot = undefined;
+    return pool;
+  }
+
+  async removeAuthorizationAccount(accountId: string): Promise<void> {
+    const proxyState = await this.authProxy.getState();
+    const bindings = proxyState.sessions;
+    const readyIds = new Set(
+      proxyState.accounts.filter((entry) => entry.status === "ready").map((entry) => entry.id),
+    );
+    const boundIds = new Set(
+      bindings
+        .filter(
+          (binding) => binding.accountId === accountId || binding.effectiveAccountId === accountId,
+        )
+        .map((binding) => binding.sessionId),
+    );
+    const hints = listSessions(this.config.dataDir).filter(
+      (session) =>
+        boundIds.has(session.id) ||
+        session.auth?.accountId === accountId ||
+        session.auth?.effectiveAccountId === accountId ||
+        session.claudeAccountId === accountId,
+    );
+    await this.withSessionLifecycleLocks(
+      hints.flatMap((session) => this.lifecycleIdsFor(session)),
+      async () => {
+        const sessions: SessionRecord[] = [];
+        for (const hint of hints) {
+          const session = readSession(this.config.dataDir, hint.id);
+          if (
+            session &&
+            !boundIds.has(session.id) &&
+            session.auth?.accountId !== accountId &&
+            session.auth?.effectiveAccountId !== accountId &&
+            session.claudeAccountId !== accountId
+          )
+            continue;
+          if (
+            !session ||
+            (!isTerminalSessionStatus(session.status) && session.status !== "errored")
+          ) {
+            throw new AuthorizationError(
+              `Cannot remove account ${accountId}: in use by a running session`,
+            );
+          }
+          const runtime = await this.readRuntimeSnapshot(session, { fresh: true });
+          if (runtime.processAlive || runtime.probeUnresponsive) {
+            throw new AuthorizationError(
+              `Cannot remove account ${accountId}: session runtime is live or unconfirmed`,
+            );
+          }
+          const processes = await findForeignAgentProcessesForSession({
+            sessionId: session.id,
+            processMatchers: sessionProcessMatchers(session),
+            excludePanePids: [],
+          });
+          if (processes.status !== "ok" || processes.pids.length > 0) {
+            throw new AuthorizationError(
+              `Cannot remove account ${accountId}: session process exit is unconfirmed`,
+            );
+          }
+          sessions.push(session);
+        }
+        for (const session of sessions) {
+          if (session.auth) await this.revokeManagedAuthorization(session.id);
+        }
+        await this.authProxy.removeAccount(accountId);
+        for (const session of sessions) {
+          const { auth: _auth, claudeAccountId: _legacyAccountId, ...base } = session;
+          writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+        }
+        this.authAccounts.remove(accountId, (id) => readyIds.has(id));
+        await this.authProxy.configure();
+        this.authSnapshot = undefined;
       },
-    });
-    return true;
+    );
   }
 
-  listClaudeAccounts(): {
-    id: string;
-    label?: string;
-    authenticated: boolean;
-    lastUsedAt?: string;
-  }[] {
-    ensureDefaultAccount(this.config.dataDir);
-    return listAccounts(this.config.dataDir).map((account) => ({
+  startAuthorizationLogin(accountId: string, method?: AuthLoginMethod): Promise<AuthLogin> {
+    this.authSnapshot = undefined;
+    const account = this.requireAuthorizationAccount(accountId);
+    const allowed: readonly [AuthLoginMethod, ...AuthLoginMethod[]] =
+      account.provider === "claude" ? ["oauth"] : ["device", "browser"];
+    const chosen = method ?? allowed[0];
+    if (!allowed.includes(chosen)) {
+      throw new AuthorizationError(
+        `Sign-in method ${chosen} is not available for ${account.provider}`,
+        400,
+      );
+    }
+    return this.authProxy.login(accountId, account.provider, chosen);
+  }
+
+  async setAuthorizationApiKey(accountId: string, apiKey: string): Promise<AuthLogin> {
+    this.authSnapshot = undefined;
+    const account = this.requireAuthorizationAccount(accountId);
+    return this.authProxy.setApiKey(accountId, account.provider, apiKey);
+  }
+
+  private requireAuthorizationAccount(accountId: string) {
+    const account = this.authAccounts.read().accounts.find((entry) => entry.id === accountId);
+    if (!account) throw new AuthorizationError(`Unknown authorization account: ${accountId}`, 404);
+    return account;
+  }
+
+  authorizationLoginInput(accountId: string, input: string | null): Promise<AuthLogin> {
+    this.authSnapshot = undefined;
+    return input === null
+      ? this.authProxy.cancelLogin(accountId)
+      : this.authProxy.loginInput(accountId, input);
+  }
+
+  authorizationLoginStatus(accountId: string): Promise<AuthLogin> {
+    return this.authProxy.loginStatus(accountId);
+  }
+
+  async listAuthAlerts(): Promise<{ alerts: AuthAlert[] }> {
+    const { alerts } = await this.authAlerts.evaluate(() => this.readAuthAlertInputs(), new Date());
+    return { alerts };
+  }
+
+  private async readAuthAlertInputs(): Promise<AlertEvaluationInput> {
+    const state = this.authAccounts.read();
+    let managed: ManagedBreakage[] | null = [];
+    if (state.accounts.length > 0) {
+      try {
+        const statuses = (await this.readAuthorizationState()).accounts;
+        const names = authDisplayNames(withCompanionIdentity(state.accounts, statuses));
+        managed = statuses.flatMap((entry) => {
+          const account = state.accounts.find((candidate) => candidate.id === entry.id);
+          return entry.brokenAt && account
+            ? [
+                {
+                  accountId: account.id,
+                  provider: account.provider,
+                  label: names.get(account.id) ?? account.id,
+                  brokenAt: entry.brokenAt,
+                },
+              ]
+            : [];
+        });
+      } catch {
+        managed = null;
+      }
+    }
+    const host = (await readHostCredentialSources(this.usageReportDeps())).map((source) => ({
+      provider: source.provider,
+      observation: observeHostSource(source),
+    }));
+    return { managed, host, sessions: listSessions(this.config.dataDir) };
+  }
+
+  startTerminalLogin(
+    target: { accountId: string } | { host: AuthProvider },
+  ): Promise<TerminalLogin> {
+    this.authSnapshot = undefined;
+    return this.authTerminals.start(target);
+  }
+
+  getTerminalLogin(id: string): TerminalLogin {
+    return this.authTerminals.get(id);
+  }
+
+  async stopTerminalLogin(id: string): Promise<void> {
+    this.authSnapshot = undefined;
+    await this.authTerminals.stop(id);
+  }
+
+  /** Legacy Claude shape: the display name rides as label; identity and quota stay out. */
+  async listClaudeAccounts() {
+    return (await this.listAuthorizationAccounts("claude")).accounts.map((account) => ({
       id: account.id,
-      ...(account.label ? { label: account.label } : {}),
-      authenticated: isAccountAuthenticated(account),
-      ...(account.lastUsedAt ? { lastUsedAt: account.lastUsedAt } : {}),
+      provider: account.provider,
+      label: account.displayName,
+      createdAt: account.createdAt,
+      authenticated: account.authenticated,
+      status: account.status,
+      limited: account.limited,
+      ...(account.cooldownUntil ? { cooldownUntil: account.cooldownUntil } : {}),
+      ...(account.credential ? { credential: account.credential } : {}),
     }));
   }
 
-  addClaudeAccount(opts: { label?: string }): ClaudeAccount {
-    return addAccount(this.config.dataDir, opts);
+  /** A new account has no identity yet, so its label is the placeholder display name. */
+  async addClaudeAccount() {
+    const account = await this.addAuthorizationAccount("claude");
+    return { id: account.id, label: authDisplayNames([account]).get(account.id) ?? account.id };
   }
 
-  removeClaudeAccount(accountId: string): void {
-    // removeAccount rmSync's the account's CLAUDE_CONFIG_DIR. Guard against
-    // deleting creds out from under a live claude process bound to it: a
-    // non-terminal session still has its claude process alive in tmux.
-    const bound = listSessions(this.config.dataDir).filter(
-      (session) => session.claudeAccountId === accountId,
-    );
-    const live = bound.filter((session) => !isTerminalSessionStatus(session.status));
-    if (live.length > 0) {
-      throw new Error(
-        `Cannot remove account ${accountId}: in use by ${live.length} running session(s)`,
-      );
-    }
-    // Terminal sessions keep no live process, but leaving the ref dangling would
-    // point at a deleted account; clear it before removing the store entry.
-    for (const session of bound) {
-      const { claudeAccountId: _claudeAccountId, ...base } = session;
-      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
-    }
-    removeAccount(this.config.dataDir, accountId);
+  removeClaudeAccount(accountId: string): Promise<void> {
+    return this.removeAuthorizationAccount(accountId);
   }
 
-  // Host an interactive OAuth login pane for an account in an isolated
-  // CLAUDE_CONFIG_DIR. The UI attaches to the returned tmux session and the
-  // operator completes the browser sign-in there; finishAccountLogin tears it
-  // down once .credentials.json lands.
   async startAccountLogin(accountId: string): Promise<{ loginTmuxSession: string }> {
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
+    await this.startAuthorizationLogin(accountId);
     const loginTmuxSession = `claude-login-${accountId}`;
     await killTmuxSession(loginTmuxSession);
     await createTmuxCommandSession({
       sessionName: loginTmuxSession,
       cwd: userInfo().homedir,
-      launchCommand: claudeCommand(),
-      env: { CLAUDE_CONFIG_DIR: account.configDir },
+      launchCommand: `${shellEscape(process.execPath)} ${shellEscape(fileURLToPath(new URL("./cli.js", import.meta.url)))} --config ${shellEscape(this.config.configPath)} auth login ${shellEscape(accountId)}`,
     });
     return { loginTmuxSession };
   }
 
   async finishAccountLogin(accountId: string): Promise<{ authenticated: boolean }> {
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
-    const authenticated = isAccountAuthenticated(account);
+    const authenticated = (await this.authorizationLoginStatus(accountId)).status === "ready";
+    if (!authenticated) await this.authProxy.cancelLogin(accountId);
     await killTmuxSession(`claude-login-${accountId}`);
     return { authenticated };
   }
@@ -25412,12 +25860,11 @@ export class SessionService {
   async getAccountLoginStatus(
     accountId: string,
   ): Promise<{ authenticated: boolean; loginActive: boolean }> {
-    const account = findAccount(this.config.dataDir, accountId);
-    if (!account) {
-      throw new Error(`Unknown claude account: ${accountId}`);
-    }
     const loginActive = await tmuxSessionExists(`claude-login-${accountId}`);
-    return { authenticated: isAccountAuthenticated(account), loginActive };
+    return {
+      authenticated: (await this.authorizationLoginStatus(accountId)).status === "ready",
+      loginActive,
+    };
   }
 
   private clearCloseoutOwner(sessionId: string): void {
@@ -26288,6 +26735,25 @@ export class SessionService {
         }
       }
       const model = resolveCarriedSpawnModel(session, agent, request.model);
+      const carriedAccountId = carriedAuthAccountId(session, agent);
+      let handoffAuthAccountId: string | undefined;
+      if (typeof carriedAccountId === "string") {
+        if (
+          this.authAccounts
+            .read()
+            .accounts.some((entry) => entry.id === carriedAccountId && entry.provider === agent)
+        ) {
+          handoffAuthAccountId = carriedAccountId;
+        } else {
+          this.logEvent("session.handoff.auth_account_missing", {
+            level: "warn",
+            sessionId,
+            projectId: session.project,
+            message: `Pinned ${agent} account is gone; handoff of ${sessionId} uses Auto`,
+            details: { accountId: carriedAccountId },
+          });
+        }
+      }
 
       const inheritedTodo = planHandoffTodo(projection, sessionId);
       let snapshot: HandoffPromptSnapshot | undefined;
@@ -26416,6 +26882,7 @@ export class SessionService {
           originalTaskPrompt: originalTask,
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
           ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
+          ...(handoffAuthAccountId !== undefined ? { authAccountId: handoffAuthAccountId } : {}),
         }),
         spawnOptions: {
           replacingSessionId: session.id,
@@ -30272,16 +30739,29 @@ export class SessionService {
     return latest;
   }
 
-  // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
-  // Computed once per listSessions() batch and threaded into every enrich so a
-  // batch of N claude sessions does one listAccounts read instead of N.
-  // Empty when authRotation.switchAuth is off: the web hides Switch auth on it.
-  private computeClaudeAccountsView(): { id: string; label?: string; authenticated: boolean }[] {
+  // Compatibility projection for the legacy Claude session-switch menu.
+  private async computeClaudeAccountsView(): Promise<
+    { id: string; label?: string; authenticated: boolean }[]
+  > {
     if (!this.config.authRotation.switchAuth) return [];
-    return listAccounts(this.config.dataDir).map((account) => ({
+    let accounts: Pick<AuthAccountSummary, "id" | "displayName" | "authenticated">[];
+    try {
+      accounts = (await this.listAuthorizationAccounts("claude")).accounts;
+    } catch {
+      const stored = this.authAccounts.read().accounts;
+      const names = authDisplayNames(stored);
+      accounts = stored
+        .filter((account) => account.provider === "claude")
+        .map((account) => ({
+          id: account.id,
+          displayName: names.get(account.id) ?? account.id,
+          authenticated: false,
+        }));
+    }
+    return accounts.map((account) => ({
       id: account.id,
-      ...(account.label ? { label: account.label } : {}),
-      authenticated: isAccountAuthenticated(account),
+      label: account.displayName,
+      authenticated: account.authenticated,
     }));
   }
 
@@ -30464,7 +30944,21 @@ export class SessionService {
       sessionBatch,
     );
     const resolvedClaudeAccounts =
-      session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
+      session.agent === "claude"
+        ? (claudeAccounts ?? (await this.computeClaudeAccountsView()))
+        : [];
+    let effectiveAuth = session.auth;
+    let authError: string | undefined;
+    if (session.auth) {
+      try {
+        effectiveAuth =
+          (await this.readAuthorizationState()).sessions.find(
+            (entry) => entry.sessionId === session.id,
+          ) ?? session.auth;
+      } catch {
+        authError = "Managed authorization proxy unavailable";
+      }
+    }
     const {
       launchCommand: _launchCommand,
       prompt: _prompt,
@@ -30496,6 +30990,8 @@ export class SessionService {
 
     const view: Omit<SessionListItemView, "lifecycle"> = {
       ...sessionWithoutDetailFields,
+      ...(effectiveAuth ? { auth: effectiveAuth } : {}),
+      ...(authError ? { authError } : {}),
       ...(session.spawnIntent ? { spawnIntent: publicSpawnIntent(session.spawnIntent) } : {}),
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
@@ -30516,7 +31012,11 @@ export class SessionService {
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
       ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
       ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
-      ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
+      ...(session.agent === "claude" && effectiveAuth
+        ? { activeClaudeAccountId: effectiveAuth.effectiveAccountId }
+        : session.claudeAccountId
+          ? { activeClaudeAccountId: session.claudeAccountId }
+          : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
       tokenUsageView,
       preflightTokenUsageView: this.derivePreflightTokenUsageView(session),

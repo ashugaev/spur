@@ -37,11 +37,15 @@ export function errorKindLabel(kind: QuotaErrorKind): string {
 }
 
 export function errorKindTone(kind: QuotaErrorKind): "warn" | "error" {
-  return kind === "rate_limited" || kind === "network_error" ? "warn" : "error";
+  return kind === "rate_limited" || kind === "network_error" || kind === "pending"
+    ? "warn"
+    : "error";
 }
 
 export function quotaLevel(quotas: QuotaSourceResult[]): QuotaLevel {
-  const failed = quotas.filter((quota) => quota.status === "error").length;
-  if (failed === 0) return "ready";
+  const failed = quotas.filter(
+    (quota) => quota.status === "error" && quota.error !== "pending",
+  ).length;
+  if (failed === 0) return quotas.some((quota) => quota.status === "error") ? "attention" : "ready";
   return failed === quotas.length ? "error" : "attention";
 }

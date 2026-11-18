@@ -146,7 +146,7 @@ Gate: a change to `scripts/main-deploy.sh`, `deploy/*.service`, or the source-in
 Second use of the same box: run `scripts/main-deploy.sh` end to end against real systemd. The hermetic `tests/deploy` suite stubs `systemctl`, `curl`, `ss`, and `pnpm` — it proves nothing about real systemd, real startup timing, or a real Next build. Verified means the positive and the negative case below both pass. Planted agents play no part: skip steps 3-5, keep steps 2 and 6.
 
   1  Reset in place (step 2). A box carrying the previous run's units and `.next` proves nothing.
-  2  Install node 22 and pnpm on the tested PATH. Create `/etc/spur/daemon.env` — main-deploy exits 1 without it. Passwordless sudo required; the script installs units with `sudo tee`.
+  2  Install prerequisites from `docs/install-from-source.md` on the tested PATH. Create `/etc/spur/daemon.env` — main-deploy exits 1 without it. Passwordless sudo required; the script installs units with `sudo tee`.
   3  `main-deploy.sh` resets its clone to `origin/main` every run, so `main` must BE the branch under test. Serve it from a local bare mirror:
 
      git clone --bare https://github.com/<owner>/spur.git ~/spur-mirror

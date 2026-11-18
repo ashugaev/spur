@@ -220,6 +220,7 @@ interface AgentAdapter {
     cursorConfigDir?: string;
     claudeConfigDir?: string;
     modelsCacheHome?: string;
+    managedAuth?: boolean;
     model?: string;
     reasoningEffort?: ProviderReasoningEffort;
     reasoningVariantNames?: string[];
@@ -578,12 +579,14 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       mcpExclude,
       restrictWrites,
       modelsCacheHome,
+      managedAuth,
     }) => ({
       codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(mcpBindings?.length ? { mcpBindings } : {}),
         ...(mcpExclude?.length ? { mcpExclude } : {}),
         ...(modelsCacheHome ? { modelsCacheHome } : {}),
+        ...(managedAuth ? { managedAuth: true } : {}),
       }),
     }),
     processMatchers: (launchCommand) => defaultProcessMatchers("codex", launchCommand),
@@ -961,6 +964,7 @@ export async function setupAgentHooks(args: {
   cursorConfigDir?: string;
   claudeConfigDir?: string;
   modelsCacheHome?: string;
+  managedAuth?: boolean;
   model?: string;
   reasoningEffort?: ProviderReasoningEffort;
   reasoningVariantNames?: string[];

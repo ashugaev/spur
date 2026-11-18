@@ -911,6 +911,7 @@ export async function ensureCodexHooksConfig(
     mcpBindings?: SidecarMcpBinding[];
     mcpExclude?: string[];
     modelsCacheHome?: string;
+    managedAuth?: boolean;
   },
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
@@ -929,7 +930,13 @@ export async function ensureCodexHooksConfig(
   );
   const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
   await writeFile(sessionConfigPath, finalConfig, "utf8");
-  await linkCodexAuth(codexDir);
+  if (options?.managedAuth) {
+    await Promise.all(
+      ["auth.json", ".credentials.json"].map((name) => rm(join(codexDir, name), { force: true })),
+    );
+  } else {
+    await linkCodexAuth(codexDir);
+  }
   if (options?.modelsCacheHome) {
     await cp(
       join(options.modelsCacheHome, "models_cache.json"),

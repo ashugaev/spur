@@ -475,7 +475,12 @@ const NEUTRAL_PR_STATUS = {
 // Routes every page fetches on load, independent of what a spec exercises.
 // Registered after the catch-all (so they win over it) and before the spec body
 // (so a spec's own route wins over them).
-const APP_SHELL_ROUTES: { pattern: string | RegExp; status?: number; body: unknown }[] = [
+const APP_SHELL_ROUTES: {
+  pattern: string | RegExp;
+  method?: string;
+  status?: number;
+  body: unknown;
+}[] = [
   {
     pattern: /\/api\/projects\/[^/]+\/preflight-batches$/,
     body: { preflightBatchId: "10000000-0000-4000-8000-000000000001" },
@@ -491,6 +496,10 @@ const APP_SHELL_ROUTES: { pattern: string | RegExp; status?: number; body: unkno
   { pattern: "**/api/runtime/voice", body: { available: false } },
   { pattern: "**/api/runtime/resources", body: { available: false, daemonAlive: true } },
   { pattern: "**/api/tags", body: { tags: [] } },
+  // Footer AuthAccountsMenu loads the managed account list on mount.
+  { pattern: "**/api/auth-accounts", method: "GET", body: { accounts: [], pools: {} } },
+  // Dashboard AuthAlertsBanner polls sign-in alerts on mount.
+  { pattern: "**/api/auth-alerts", method: "GET", body: { alerts: [] } },
   { pattern: "**/api/github-status", body: DEFAULT_GITHUB_STATUS },
   { pattern: "**/api/gitlab-status", body: DEFAULT_GITLAB_STATUS },
   { pattern: /\/api\/pr-status\/batch$/, body: { results: {} } },
@@ -532,8 +541,9 @@ async function installApiRouteGuards(target: ApiRouteTarget, seen: string[]): Pr
     seen.push(route.request().url());
     await route.abort("failed");
   });
-  for (const { pattern, status, body } of APP_SHELL_ROUTES) {
+  for (const { pattern, method, status, body } of APP_SHELL_ROUTES) {
     await target.route(pattern, async (route) => {
+      if (method && route.request().method() !== method) return route.fallback();
       await route.fulfill({
         status: status ?? 200,
         contentType: "application/json",
