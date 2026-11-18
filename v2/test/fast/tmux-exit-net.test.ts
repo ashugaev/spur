@@ -12,7 +12,7 @@
 // `const socketName = activeTmuxSocketName` closure) leaves the SECOND
 // socket alive after this test's fixture exits.
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -36,6 +36,7 @@ describe.skipIf(!tmuxOk)("tmux exit net (abnormal-exit safety)", () => {
     const vitestBin = join(process.cwd(), "node_modules", ".bin", "vitest");
     const markerDir = mkdtempSync(join(tmpdir(), "spur-tmux-exit-net-marker-"));
     const markerPath = join(markerDir, "marker.json");
+    let sockets: string[] = [];
 
     try {
       await execFileAsync(
@@ -51,10 +52,15 @@ describe.skipIf(!tmuxOk)("tmux exit net (abnormal-exit safety)", () => {
         socketA: string;
         socketB: string;
       };
+      sockets = [marker.socketA, marker.socketB];
+      await expect.poll(() => existsSync(`${markerPath}.exited`)).toBe(true);
 
       expect(await tmuxHasSession(marker.socketA)).toBe(false);
       expect(await tmuxHasSession(marker.socketB)).toBe(false);
     } finally {
+      for (const socket of sockets) {
+        await execFileAsync("tmux", ["-L", socket, "kill-server"]).catch(() => undefined);
+      }
       rmSync(markerDir, { recursive: true, force: true });
     }
   }, 60_000);

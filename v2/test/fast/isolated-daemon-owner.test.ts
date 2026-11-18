@@ -584,12 +584,39 @@ describe("isolated owner control", () => {
     }
   });
   it("preserves a dummy native-client descendant across restart and terminal owner stop", async () => {
-    const code = `const fs=require('node:fs');const path=require('node:path');const pidFile=path.join(__dirname,'native.pid');if(!fs.existsSync(pidFile)){const client=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:false,stdio:'ignore'});fs.writeFileSync(pidFile,String(client.pid));client.unref();}setInterval(()=>{},1000);`;
-    const fixture = await launch(code);
-    await expect
-      .poll(async () => Number(await readFile(join(fixture.directory, "native.pid"), "utf8")))
-      .toBeGreaterThan(0);
-    const nativePid = Number(await readFile(join(fixture.directory, "native.pid"), "utf8"));
+    const childProcess = await import("node:child_process");
+    const original = await vi.importActual<typeof Cp>("node:child_process");
+    let fixtureChild: Cp.ChildProcess | undefined;
+    let nativeReady: Promise<unknown> | undefined;
+    const spawn = vi
+      .spyOn(childProcess, "spawn")
+      .mockImplementationOnce((command, args, options) => {
+        const child = original.spawn(command, args, {
+          ...options,
+          stdio: ["inherit", "inherit", "inherit", "ipc"],
+        });
+        fixtureChild = child;
+        nativeReady = new Promise((resolve, reject) => {
+          child.once("message", resolve);
+          child.once("error", reject);
+          child.once("exit", () => reject(new Error("Fixture exited before native readiness")));
+        });
+        void nativeReady.catch(() => undefined);
+        return child;
+      });
+    const code = `const fs=require('node:fs');const path=require('node:path');const pidFile=path.join(__dirname,'native.pid');if(process.send){process.once('message',()=>{const client=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:false,stdio:'ignore'});fs.writeFileSync(pidFile,String(client.pid));client.unref();process.send(client.pid);process.disconnect();});}setInterval(()=>{},1000);`;
+    // Mocked daemon readiness precedes this real child's native-client setup.
+    const fixture = await launch(code).finally(() => spawn.mockRestore());
+    if (!nativeReady || !fixtureChild) throw new Error("Fixture did not spawn");
+    await expect(readFile(join(fixture.directory, "native.pid"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    fixtureChild.send("start-native");
+    const nativePid = await nativeReady;
+    expect(nativePid).toBeGreaterThan(0);
+    if (typeof nativePid !== "number" || !Number.isSafeInteger(nativePid))
+      throw new Error("Invalid fixture native PID");
+    expect(Number(await readFile(join(fixture.directory, "native.pid"), "utf8"))).toBe(nativePid);
     const nativeStarttime = await readLiveProcessStarttime(nativePid);
     try {
       expect(nativeStarttime).not.toBeNull();

@@ -1032,7 +1032,6 @@ export async function startServer(
   };
   applyLogConfigs(service.config);
   await service.recoverManagedAuthorization();
-  service.startBackgroundLoops();
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
@@ -3586,7 +3585,7 @@ export async function startServer(
 
   pageSources.start();
 
-  let driftedSessions: { id: string; project: string }[] = [];
+  let driftedSessions: Parameters<SessionService["restoreRebootedSessions"]>[0] = [];
   try {
     const {
       scanned,
@@ -3607,6 +3606,8 @@ export async function startServer(
       message: `Reconcile at boot failed: ${message}`,
     });
   }
+
+  service.startBackgroundLoops();
 
   try {
     await startAutomation();

@@ -24,6 +24,7 @@ INTERFACES
   Task outcomes, session-preserving completion: `docs/commands.md#todo-snapshot`.
   Closeout archive (`complete` only, never `kill`; one version per complete), `spur closeout show|get|list --link`: `docs/commands.md#todo-snapshot`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
+  Scheduled-wake admission: `docs/configuration.md#admission-control`.
   Trigger auto-close policy and deprecated config alias: `docs/configuration.md#field-reference`.
   Edit scheduled jobs through footer Cron viewer or MCP; config behavior: docs/configuration.md; operations: docs/daemon-api.md.
   Spur ToDo: ledger starts empty unless a handoff moved open/held items in; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion and self-destruct, an empty ledger its own handoff — `todo_ledger_empty`/`todo_open_work` (409); open/held work never refuses handoff, it moves to the successor; an agent may hand off another session only when stalled (`403 handoff_target_not_stalled`); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo-snapshot`.

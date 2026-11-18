@@ -53,6 +53,9 @@ describe("tmux-exit-net fixture", () => {
     const markerPath = process.env["TMUX_EXIT_NET_MARKER_FILE"];
     if (markerPath) {
       writeFileSync(markerPath, JSON.stringify({ socketA, socketB }));
+      // Registered after the exit net: observing this proves its sweep finished
+      // in this worker, beyond the supervising Vitest CLI's exit.
+      process.once("exit", () => writeFileSync(`${markerPath}.exited`, "exited"));
     }
 
     // Deliberately no cleanup()/kill-server call and no afterAll — the exit
