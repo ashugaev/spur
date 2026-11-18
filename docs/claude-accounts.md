@@ -51,7 +51,7 @@ Codex uses Responses HTTP streaming; provider credentials stay with the local pr
 ## Auto-rotation
 
 Each provider pool owns its default and Auto-rotation choice.
-Auto keeps its account after success and moves to a changed pool default on its next request; quota triggers failover when enabled.
+Auto keeps its account after success; quota triggers failover when enabled. A changed pool default is the start account of new Auto sessions and moves no existing one unless the change applies to active sessions.
 Auto leaves an account that needs sign-in for a ready one; failover prefers the least-used ready account.
 Pinned sessions never fail over.
 

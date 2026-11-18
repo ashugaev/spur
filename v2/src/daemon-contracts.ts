@@ -649,7 +649,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
         field(
           "applyToActive",
           "boolean",
-          "With defaultAccountId: true moves running Auto sessions on their next request; default false keeps them on their account. Response adds moved.",
+          "Requires defaultAccountId. True switches running Auto sessions of the provider to the new default; default false keeps existing Auto sessions on their account. Response adds moved.",
         ),
       ]),
     },

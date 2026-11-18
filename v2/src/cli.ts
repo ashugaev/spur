@@ -3492,28 +3492,34 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.default !== undefined ? { defaultAccountId: options.default } : {}),
         ...(options.applyToActive ? { applyToActive: true } : {}),
       };
-      const pool =
-        Object.keys(update).length > 0
-          ? (
-              await patchJson<{ pool: AuthPool }>(
-                cliEntrypoint,
-                `/auth-pools/${provider}`,
-                update,
-                configPath,
-              )
-            ).pool
-          : ((
-              await getJson<{ pools: Partial<Record<AuthProvider, AuthPool>> }>(
-                cliEntrypoint,
-                `/auth-accounts?agent=${provider}`,
-                configPath,
-              )
-            ).pools[provider] ?? null);
-      if (options.json) printJson({ provider, pool });
+      let pool: AuthPool | null;
+      let moved: number | undefined;
+      if (Object.keys(update).length > 0) {
+        const result = await patchJson<{ pool: AuthPool; moved: number }>(
+          cliEntrypoint,
+          `/auth-pools/${provider}`,
+          update,
+          configPath,
+        );
+        pool = result.pool;
+        if (options.applyToActive) moved = result.moved;
+      } else {
+        pool =
+          (
+            await getJson<{ pools: Partial<Record<AuthProvider, AuthPool>> }>(
+              cliEntrypoint,
+              `/auth-accounts?agent=${provider}`,
+              configPath,
+            )
+          ).pools[provider] ?? null;
+      }
+      if (options.json) printJson({ provider, pool, ...(moved !== undefined ? { moved } : {}) });
       else if (!pool) writeStdout(`${provider}: no pool; sessions use host authorization`);
       else
         writeStdout(
-          `${provider}\tdefault=${pool.defaultAccountId ?? "none"}\tauto-rotate=${pool.autoRotate ? "on" : "off"}`,
+          `${provider}\tdefault=${pool.defaultAccountId ?? "none"}\tauto-rotate=${pool.autoRotate ? "on" : "off"}${
+            moved !== undefined ? `\tmoved=${moved}` : ""
+          }`,
         );
     });
   auth

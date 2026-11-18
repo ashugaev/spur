@@ -27,7 +27,7 @@
 - `DELETE /auth-terminal-logins/:id` — stop and delete the throwaway home; `v2/src/auth-terminal-login.ts`.
 - `POST /auth-accounts/:id/login-input` — submit code or cancel; `v2/src/server.ts`.
 - `GET /auth-accounts/:id/login-status` — durable OAuth readiness; `v2/src/server.ts`.
-- `PATCH /auth-pools/:provider` — default account and quota rotation; creates a missing pool; `applyToActive` (boolean, default false) with `defaultAccountId`: false leaves running Auto sessions on their account, true moves them on their next request; response `{ pool, moved }`, `moved` = running Auto sessions that move (0 when false); `v2/src/server.ts`.
+- `PATCH /auth-pools/:provider` — default account and quota rotation; creates a missing pool; `applyToActive` (boolean, default false, requires `defaultAccountId` else `400`): false leaves existing Auto sessions on their account, true switches each running Auto session of the provider to Auto on the new default; response `{ pool, moved }`, `moved` = sessions actually switched, a failed switch is logged and not counted; `v2/src/server.ts`.
 - `GET /projects`
 - `GET /projects/cron?project=<id>` — cron sources, bound triggers, owner-file drift, last tick/action from the live event log; `project` optional; `404` unknown project; `v2/src/cron-jobs.ts`.
 - `GET /projects/cron/edit` — disk draft for a Cron spawn trigger; MCP `get_cron_job_draft`; `v2/src/cron-job-editor.ts`.

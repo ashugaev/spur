@@ -23754,11 +23754,44 @@ describe("SessionService", () => {
       },
     );
 
-    it.each([false, true])(
-      "changes the pool default with applyToActive=%s",
-      async (applyToActive) => {
+    describe("changing the pool default", () => {
+      const binding = (
+        sessionId: string,
+        provider: "claude" | "codex",
+        mode: "auto" | "pinned",
+        effectiveAccountId: string,
+      ) => ({
+        sessionId,
+        provider,
+        mode,
+        accountId: mode === "pinned" ? effectiveAccountId : null,
+        effectiveAccountId,
+        generation: 1,
+      });
+      const managed = (
+        id: string,
+        provider: "claude" | "codex",
+        mode: "auto" | "pinned",
+        effective: string,
+        overrides: Partial<ReturnType<typeof runningSession>> = {},
+      ) =>
+        runningSession({
+          id,
+          agent: provider,
+          auth: binding(id, provider, mode, effective),
+          ...overrides,
+        });
+
+      async function changeDefault(applyToActive: boolean, failing?: string) {
         seedManagedAccounts("claude");
-        createSessionStore(runningSession({ auth: { ...registration("claude"), mode: "auto" } }));
+        const sessions = createSessionStore(
+          managed("auto-run", "claude", "auto", "primary"),
+          managed("auto-also", "claude", "auto", "primary"),
+          managed("auto-on-new", "claude", "auto", "backup"),
+          managed("pinned-run", "claude", "pinned", "primary"),
+          managed("auto-stopped", "claude", "auto", "primary", { status: "stopped" }),
+          managed("codex-run", "codex", "auto", "primary"),
+        );
         authProxyGetStateMock.mockResolvedValue({
           accounts: ["primary", "backup"].map((id) => ({
             id,
@@ -23766,37 +23799,69 @@ describe("SessionService", () => {
             status: "ready",
           })),
           sessions: [
-            {
-              sessionId: "api-1",
-              provider: "claude",
-              mode: "auto",
-              accountId: null,
-              effectiveAccountId: "primary",
-              generation: 1,
-            },
+            binding("auto-run", "claude", "auto", "primary"),
+            binding("auto-also", "claude", "auto", "primary"),
+            binding("auto-on-new", "claude", "auto", "backup"),
+            binding("pinned-run", "claude", "pinned", "primary"),
+            binding("auto-stopped", "claude", "auto", "primary"),
+            binding("codex-run", "codex", "auto", "primary"),
           ],
         });
+        authProxySwitchSessionMock.mockImplementation(async (sessionId: string) => {
+          if (sessionId === failing) throw new Error("companion unavailable");
+          return {
+            ...registration("claude", "backup"),
+            sessionId,
+            mode: "auto",
+            accountId: null,
+            generation: 2,
+          };
+        });
         const service = await createDisposedSessionService();
-        const updatePool = (
-          service as unknown as { authAccounts: { updatePool: ReturnType<typeof vi.fn> } }
-        ).authAccounts.updatePool;
         const pool = { defaultAccountId: "backup", defaultGeneration: 1, autoRotate: true };
-        updatePool.mockReturnValue(pool);
+        (
+          service as unknown as { authAccounts: { updatePool: ReturnType<typeof vi.fn> } }
+        ).authAccounts.updatePool.mockReturnValue(pool);
         authProxyConfigureMock.mockClear();
-
         const result = await service.updateAuthorizationPool(
           "claude",
           { defaultAccountId: "backup" },
           applyToActive,
         );
-
-        expect(result).toEqual({ pool, moved: applyToActive ? 1 : 0 });
-        expect(authProxyConfigureMock).toHaveBeenCalledExactlyOnceWith(
-          applyToActive ? undefined : { keepActiveProvider: "claude" },
-        );
         service.dispose();
-      },
-    );
+        return { result, pool, sessions };
+      }
+
+      it("leaves every session on its account without applyToActive", async () => {
+        const { result, pool } = await changeDefault(false);
+
+        expect(result).toEqual({ pool, moved: 0 });
+        expect(authProxySwitchSessionMock).not.toHaveBeenCalled();
+        expect(authProxyConfigureMock).toHaveBeenCalledExactlyOnceWith();
+      });
+
+      it("moves only running Auto sessions of the provider with applyToActive", async () => {
+        const { result, pool, sessions } = await changeDefault(true);
+
+        expect(result).toEqual({ pool, moved: 2 });
+        expect(authProxySwitchSessionMock.mock.calls.map(([id]) => id).sort()).toEqual([
+          "auto-also",
+          "auto-run",
+        ]);
+        expect(authProxySwitchSessionMock).toHaveBeenCalledWith("auto-run", null);
+        expect(sessions.get("auto-run")?.auth?.effectiveAccountId).toBe("backup");
+        for (const id of ["pinned-run", "auto-stopped", "codex-run"]) {
+          expect(sessions.get(id)?.auth?.effectiveAccountId).toBe("primary");
+        }
+      });
+
+      it("counts only the sessions that actually moved when one switch fails", async () => {
+        const { result } = await changeDefault(true, "auto-also");
+
+        expect(result.moved).toBe(1);
+        expect(authProxySwitchSessionMock).toHaveBeenCalledTimes(2);
+      });
+    });
 
     it("rejects unknown and wrong-provider profiles before proxy or record changes", async () => {
       seedManagedAccounts("codex");

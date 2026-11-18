@@ -87,8 +87,11 @@ func TestExplicitDefaultGenerationChangesNextAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reg.EffectiveAccountID != "account-b" {
-		t.Fatal("new admission did not resolve explicit default generation")
+	if reg.EffectiveAccountID != "account-a" {
+		t.Fatal("default change moved an existing Auto binding")
+	}
+	if reg, err = r.register("session-a", codex, nil, true); err != nil || reg.EffectiveAccountID != "account-b" {
+		t.Fatal("explicit switch to Auto did not take the new default")
 	}
 	oldPin := "account-a"
 	if _, err := r.register("pinned", codex, &oldPin, false); err != nil {

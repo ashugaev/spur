@@ -333,37 +333,99 @@ func TestSessionRequestsAreNotSerialized(t *testing.T) {
 	}
 }
 
-// A default change moves a running Auto session on its next request unless the configure that
-// carries it asks to keep active sessions where they run.
-func TestDefaultChangeKeepActive(t *testing.T) {
-	for _, keep := range []bool{false, true} {
-		r := testRouter(t)
-		if _, err := r.register("session-a", codex, nil, false); err != nil {
+// A default change never moves an existing Auto binding, across admission, re-registration and a
+// router reopen, for both providers. Only a new binding or an explicit switch takes the new default.
+func TestDefaultChangeNeverMovesExistingAuto(t *testing.T) {
+	dir := t.TempDir()
+	r, err := openRouter(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.readyAccount = func(string, provider) bool { return true }
+	accounts := []accountInput{
+		{ID: "codex-a", Provider: codex, CreatedAt: "2026-01-01T00:00:00Z"},
+		{ID: "codex-b", Provider: codex, CreatedAt: "2026-01-02T00:00:00Z"},
+		{ID: "claude-a", Provider: claude, CreatedAt: "2026-01-03T00:00:00Z"},
+		{ID: "claude-b", Provider: claude, CreatedAt: "2026-01-04T00:00:00Z"},
+	}
+	ids := map[provider][2]string{codex: {"codex-a", "codex-b"}, claude: {"claude-a", "claude-b"}}
+	pools := func(generation uint64, side int) []poolInput {
+		var out []poolInput
+		for p, pair := range ids {
+			id := pair[side]
+			out = append(out, poolInput{Provider: p, DefaultAccountID: &id, AutoRotate: true, DefaultGeneration: generation})
+		}
+		return out
+	}
+	pol := policy{CooldownMinutes: 60, MaxRotationsPerEpisode: 1}
+	if err = r.configure(accounts, pools(1, 0), pol); err != nil {
+		t.Fatal(err)
+	}
+	for p := range ids {
+		if _, err = r.register("auto-"+string(p), p, nil, false); err != nil {
 			t.Fatal(err)
 		}
-		bID := "account-b"
-		pool := poolInput{Provider: codex, DefaultAccountID: &bID, AutoRotate: true, DefaultGeneration: 2, KeepActive: keep}
-		if err := r.configure([]accountInput{r.accounts["account-a"], r.accounts["account-b"], r.accounts["account-c"]}, []poolInput{pool}, r.policy); err != nil {
-			t.Fatal(err)
+	}
+	// Both defaults change; the running Auto sessions stay, through admission and re-registration.
+	if err = r.configure(accounts, pools(2, 1), pol); err != nil {
+		t.Fatal(err)
+	}
+	check := func(r *router, stage string) {
+		t.Helper()
+		for p, pair := range ids {
+			reg, err := r.register("auto-"+string(p), p, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reg.EffectiveAccountID != pair[0] || r.state.Sessions["auto-"+string(p)].Session.EffectiveAccountID != pair[0] {
+				t.Fatalf("%s: %s Auto session moved to %s", stage, p, reg.EffectiveAccountID)
+			}
 		}
-		// The next admission of the running session resolves the default generation.
-		reg, err := r.register("session-a", codex, nil, false)
+	}
+	check(r, "after default change")
+	opts := testAdmission(t, r, "auto-codex")
+	if got := pickForTest(t, r, opts, "codex-a", "codex-b").ID; got != authFileID("codex-a") {
+		t.Fatalf("admission moved the Auto session to %s", got)
+	}
+	r.close()
+	reopened, err := openRouter(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.close()
+	reopened.readyAccount = r.readyAccount
+	if err = reopened.configure(accounts, pools(2, 1), pol); err != nil {
+		t.Fatal(err)
+	}
+	check(reopened, "after reopen")
+	// New sessions start on the new default; an explicit switch to Auto takes it too.
+	for p, pair := range ids {
+		reg, err := reopened.register("new-"+string(p), p, nil, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := "account-b"
-		if keep {
-			want = "account-a"
+		if reg.EffectiveAccountID != pair[1] {
+			t.Fatalf("new %s session on %s, want %s", p, reg.EffectiveAccountID, pair[1])
 		}
-		if reg.EffectiveAccountID != want {
-			t.Fatalf("keepActive=%v: session on %s, want %s", keep, reg.EffectiveAccountID, want)
+		if reg, err = reopened.register("auto-"+string(p), p, nil, true); err != nil || reg.EffectiveAccountID != pair[1] {
+			t.Fatalf("switch of %s Auto session: %v %s", p, err, reg.EffectiveAccountID)
 		}
-		// A session that registers after the change starts on the new default either way.
-		if _, err := r.register("session-new", codex, nil, false); err != nil {
-			t.Fatal(err)
-		}
-		if got := pickForTest(t, r, testAdmission(t, r, "session-new"), "account-a", "account-b", "account-c").ID; got != authFileID("account-b") {
-			t.Fatalf("keepActive=%v: new session on %s", keep, got)
-		}
+	}
+}
+
+// An Auto session whose account is gone from the pool leaves it on its next request.
+func TestAutoLeavesRemovedAccount(t *testing.T) {
+	r := testRouter(t)
+	if _, err := r.register("session-a", codex, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	opts := testAdmission(t, r, "session-a")
+	bID := "account-b"
+	pool := poolInput{Provider: codex, DefaultAccountID: &bID, AutoRotate: true, DefaultGeneration: 2}
+	if err := r.configure([]accountInput{r.accounts["account-b"], r.accounts["account-c"]}, []poolInput{pool}, r.policy); err != nil {
+		t.Fatal(err)
+	}
+	if got := pickForTest(t, r, opts, "account-b", "account-c").ID; got == authFileID("account-a") {
+		t.Fatal("Auto session stayed on a removed account")
 	}
 }

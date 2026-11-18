@@ -216,6 +216,11 @@ describe("spawn", () => {
       "/tmp/spur.yaml",
     );
     patchJsonMock.mockClear();
+    writeStdoutMock.mockClear();
+    patchJsonMock.mockResolvedValue({
+      pool: { defaultAccountId: "b", defaultGeneration: 1, autoRotate: false },
+      moved: 2,
+    });
     await parseCli(["auth", "pool", "claude", "--default", "b", "--apply-to-active"]);
     expect(patchJsonMock).toHaveBeenCalledExactlyOnceWith(
       "/tmp/dist/cli.js",
@@ -223,6 +228,7 @@ describe("spawn", () => {
       { defaultAccountId: "b", applyToActive: true },
       "/tmp/spur.yaml",
     );
+    expect(writeStdoutMock).toHaveBeenCalledWith("claude\tdefault=b\tauto-rotate=off\tmoved=2");
     await expect(parseCli(["auth", "pool", "claude", "--apply-to-active"])).rejects.toThrow(
       "--apply-to-active requires --default",
     );

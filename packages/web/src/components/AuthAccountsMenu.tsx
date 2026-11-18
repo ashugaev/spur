@@ -21,7 +21,13 @@ import {
   quotaText,
   useAuthAccounts,
 } from "@/lib/auth-accounts";
-import type { AuthAccountSummary, AuthPool, AuthProvider } from "@/lib/types";
+import {
+  SESSIONS_QUERY_KEY,
+  type AuthAccountSummary,
+  type AuthPool,
+  type AuthProvider,
+  type SpurSessionsResponse,
+} from "@/lib/types";
 
 const NOTE_CLASS = "normal-case tracking-normal";
 const ROW_CLASS = `grid grid-cols-[minmax(0,1fr)_auto_5rem_1.75rem] items-center gap-x-2 border-b border-[var(--color-border-subtle)] py-1.5 last:border-b-0 ${NOTE_CLASS}`;
@@ -159,17 +165,18 @@ function ProviderSection({
     active: number;
     pinned: number;
   } | null>(null);
-  const [counting, setCounting] = useState(false);
   const closeSetDefault = () => {
     focusHandoff.current = false;
     setSetDefault(null);
   };
   // A change that would reach running Auto sessions asks which scope; otherwise it applies at once.
-  const requestDefault = async (account: AuthAccountSummary) => {
+  const requestDefault = (account: AuthAccountSummary) => {
     setLastError(null);
-    setCounting(true);
-    const counts = await countRunningAuthSessions(provider, account.id);
-    setCounting(false);
+    const counts = countRunningAuthSessions(
+      queryClient.getQueryData<SpurSessionsResponse>(SESSIONS_QUERY_KEY),
+      provider,
+      account.id,
+    );
     if (counts.active === 0) {
       poolMutation.mutate({ defaultAccountId: account.id });
       return;
@@ -182,8 +189,7 @@ function ProviderSection({
   const defaultId = pool?.defaultAccountId ?? null;
   const defaultAccount = accounts.find((account) => account.id === defaultId);
   const rotating = poolMutation.isPending && "autoRotate" in (poolMutation.variables ?? {});
-  const busy =
-    poolMutation.isPending || removeMutation.isPending || addMutation.isPending || counting;
+  const busy = poolMutation.isPending || removeMutation.isPending || addMutation.isPending;
 
   return (
     <section className="flex flex-col gap-1" data-testid={`auth-section-${provider}`}>
@@ -316,7 +322,7 @@ function ProviderSection({
                       className={SECONDARY_BUTTON_CLASS}
                       disabled={busy}
                       type="button"
-                      onClick={() => void requestDefault(account)}
+                      onClick={() => requestDefault(account)}
                     >
                       Switch
                     </button>

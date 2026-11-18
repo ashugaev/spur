@@ -25643,25 +25643,35 @@ export class SessionService {
         );
       }
     }
-    const previousDefault = this.authAccounts.read().pools[provider]?.defaultAccountId;
     const pool = this.authAccounts.updatePool(provider, update);
-    const defaultChanged =
-      update.defaultAccountId !== undefined && pool.defaultAccountId !== previousDefault;
-    await this.authProxy.configure(
-      defaultChanged && !applyToActive ? { keepActiveProvider: provider } : undefined,
-    );
+    await this.authProxy.configure();
     this.authSnapshot = undefined;
-    // Running Auto sessions that leave their account on their next request.
+    // The companion never moves an existing Auto binding on a default change: running Auto
+    // sessions of the provider move only here, one per-session switch to Auto at a time.
     let moved = 0;
-    if (defaultChanged && applyToActive) {
-      const bindings = (await this.authProxy.getState()).sessions;
-      moved = bindings.filter(
+    if (applyToActive && pool.defaultAccountId !== null) {
+      const targets = (await this.authProxy.getState()).sessions.filter(
         (binding) =>
           binding.provider === provider &&
           binding.mode === "auto" &&
           binding.effectiveAccountId !== pool.defaultAccountId &&
           readSession(this.config.dataDir, binding.sessionId)?.status === "running",
-      ).length;
+      );
+      for (const binding of targets) {
+        try {
+          await this.switchAuth(binding.sessionId, null, { reason: "manual" });
+          const after = readSession(this.config.dataDir, binding.sessionId)?.auth;
+          if (after && after.effectiveAccountId !== binding.effectiveAccountId) moved += 1;
+        } catch (error) {
+          this.logEvent("session.auth.switch_failed", {
+            level: "warn",
+            sessionId: binding.sessionId,
+            message: `Could not move ${binding.sessionId} to the new ${provider} default: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          });
+        }
+      }
     }
     return { pool, moved };
   }

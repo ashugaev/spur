@@ -99,7 +99,10 @@ describe("managed authorization HTTP boundary", () => {
       { defaultAccountId: "work" },
       applyToActive,
     );
-    expect((await send({ applyToActive: "yes" })).status).toBe(400);
+    expect((await send({ defaultAccountId: "work", applyToActive: "yes" })).status).toBe(400);
+    expect((await send({ applyToActive: true })).status).toBe(400);
+    expect((await send({ autoRotate: true, applyToActive: false })).status).toBe(400);
+    expect(change).toHaveBeenCalledTimes(1);
   });
 
   const post = (base: string, path: string, body?: unknown) =>

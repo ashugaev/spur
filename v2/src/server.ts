@@ -1485,6 +1485,9 @@ export async function startServer(
           .strict()
           .safeParse(await readJsonBody(request));
         if (!body.success) throw new AuthorizationError("Invalid authorization pool update", 400);
+        if (body.data.applyToActive !== undefined && !body.data.defaultAccountId) {
+          throw new AuthorizationError("applyToActive requires a defaultAccountId", 400);
+        }
         sendJson(
           response,
           200,

@@ -156,27 +156,21 @@ export function autoAccount(
 
 /**
  * Running sessions of a provider a default change touches: Auto sessions on another account move
- * when applied to active sessions, pinned ones never do. A failed read counts none, so the change
- * applies to new sessions only.
+ * when applied to active sessions, pinned ones never do. Read from the dashboard's session cache;
+ * without it nothing counts, so the change applies to new sessions only.
  */
-export async function countRunningAuthSessions(
+export function countRunningAuthSessions(
+  sessions: SpurSessionsResponse | undefined,
   provider: AuthProvider,
   newDefaultId: string,
-): Promise<{ active: number; pinned: number }> {
+): { active: number; pinned: number } {
   const counts = { active: 0, pinned: 0 };
-  try {
-    const response = await fetch("/api/sessions", { cache: "no-store" });
-    if (!response.ok) return counts;
-    const payload = (await response.json()) as Partial<SpurSessionsResponse>;
-    for (const session of payload.sessions ?? []) {
-      const auth = session.auth;
-      if (!auth || auth.provider !== provider || session.status !== "running") continue;
-      if (!session.runtimeAlive) continue;
-      if (auth.mode === "pinned") counts.pinned += 1;
-      else if (auth.effectiveAccountId !== newDefaultId) counts.active += 1;
-    }
-  } catch {
-    return { active: 0, pinned: 0 };
+  for (const session of sessions?.sessions ?? []) {
+    const auth = session.auth;
+    if (!auth || auth.provider !== provider || session.status !== "running") continue;
+    if (!session.runtimeAlive) continue;
+    if (auth.mode === "pinned") counts.pinned += 1;
+    else if (auth.effectiveAccountId !== newDefaultId) counts.active += 1;
   }
   return counts;
 }

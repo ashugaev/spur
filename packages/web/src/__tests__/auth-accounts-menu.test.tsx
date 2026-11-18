@@ -6,11 +6,12 @@ import { AuthAccountSelect } from "@/components/AuthAccountSelect";
 import { AuthAccountsMenu } from "@/components/AuthAccountsMenu";
 import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
 import { formatClockTime } from "@/lib/format";
-import type {
-  AuthAccountSummary,
-  AuthAccountsResponse,
-  AuthLogin,
-  SpurSessionAuth,
+import {
+  SESSIONS_QUERY_KEY,
+  type AuthAccountSummary,
+  type AuthAccountsResponse,
+  type AuthLogin,
+  type SpurSessionAuth,
 } from "@/lib/types";
 
 const COOLDOWN_UNTIL = "2026-01-01T14:05:00.000Z";
@@ -90,8 +91,10 @@ let routes: Record<string, (call: Call) => { status?: number; payload: unknown }
 // Holds every response until resolved; null answers immediately.
 let gate: Promise<void> | null;
 
+let client: QueryClient;
+
 function render(ui: ReactElement) {
-  const client = new QueryClient({
+  client = new QueryClient({
     defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
   });
   const Wrapper = ({ children }: { children: ReactNode }) => (
@@ -447,12 +450,16 @@ describe("AuthAccountsMenu", () => {
     ];
 
     beforeEach(() => {
-      routes["GET /api/sessions"] = () => ({ payload: { sessions } });
       routes["PATCH /api/auth-pools/claude"] = () => ({ payload: { pool: {}, moved: 0 } });
     });
 
+    // The dashboard's session cache is what the menu counts from.
+    const cacheSessions = (list: unknown[]) =>
+      client.setQueryData(SESSIONS_QUERY_KEY, { lifecycleInstanceId: "i", sessions: list });
+
     const openDialog = async () => {
       const claude = await openMenu();
+      cacheSessions(sessions);
       fireEvent.click(await claude.findByRole("button", { name: "Switch Claude to home@x.com" }));
       return within(await screen.findByRole("dialog", { name: "Set Claude default" }));
     };
@@ -509,8 +516,8 @@ describe("AuthAccountsMenu", () => {
     });
 
     it("applies at once when no running Auto session would move", async () => {
-      routes["GET /api/sessions"] = () => ({ payload: { sessions: [sessions[3], sessions[4]] } });
       const claude = await openMenu();
+      cacheSessions([sessions[3], sessions[4]]);
       fireEvent.click(await claude.findByRole("button", { name: "Switch Claude to home@x.com" }));
 
       await waitFor(() =>

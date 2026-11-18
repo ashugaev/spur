@@ -111,20 +111,6 @@ func (r *router) rotateLocked(b *binding, candidates map[string]bool) error {
 	return nil
 }
 
-func (r *router) rebaseDefaultLocked(b *binding) error {
-	pool, exists := r.pools[b.Session.Provider]
-	if !exists {
-		return errors.New("managed provider pool does not exist")
-	}
-	if b.Session.Mode == "auto" && b.DefaultGeneration != pool.DefaultGeneration {
-		if pool.DefaultAccountID != nil {
-			b.Session.EffectiveAccountID = *pool.DefaultAccountID
-		}
-		b.DefaultGeneration = pool.DefaultGeneration
-	}
-	return nil
-}
-
 func (r *router) Pick(_ context.Context, requestedProvider, _ string, opts coreexecutor.Options, auths []*coreauth.Auth) (*coreauth.Auth, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -323,11 +309,6 @@ func (r *router) middleware(probeKey string) gin.HandlerFunc {
 		// r.mu serializes admission; concurrent requests of one session proceed in parallel.
 		b := r.state.Sessions[sessionID]
 		before := b.Session.EffectiveAccountID
-		if err := r.rebaseDefaultLocked(&b); err != nil {
-			r.mu.Unlock()
-			c.AbortWithStatus(http.StatusServiceUnavailable)
-			return
-		}
 		if err := r.rotateLocked(&b, nil); err != nil {
 			until := r.state.Cooldowns[b.Session.EffectiveAccountID]
 			r.mu.Unlock()
