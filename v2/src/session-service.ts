@@ -4183,6 +4183,7 @@ export class SessionService {
   private sessionGcTimer: NodeJS.Timeout | null = null;
   private sessionGcRunning = false;
   private detachedOrphanSweepRunning = false;
+  private readonly detachedOrphanSweepAbort = new AbortController();
   private detachedOrphanScanUnavailable = false;
   // "<sessionId>:<kind>" owner failures already logged by the periodic sweep.
   private readonly detachedOrphanLogged = new Set<string>();
@@ -4655,6 +4656,7 @@ export class SessionService {
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
     this.deliveryStopped = true;
+    this.detachedOrphanSweepAbort.abort();
     this.codexPaneLimitObservedAt.clear();
     this.codexRateLimitPoller.dispose();
     this.scheduledWakeClaims.clear();
@@ -22801,7 +22803,7 @@ export class SessionService {
   // "absent". Never throws; survivors and unreadable inputs are logged only.
   private async terminateDetachedSessionProcesses(
     session: Pick<SessionRecord, "id">,
-    options?: { onlyOnTransition: true },
+    options?: { onlyOnTransition: true; signal: AbortSignal },
   ): Promise<DetachedSweepOutcome | null> {
     // The periodic sweep retries every tick: a failure repeats its event only
     // after the owner has been clear in between.
@@ -22813,6 +22815,7 @@ export class SessionService {
       return true;
     };
     const tmuxServer = await readTmuxServerPid();
+    if (options?.signal.aborted) return null;
     if (tmuxServer.status === "unavailable") {
       if (shouldLog("tmux")) {
         this.logEvent("session.agent_process.capture_unavailable", {
@@ -22824,11 +22827,15 @@ export class SessionService {
       }
       return null;
     }
-    const outcome = await terminateDetachedSessionProcesses({
+    const input = {
       sessionId: session.id,
       sessionToolDir: slotToolDir(this.config.dataDir, session.id),
       tmuxServerPid: tmuxServer.status === "running" ? tmuxServer.pid : null,
-    });
+    };
+    const outcome = options
+      ? await terminateDetachedSessionProcesses(input, { signal: options.signal })
+      : await terminateDetachedSessionProcesses(input);
+    if (options?.signal.aborted) return null;
     if (options && outcome.status === "clear") this.clearDetachedOrphanLatch(session.id);
     if (outcome.status === "unavailable") {
       if (!shouldLog("unavailable")) return outcome;
@@ -22873,20 +22880,37 @@ export class SessionService {
   private async sweepDetachedOrphans(context: "boot" | "tick"): Promise<void> {
     if (this.detachedOrphanSweepRunning || this.isDeliveryStopped()) return;
     this.detachedOrphanSweepRunning = true;
+    const signal = this.detachedOrphanSweepAbort.signal;
     try {
-      let owners: Awaited<ReturnType<typeof listDetachedSessionOwners>>;
-      try {
-        const tmuxServer = await readTmuxServerPid();
-        owners =
-          tmuxServer.status === "unavailable"
-            ? { status: "unavailable" }
-            : await listDetachedSessionOwners({
+      // Only discovery may detach from the tracked sweep. Its late completion
+      // stays read-only; owner termination below always remains awaited.
+      const owners = await new Promise<Awaited<
+        ReturnType<typeof listDetachedSessionOwners>
+      > | null>((resolve) => {
+        const finish = (result: Awaited<ReturnType<typeof listDetachedSessionOwners>> | null) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(result);
+        };
+        const onAbort = () => finish(null);
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        const discover = async () => {
+          const tmuxServer = await readTmuxServerPid();
+          signal.throwIfAborted();
+          return tmuxServer.status === "unavailable"
+            ? ({ status: "unavailable" } as const)
+            : listDetachedSessionOwners({
                 toolDirFor: (id) => slotToolDir(this.config.dataDir, id),
                 tmuxServerPid: tmuxServer.status === "running" ? tmuxServer.pid : null,
+                signal,
               });
-      } catch {
-        owners = { status: "unavailable" };
-      }
+        };
+        void discover().then(finish, () => finish({ status: "unavailable" }));
+      });
+      if (signal.aborted || !owners) return;
       if (owners.status === "unavailable") {
         this.noteDetachedOrphanScanUnavailable();
         return;
@@ -22910,6 +22934,7 @@ export class SessionService {
         try {
           await this.reapDetachedOrphanOwner(sessionId, context);
         } catch (error) {
+          if (this.isDeliveryStopped()) return;
           if (!this.detachedOrphanLogged.has(`${sessionId}:error`)) {
             this.detachedOrphanLogged.add(`${sessionId}:error`);
             this.logEvent("session.agent_process.capture_unavailable", {
@@ -22934,6 +22959,8 @@ export class SessionService {
     context: "boot" | "tick",
   ): Promise<void> {
     await this.withSessionLifecycleLocks([sessionId], async () => {
+      const signal = this.detachedOrphanSweepAbort.signal;
+      if (signal.aborted) return;
       const record = this.readOwnerRecord(sessionId);
       if (
         !record ||
@@ -22947,8 +22974,9 @@ export class SessionService {
       }
       const outcome = await this.terminateDetachedSessionProcesses(
         { id: sessionId },
-        { onlyOnTransition: true },
+        { onlyOnTransition: true, signal },
       );
+      if (this.isDeliveryStopped()) return;
       if (outcome?.status === "clear" && outcome.matched > 0) {
         this.logEvent("session.agent_process.detached_reaped", {
           level: "info",
