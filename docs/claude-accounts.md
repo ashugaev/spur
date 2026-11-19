@@ -24,7 +24,7 @@ Footer Accounts menu: one section per provider, Claude and Codex.
 Dashboard alert row per broken managed account or host login, above the agents list: Sign in and terminal icon.
 Row clears after a verified sign-in. Host rows open the terminal directly.
 
-Spawn dialog Account picker: Auto or an identified account; signed-out ones are disabled.
+Spawn dialog Account picker: Auto or an identified account; signed-out ones are disabled; hidden with exactly one usable account, where Auto is that account.
 Session Switch account: another profile or back to Auto, for the next request.
 
 Legacy Claude IDs remain, labels are ignored; sign in again for managed routing. An account shows its identity after sign-in.
@@ -38,7 +38,7 @@ Omission with no ready account launches with host authorization.
 
 Managed Claude/Codex sessions change account for the next request through
 [switch-auth](daemon-api.md#session-routes); current requests retain their account.
-Direct sessions enter managed routing on explicit restore/respawn.
+Direct sessions enter managed routing on explicit restore/respawn, or through switch-auth: a running session relaunches on the account with resume, a stopped one is only bound. A working session needs `force`; a relaunch that cannot resume leaves the session on its previous account. A running Codex session whose conversation is not saved on the managed provider is refused before any change and keeps running.
 Handoff to the same provider keeps a pinned profile; another provider, Auto, or a removed profile gives Auto.
 
 Managed routing preserves native session context and process identity during account changes.

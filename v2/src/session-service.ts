@@ -157,6 +157,7 @@ import {
   codexUsesCustomProvider,
   findLatestCodexSessionFile,
   readCodexConversationTail,
+  readCodexResumeProvider,
   readCodexRolloutState,
   readCodexTranscriptEntries,
   readCodexUserConfig,
@@ -188,6 +189,7 @@ import {
   type QuotaSourceResult,
   type UsageReportDeps,
 } from "./usage-report.js";
+import { hostDuplicatesManaged, readHostIdentity } from "./host-identity.js";
 import {
   AuthAlerts,
   logAuthFailed,
@@ -25658,9 +25660,7 @@ export class SessionService {
       throw new Error(`Session ${sessionId} changed before auth migration`);
     }
     if (!session.auth) {
-      throw new AuthorizationError(
-        "Direct authorization cannot switch in place; restore or respawn with a managed account",
-      );
+      return this.switchUnboundAuthLocked(session, accountId, opts, claim);
     }
     if (accountId !== null) {
       const account = this.authAccounts.read().accounts.find((entry) => entry.id === accountId);
@@ -25703,6 +25703,157 @@ export class SessionService {
       projectId: session.project,
       message: `Selected ${session.agent} authorization for the next request`,
       details: { accountId, reason: opts.reason, method: "proxy" },
+    });
+    return this.enrich(updated);
+  }
+
+  /**
+   * A session without a managed binding does not route through the companion proxy, so it cannot
+   * swap in place: bind it to the chosen account (or Auto) and relaunch the agent with resume.
+   * A session that is not running only gets the binding; its next restore launches managed.
+   * A running Codex thread not saved on spur_managed is refused before any change.
+   * A relaunch that cannot resume the conversation (fresh launch fallback) is a failed switch.
+   * A failure removes only the binding it wrote, restores the legacy account id and revokes the
+   * new registration; errors, launch ids and sidecars the relaunch stored stay.
+   */
+  private async switchUnboundAuthLocked(
+    session: SessionRecord,
+    accountId: string | null,
+    opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
+    claim: SessionLifecycleStamp,
+  ): Promise<SessionView> {
+    const sessionId = session.id;
+    const relaunch = session.status === "running";
+    if (relaunch && !session.agentSessionId) {
+      throw new AuthorizationError(
+        `Session ${sessionId} has no recorded conversation id to resume`,
+        409,
+      );
+    }
+    if (
+      relaunch &&
+      opts.force !== true &&
+      (await this.classifySessionState(session)) === "working"
+    ) {
+      throw new AuthorizationError(
+        `Session ${sessionId} is working; retry when idle or pass force to switch auth`,
+        409,
+      );
+    }
+    // Refuse before the pane is killed: the relaunch would be refused by the same guard.
+    if (relaunch) this.assertTokenBudgetAllowsActivation(session);
+    if (relaunch && session.agent === "codex" && session.agentSessionId) {
+      const threadId = session.agentSessionId;
+      const provider = await readCodexResumeProvider(threadId, {
+        sessionRootDir: join(
+          codexHookHomePath(slotToolDir(this.config.dataDir, sessionId)),
+          "sessions",
+        ),
+      });
+      if (provider !== "spur_managed") {
+        const reason = provider
+          ? `saved provider ${provider} cannot change to spur_managed`
+          : "saved provider cannot be verified for spur_managed";
+        throw new AuthorizationError(
+          `Cannot switch Codex thread ${threadId} of ${sessionId} to a managed account: ${reason}; the session keeps running on its current authorization. Use spur handoff ${sessionId} --agent codex to continue on a managed account.`,
+          409,
+        );
+      }
+    }
+    const project = this.getProject(session.project);
+    const registration = await this.prepareSessionAuthorization(
+      sessionId,
+      session.agent,
+      project,
+      accountId,
+      false,
+    );
+    if (!registration) {
+      throw new AuthorizationError(
+        `No ready ${session.agent} authorization account to switch ${sessionId} onto`,
+        400,
+      );
+    }
+    this.authSnapshot = undefined;
+    let updated: SessionRecord;
+    let boundWritten = false;
+    let freshLaunch = false;
+    try {
+      updated = await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+        const current = readSession(this.config.dataDir, sessionId);
+        if (!current || !this.lifecycleStampMatches(current, claim)) {
+          throw new Error(`Session ${sessionId} changed during auth selection`);
+        }
+        const { claudeAccountId: _legacyAccountId, ...base } = current;
+        const bound: SessionRecord = {
+          ...base,
+          auth: publicAuthSession(registration),
+          updatedAt: nowIso(),
+        };
+        writeSession(this.config.dataDir, bound);
+        boundWritten = true;
+        this.stateCache.delete(sessionId);
+        if (!relaunch) return bound;
+        await this.killAgentPaneAndConfirmExit(bound, { failOnSurvivors: true });
+        const relaunched = await this.ensureSessionReadyForSend(bound, {
+          paneAlreadyConfirmedGone: true,
+          paneAlreadyOwned: true,
+        });
+        if (relaunched.recoveryMessage) {
+          freshLaunch = true;
+          throw new AuthorizationError(
+            `Could not resume the conversation of ${sessionId} on the chosen account; the session keeps its previous account, restore it to continue`,
+            409,
+          );
+        }
+        return relaunched.session;
+      });
+    } catch (error) {
+      await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!latest) return;
+        // A fresh launch is a blank conversation: stop it, point the record back at the original
+        // conversation and park the session so a restore resumes it on its previous account.
+        if (freshLaunch) {
+          await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false }).catch(
+            () => undefined,
+          );
+        }
+        const { auth: _boundAuth, ...unbound } = latest;
+        const rolledBack: SessionRecord = {
+          ...(boundWritten ? unbound : latest),
+          ...(boundWritten && session.claudeAccountId !== undefined
+            ? { claudeAccountId: session.claudeAccountId }
+            : {}),
+          ...(freshLaunch && session.agentSessionId
+            ? { agentSessionId: session.agentSessionId }
+            : {}),
+          ...(freshLaunch
+            ? {
+                status: "stopped" as const,
+                stopReason: "auth_switch_unresumable" as const,
+                updatedAt: nowIso(),
+              }
+            : {}),
+        };
+        writeSession(this.config.dataDir, rolledBack);
+        this.stateCache.delete(sessionId);
+        await this.refreshDashboardCacheEntry(rolledBack);
+      });
+      await this.authProxy.revokeSession(sessionId).catch(() => undefined);
+      this.authSnapshot = undefined;
+      throw error;
+    }
+    this.logEvent("session.auth.switched", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Bound ${session.agent} authorization for ${sessionId}`,
+      details: {
+        accountId,
+        reason: opts.reason,
+        method: relaunch ? "relaunch" : "binding",
+      },
     });
     return this.enrich(updated);
   }
@@ -25915,10 +26066,12 @@ export class SessionService {
   private async readAuthAlertInputs(): Promise<AlertEvaluationInput> {
     const state = this.authAccounts.read();
     let managed: ManagedBreakage[] | null = [];
+    let identified = state.accounts;
     if (state.accounts.length > 0) {
       try {
         const statuses = (await this.readAuthorizationState()).accounts;
-        const names = authDisplayNames(withCompanionIdentity(state.accounts, statuses));
+        identified = withCompanionIdentity(state.accounts, statuses);
+        const names = authDisplayNames(identified);
         managed = statuses.flatMap((entry) => {
           const account = state.accounts.find((candidate) => candidate.id === entry.id);
           return entry.brokenAt && account
@@ -25936,11 +26089,34 @@ export class SessionService {
         managed = null;
       }
     }
+    const hostIdentities = new Map(
+      await Promise.all(
+        (["claude", "codex"] as const).map(
+          async (provider) => [provider, await readHostIdentity(provider, homedir())] as const,
+        ),
+      ),
+    );
+    const sessions = listSessions(this.config.dataDir);
+    // A host login that a managed account of the same user covers raises no alert of its own,
+    // unless a live unbound session of the provider still runs on that login.
     const host = (await readHostCredentialSources(this.usageReportDeps())).map((source) => ({
       provider: source.provider,
-      observation: observeHostSource(source),
+      observation:
+        hostDuplicatesManaged(
+          hostIdentities.get(source.provider) ?? null,
+          source.provider,
+          identified,
+        ) &&
+        !sessions.some(
+          (candidate) =>
+            candidate.agent === source.provider &&
+            !candidate.auth &&
+            (candidate.status === "running" || candidate.status === "spawning"),
+        )
+          ? ("ok" as const)
+          : observeHostSource(source),
     }));
-    return { managed, host, sessions: listSessions(this.config.dataDir) };
+    return { managed, host, sessions };
   }
 
   startTerminalLogin(

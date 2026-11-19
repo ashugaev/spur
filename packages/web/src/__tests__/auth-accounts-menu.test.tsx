@@ -782,6 +782,54 @@ describe("AuthAccountSelect", () => {
     expect(onChange.mock.calls).toEqual([["claude-home"], [null]]);
   });
 
+  it("hides the choice when only one account is usable", async () => {
+    routes["GET /api/auth-accounts"] = () => ({
+      payload: {
+        ...ACCOUNTS,
+        accounts: [WORK, { ...HOME, status: "sign_in_required", authenticated: false }],
+      },
+    });
+    const { container } = render(
+      <AuthAccountSelect agent="claude" onChange={vi.fn()} value={null} />,
+    );
+    await waitFor(() => expect(calls.length).toBe(1));
+    await waitFor(() => expect(container.querySelector("select")).toBeNull());
+  });
+
+  it("resets a stale selection to Auto when the choice is hidden", async () => {
+    routes["GET /api/auth-accounts"] = () => ({
+      payload: {
+        ...ACCOUNTS,
+        accounts: [WORK, { ...HOME, status: "sign_in_required", authenticated: false }],
+      },
+    });
+    const onChange = vi.fn();
+    render(<AuthAccountSelect agent="claude" onChange={onChange} value="claude-home" />);
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(null));
+  });
+
+  it("resets a selection that is signed out while the choice stays visible", async () => {
+    routes["GET /api/auth-accounts"] = () => ({
+      payload: {
+        ...ACCOUNTS,
+        accounts: [WORK, { ...HOME, status: "sign_in_required", authenticated: false }, KEY],
+      },
+    });
+    const onChange = vi.fn();
+    render(<AuthAccountSelect agent="claude" onChange={onChange} value="claude-home" />);
+    await loadedSelect();
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(null));
+  });
+
+  it("shows the choice when two accounts are usable", async () => {
+    routes["GET /api/auth-accounts"] = () => ({
+      payload: { ...ACCOUNTS, accounts: [WORK, HOME] },
+    });
+    render(<AuthAccountSelect agent="claude" onChange={vi.fn()} value={null} />);
+    const select = await loadedSelect();
+    expect(select.options.length).toBe(3);
+  });
+
   it("renders nothing when no account of the agent has an identity", async () => {
     routes["GET /api/auth-accounts"] = () => ({
       payload: { accounts: [FRESH], pools: {} },
@@ -813,6 +861,7 @@ describe("SwitchAuthDialog", () => {
   };
   const dialog = (props: Partial<Parameters<typeof SwitchAuthDialog>[0]> = {}) => (
     <SwitchAuthDialog
+      provider="claude"
       auth={auth}
       errorMessage={null}
       onCancel={vi.fn()}
@@ -861,6 +910,20 @@ describe("SwitchAuthDialog", () => {
     );
     expect(screen.getByText("Interrupt the request in flight")).toBeTruthy();
     expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("lists the same accounts for an unbound session and enables Switch for any choice", async () => {
+    const onConfirm = vi.fn();
+    render(dialog({ onConfirm, auth: undefined }));
+
+    const group = await screen.findByRole("radiogroup", { name: "Switch Claude account" });
+    await waitFor(() => expect(within(group).getAllByRole("radio")).toHaveLength(4));
+    expect(within(group).queryByRole("img", { name: "current" })).toBeNull();
+    const button = screen.getByRole("button", { name: "Switch" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+
+    expect(onConfirm).toHaveBeenCalledWith(null, false);
   });
 
   it("disables a signed-out account and keeps Switch off until the selection changes", async () => {

@@ -315,6 +315,125 @@ describe("buildUsageReport quotas", () => {
     });
   });
 
+  async function writeHostIdentities(home: string, claudeEmail: string, codexEmail: string) {
+    await writeFile(
+      join(home, ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: claudeEmail, organizationUuid: "org-1" } }),
+    );
+    await mkdir(join(home, ".codex"), { recursive: true });
+    const claims = Buffer.from(
+      JSON.stringify({
+        email: codexEmail,
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+      }),
+    ).toString("base64url");
+    await writeFile(
+      join(home, ".codex", "auth.json"),
+      JSON.stringify({ tokens: { access_token: "cx-token", id_token: `h.${claims}.s` } }),
+    );
+  }
+
+  it.each([
+    ["the same user", "a@example.com", "org-1", "c@example.com", "acct-1", []],
+    [
+      "another user",
+      "other@example.com",
+      "org-1",
+      "other@example.com",
+      "acct-1",
+      ["claude:default", "codex:codex"],
+    ],
+    [
+      "the same email in another organization",
+      "a@example.com",
+      "org-2",
+      "c@example.com",
+      "acct-2",
+      ["claude:default", "codex:codex"],
+    ],
+  ])(
+    "host rows follow identity for signed-out managed accounts of %s",
+    async (_label, email, organizationId, codexEmail, accountId, hostRows) => {
+      const s = await setup();
+      await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+      await writeHostIdentities(s.home, "a@example.com", "c@example.com");
+      const fetchMock = vi.fn(async (url: string | URL | Request) =>
+        String(url).includes("anthropic") ? json(CLAUDE_BODY) : json(CODEX_BODY),
+      );
+      const report = await buildUsageReport({
+        ...s.deps(fetchMock as unknown as typeof fetch),
+        managedAccounts: [
+          {
+            id: "m-claude",
+            provider: "claude",
+            displayName: email,
+            identity: { email, organizationId },
+            credential: "oauth",
+            status: "sign_in_required",
+          },
+          {
+            id: "m-codex",
+            provider: "codex",
+            displayName: codexEmail,
+            identity: { email: codexEmail, organizationId: accountId },
+            credential: "oauth",
+            status: "sign_in_required",
+          },
+        ],
+      });
+      expect(report.quotas.map((q) => `${q.provider}:${q.source}`)).toEqual(hostRows);
+      expect(JSON.stringify(report)).not.toContain("cx-token");
+    },
+  );
+
+  it.each([
+    ["in another organization", "org-2", ["claude:default", "codex:codex"]],
+    ["without an organization id", undefined, ["codex:codex"]],
+  ])(
+    "matches the Claude host row on email alone only when a side has no organization: same email %s",
+    async (_label, organizationId, hostRows) => {
+      const s = await setup();
+      await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+      await writeHostIdentities(s.home, "a@example.com", "c@example.com");
+      const fetchMock = vi.fn(async () => json(CLAUDE_BODY));
+      const report = await buildUsageReport({
+        ...s.deps(fetchMock as unknown as typeof fetch),
+        managedAccounts: [
+          {
+            id: "m-claude",
+            provider: "claude",
+            displayName: "a@example.com",
+            identity: { email: "a@example.com", ...(organizationId ? { organizationId } : {}) },
+            credential: "oauth",
+            status: "sign_in_required",
+          },
+        ],
+      });
+      expect(report.quotas.map((q) => `${q.provider}:${q.source}`)).toEqual(hostRows);
+    },
+  );
+
+  it("hides the host rows for a ready managed account of another user", async () => {
+    const s = await setup();
+    await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+    await writeHostIdentities(s.home, "a@example.com", "c@example.com");
+    const fetchMock = vi.fn();
+    const report = await buildUsageReport({
+      ...s.deps(fetchMock as unknown as typeof fetch),
+      managedAccounts: ["claude", "codex"].map((provider) => ({
+        id: `m-${provider}`,
+        provider: provider as "claude" | "codex",
+        displayName: "other@example.com",
+        identity: { email: "other@example.com", organizationId: "org-9" },
+        credential: "oauth" as const,
+        status: "ready",
+        quota: { windows: [], fetchedAt: "2026-11-06T11:59:00.000Z" },
+      })),
+    });
+    expect(report.quotas.map((q) => q.source)).toEqual(["m-claude", "m-codex"]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("lists one row per ready OAuth managed account and drops that provider's host source", async () => {
     const s = await setup();
     await writeClaudeCreds(join(s.home, ".claude"), FUTURE);

@@ -26,6 +26,7 @@ import {
   type AvailableBacklogItem,
   type PersistedPendingBatch,
   type PersistedSpawnWork,
+  type DurableSpawnIntent,
   type ReviewProviderId,
   type ReviewSignal,
   type ReviewSnapshot,
@@ -1234,6 +1235,35 @@ function durableEffort(value: unknown): boolean {
   );
 }
 
+// Every field spawn stores in the durable request (all of SpawnSessionRequest but the attachment
+// bytes, the config path and the HTTP-only idempotency key). The type makes a new request field a
+// compile error here until it is listed and validated below.
+const DURABLE_SPAWN_REQUEST_KEYS = {
+  project: true,
+  prompt: true,
+  steps: true,
+  agent: true,
+  model: true,
+  reasoningEffort: true,
+  mode: true,
+  planMode: true,
+  restrictWrites: true,
+  allowedTriggers: true,
+  prAlertOwner: true,
+  branch: true,
+  overrides: true,
+  reuseWorkspaceSessionId: true,
+  originalTaskPrompt: true,
+  bareSpawnMessage: true,
+  preflightBatchId: true,
+  slots: true,
+  selfDestruct: true,
+  bootstrap: true,
+  authAccountId: true,
+  claudeAccountId: true,
+  subscriptions: true,
+} satisfies Record<keyof DurableSpawnIntent["request"], true>;
+
 function validateDurableSpawnFields(session: SessionRecord): void {
   if (session.spawnReceipt !== undefined) {
     const receipt = durableObject(session.spawnReceipt, ["version", "acceptedAt"], "receipt");
@@ -1290,31 +1320,15 @@ function validateDurableSpawnFields(session: SessionRecord): void {
   );
   const request = durableObject(
     intent["request"],
-    [
-      "project",
-      "prompt",
-      "steps",
-      "agent",
-      "model",
-      "reasoningEffort",
-      "mode",
-      "planMode",
-      "restrictWrites",
-      "allowedTriggers",
-      "prAlertOwner",
-      "branch",
-      "overrides",
-      "reuseWorkspaceSessionId",
-      "originalTaskPrompt",
-      "bareSpawnMessage",
-      "preflightBatchId",
-      "slots",
-      "selfDestruct",
-      "bootstrap",
-      "claudeAccountId",
-      "subscriptions",
-    ],
+    Object.keys(DURABLE_SPAWN_REQUEST_KEYS),
     "request",
+  );
+  // Auto is stored as null; a saved profile as its id.
+  durableCheck(
+    request["authAccountId"] === undefined ||
+      request["authAccountId"] === null ||
+      durableString(request["authAccountId"]),
+    "request authAccountId",
   );
   durableCheck(request["project"] === session.project, "request project");
   for (const key of [

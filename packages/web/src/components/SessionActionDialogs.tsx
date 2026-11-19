@@ -32,6 +32,7 @@ import {
 } from "@/lib/submit-hotkeys";
 import {
   isTerminalSession,
+  sessionAuthProvider,
   toDashboardSession,
   type DashboardSession,
   type SessionNotRestorablePayload,
@@ -105,6 +106,7 @@ export function useSessionActionDialogs({
   };
   const session = target ? (pinned ? target : (resolve(target.id) ?? target)) : null;
   const sessionKey = session?.id ?? "";
+  const switchProvider = session ? sessionAuthProvider(session) : null;
   const [busy, setBusyState] = useState<SessionDialogBusy>(null);
   const setBusy = (next: SessionDialogBusy) => {
     setBusyState(next);
@@ -506,9 +508,10 @@ export function useSessionActionDialogs({
           payload={recoverPayload}
         />
       ) : null}
-      {switchAuthOpen && session.auth ? (
+      {switchAuthOpen && session && switchProvider ? (
         <SwitchAuthDialog
-          auth={session.auth}
+          provider={switchProvider}
+          {...(session.auth ? { auth: session.auth } : {})}
           status={switchAuthPending ? "pending" : switchAuthError ? "error" : "idle"}
           errorMessage={switchAuthError}
           onConfirm={(accountId, force) => void handleSwitchAuth(accountId, force)}

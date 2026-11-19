@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { listAccounts, sessionClaudeHome, type ClaudeAccount } from "./claude-accounts.js";
+import { hostDuplicatesManaged, readHostIdentity, type HostIdentity } from "./host-identity.js";
 import { listSessions, sessionFilePath } from "./metadata.js";
 import {
   summarizeTokenUsageWindows,
@@ -63,6 +64,7 @@ export interface ManagedQuotaAccount {
   id: string;
   provider: QuotaProvider;
   displayName: string;
+  identity?: { email?: string | undefined; organizationId?: string | undefined } | undefined;
   credential?: "oauth" | "api_key";
   status: string;
   quota?: { windows: QuotaWindow[]; fetchedAt: string };
@@ -580,7 +582,15 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
   const managedProviders = new Set(
     managed.filter((account) => account.status === "ready").map((account) => account.provider),
   );
-  const hostAccounts = managedProviders.has("claude")
+  const [claudeHostIdentity, codexHostIdentity] = await Promise.all([
+    readHostIdentity("claude", deps.homeDir),
+    readHostIdentity("codex", deps.homeDir),
+  ]);
+  // A host login is hidden when its provider has a ready managed account (new sessions no longer
+  // use it) or a managed account in any state is the same user.
+  const hostHidden = (provider: QuotaProvider, identity: HostIdentity | null): boolean =>
+    managedProviders.has(provider) || hostDuplicatesManaged(identity, provider, managed);
+  const hostAccounts = hostHidden("claude", claudeHostIdentity)
     ? accounts.filter((account) => account.configDir !== defaultDir)
     : accounts;
   const [hostQuotas, tokens] = await Promise.all([
@@ -592,7 +602,7 @@ export async function buildUsageReport(deps: UsageReportDeps): Promise<UsageRepo
           sessions.filter((s) => s.claudeAccountId === account.id).map((s) => s.id),
         ),
       ),
-      ...(managedProviders.has("codex") ? [] : [codexSource(deps)]),
+      ...(hostHidden("codex", codexHostIdentity) ? [] : [codexSource(deps)]),
     ]),
     tokenActivity(deps, sessions),
   ]);
