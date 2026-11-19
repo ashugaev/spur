@@ -79,6 +79,7 @@ import {
   isOpenPrActionRequiredPayload,
   isSessionNotRestorablePayload,
   isTerminalSession,
+  SESSIONS_QUERY_KEY,
   toDashboardSession,
   type AttentionLevel,
   type AvailableBacklogItem,
@@ -1333,7 +1334,7 @@ export function Dashboard() {
   );
 
   const queryClient = useQueryClient();
-  const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
+  const sessionsQueryKey = SESSIONS_QUERY_KEY;
   const lifecycleRef = useRef(new SessionLifecycleConsumer());
   const sessionsReadMsRef = useRef(0);
   const sessionsErrorBaselineRef = useRef(0);

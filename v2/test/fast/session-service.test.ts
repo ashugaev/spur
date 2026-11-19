@@ -167,6 +167,7 @@ import {
   authAccountsRemoveMock,
   authAccountsRecordIdentitiesMock,
   authProxyGetStateMock,
+  authProxyConfigureMock,
   authProxyGetUsageMock,
   authProxySetApiKeyMock,
   authProxyRegisterSessionMock,
@@ -23754,6 +23755,197 @@ describe("SessionService", () => {
         service.dispose();
       },
     );
+
+    describe("changing the pool default", () => {
+      const binding = (
+        sessionId: string,
+        provider: "claude" | "codex",
+        mode: "auto" | "pinned",
+        effectiveAccountId: string,
+      ) => ({
+        sessionId,
+        provider,
+        mode,
+        accountId: mode === "pinned" ? effectiveAccountId : null,
+        effectiveAccountId,
+        generation: 1,
+      });
+      const managed = (
+        id: string,
+        provider: "claude" | "codex",
+        mode: "auto" | "pinned",
+        effective: string,
+        overrides: Partial<ReturnType<typeof runningSession>> = {},
+      ) =>
+        runningSession({
+          id,
+          agent: provider,
+          auth: binding(id, provider, mode, effective),
+          ...overrides,
+        });
+
+      async function changeDefault(
+        applyToActive: boolean,
+        failing?: string,
+        unchanged?: string,
+        // Runs inside the first switch, after the target snapshot was taken.
+        interleave?: (
+          sessions: Map<string, ReturnType<typeof runningSession>>,
+          service: Awaited<ReturnType<typeof createDisposedSessionService>>,
+        ) => void | Promise<void>,
+      ) {
+        seedManagedAccounts("claude");
+        tmuxSessionExistsMock.mockImplementation(async (name: string) => name !== "offline-tmux");
+        const sessions = createSessionStore(
+          managed("auto-run", "claude", "auto", "primary"),
+          managed("auto-also", "claude", "auto", "primary"),
+          managed("auto-offline", "claude", "auto", "primary", { tmuxSession: "offline-tmux" }),
+          managed("auto-on-new", "claude", "auto", "backup"),
+          managed("pinned-run", "claude", "pinned", "primary"),
+          managed("auto-stopped", "claude", "auto", "primary", { status: "stopped" }),
+          managed("codex-run", "codex", "auto", "primary"),
+        );
+        authProxyGetStateMock.mockResolvedValue({
+          accounts: ["primary", "backup"].map((id) => ({
+            id,
+            provider: "claude",
+            status: "ready",
+          })),
+          sessions: [
+            binding("auto-run", "claude", "auto", "primary"),
+            binding("auto-also", "claude", "auto", "primary"),
+            binding("auto-offline", "claude", "auto", "primary"),
+            binding("auto-on-new", "claude", "auto", "backup"),
+            binding("pinned-run", "claude", "pinned", "primary"),
+            binding("auto-stopped", "claude", "auto", "primary"),
+            binding("codex-run", "codex", "auto", "primary"),
+          ],
+        });
+        authProxySwitchSessionMock.mockImplementation(async (sessionId: string) => {
+          if (sessionId === failing) throw new Error("companion unavailable");
+          if (sessionId === "auto-run") await interleave?.(sessions, service);
+          return {
+            ...registration("claude", sessionId === unchanged ? "primary" : "backup"),
+            sessionId,
+            mode: "auto",
+            accountId: null,
+            generation: 2,
+          };
+        });
+        const service = await createDisposedSessionService();
+        const pool = { defaultAccountId: "backup", defaultGeneration: 1, autoRotate: true };
+        (
+          service as unknown as { authAccounts: { updatePool: ReturnType<typeof vi.fn> } }
+        ).authAccounts.updatePool.mockReturnValue(pool);
+        authProxyConfigureMock.mockClear();
+        const result = await service.updateAuthorizationPool(
+          "claude",
+          { defaultAccountId: "backup" },
+          applyToActive,
+        );
+        service.dispose();
+        return { result, pool, sessions };
+      }
+
+      it("leaves every session on its account without applyToActive", async () => {
+        const { result, pool } = await changeDefault(false);
+
+        expect(result).toEqual({ pool, moved: 0 });
+        expect(authProxySwitchSessionMock).not.toHaveBeenCalled();
+        expect(authProxyConfigureMock).toHaveBeenCalledExactlyOnceWith();
+      });
+
+      it("moves only running Auto sessions of the provider with applyToActive", async () => {
+        const { result, pool, sessions } = await changeDefault(true);
+
+        expect(result).toEqual({ pool, moved: 2 });
+        expect(authProxySwitchSessionMock.mock.calls.map(([id]) => id).sort()).toEqual([
+          "auto-also",
+          "auto-run",
+        ]);
+        expect(authProxySwitchSessionMock).toHaveBeenCalledWith("auto-run", null);
+        expect(sessions.get("auto-run")?.auth?.effectiveAccountId).toBe("backup");
+        for (const id of ["pinned-run", "auto-offline", "auto-stopped", "codex-run"]) {
+          expect(sessions.get(id)?.auth?.effectiveAccountId).toBe("primary");
+        }
+      });
+
+      it("counts only the sessions that actually moved when one switch fails", async () => {
+        logSpurEventMock.mockClear();
+        const { result } = await changeDefault(true, "auto-also");
+
+        expect(result.moved).toBe(1);
+        expect(authProxySwitchSessionMock).toHaveBeenCalledTimes(2);
+        const failures = logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.auth.switch_failed",
+        );
+        expect(failures).toHaveLength(1);
+        expect(failures[0]?.[1]).toMatchObject({ sessionId: "auto-also" });
+      });
+
+      const switchedEvents = (sessionId: string) =>
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.auth.switched" && entry.sessionId === sessionId,
+        );
+
+      it("keeps a pin that lands after the snapshot and does not count it", async () => {
+        logSpurEventMock.mockClear();
+        const { result, sessions } = await changeDefault(true, undefined, undefined, (store) => {
+          store.set("auto-also", managed("auto-also", "claude", "pinned", "primary"));
+        });
+
+        expect(result.moved).toBe(1);
+        expect(authProxySwitchSessionMock.mock.calls.map(([id]) => id)).toEqual(["auto-run"]);
+        expect(sessions.get("auto-also")?.auth).toMatchObject({
+          mode: "pinned",
+          accountId: "primary",
+          effectiveAccountId: "primary",
+        });
+        expect(switchedEvents("auto-also")).toHaveLength(0);
+        expect(switchedEvents("auto-run")).toHaveLength(1);
+      });
+
+      it("skips a session a public Auto switch already moved to the new default", async () => {
+        logSpurEventMock.mockClear();
+        const { result } = await changeDefault(true, undefined, undefined, async (_, service) => {
+          await service.switchAuth("auto-also", null, { reason: "manual" });
+        });
+
+        expect(result.moved).toBe(1);
+        expect(authProxySwitchSessionMock.mock.calls.map(([id]) => id).sort()).toEqual([
+          "auto-also",
+          "auto-run",
+        ]);
+        expect(switchedEvents("auto-also")).toHaveLength(1);
+      });
+
+      it("does not move a session stopped after the snapshot", async () => {
+        logSpurEventMock.mockClear();
+        const { result, sessions } = await changeDefault(true, undefined, undefined, (store) => {
+          store.set(
+            "auto-also",
+            managed("auto-also", "claude", "auto", "primary", {
+              status: "stopped",
+              stopReason: "manual_pause",
+            }),
+          );
+        });
+
+        expect(result.moved).toBe(1);
+        expect(authProxySwitchSessionMock.mock.calls.map(([id]) => id)).toEqual(["auto-run"]);
+        expect(sessions.get("auto-also")?.auth?.effectiveAccountId).toBe("primary");
+        expect(sessions.get("auto-also")?.status).toBe("stopped");
+        expect(switchedEvents("auto-also")).toHaveLength(0);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      });
+
+      it("excludes a switch that leaves the session on its effective account", async () => {
+        const { result } = await changeDefault(true, undefined, "auto-also");
+
+        expect(authProxySwitchSessionMock).toHaveBeenCalledTimes(2);
+        expect(result.moved).toBe(1);
+      });
+    });
 
     it("rejects unknown and wrong-provider profiles before proxy or record changes", async () => {
       seedManagedAccounts("codex");

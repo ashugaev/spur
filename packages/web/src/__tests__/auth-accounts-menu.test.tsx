@@ -6,11 +6,12 @@ import { AuthAccountSelect } from "@/components/AuthAccountSelect";
 import { AuthAccountsMenu } from "@/components/AuthAccountsMenu";
 import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
 import { formatClockTime } from "@/lib/format";
-import type {
-  AuthAccountSummary,
-  AuthAccountsResponse,
-  AuthLogin,
-  SpurSessionAuth,
+import {
+  SESSIONS_QUERY_KEY,
+  type AuthAccountSummary,
+  type AuthAccountsResponse,
+  type AuthLogin,
+  type SpurSessionAuth,
 } from "@/lib/types";
 
 const COOLDOWN_UNTIL = "2026-01-01T14:05:00.000Z";
@@ -90,8 +91,10 @@ let routes: Record<string, (call: Call) => { status?: number; payload: unknown }
 // Holds every response until resolved; null answers immediately.
 let gate: Promise<void> | null;
 
+let client: QueryClient;
+
 function render(ui: ReactElement) {
-  const client = new QueryClient({
+  client = new QueryClient({
     defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
   });
   const Wrapper = ({ children }: { children: ReactNode }) => (
@@ -428,6 +431,106 @@ describe("AuthAccountsMenu", () => {
     await settle(20);
     leaveForBody();
     await waitFor(() => expect(screen.queryByTestId("auth-accounts-popover")).toBeNull());
+  });
+
+  describe("setting the default with running sessions", () => {
+    const running = (id: string, mode: "auto" | "pinned", effectiveAccountId: string) => ({
+      id,
+      status: "running",
+      runtimeAlive: true,
+      auth: { provider: "claude", mode, effectiveAccountId },
+    });
+    const sessions = [
+      running("a-1", "auto", "claude-work"),
+      running("a-2", "auto", "claude-work"),
+      running("a-3", "auto", "claude-home"),
+      running("p-1", "pinned", "claude-key"),
+      { ...running("a-4", "auto", "claude-work"), status: "stopped", runtimeAlive: false },
+      { ...running("c-1", "auto", "codex-pro"), auth: { provider: "codex", mode: "auto" } },
+    ];
+
+    beforeEach(() => {
+      routes["PATCH /api/auth-pools/claude"] = () => ({ payload: { pool: {}, moved: 0 } });
+    });
+
+    // The dashboard's session cache is what the menu counts from.
+    const cacheSessions = (list: unknown[]) =>
+      client.setQueryData(SESSIONS_QUERY_KEY, { lifecycleInstanceId: "i", sessions: list });
+
+    const openDialog = async () => {
+      const claude = await openMenu();
+      cacheSessions(sessions);
+      fireEvent.click(await claude.findByRole("button", { name: "Switch Claude to home@x.com" }));
+      return within(await screen.findByRole("dialog", { name: "Set Claude default" }));
+    };
+    const patches = () => calls.filter((call) => call.method === "PATCH");
+
+    it("asks for the scope, preselects only new sessions and counts active and pinned", async () => {
+      const dialog = await openDialog();
+
+      expect(dialog.getByText("Replaces alek@x.com.")).toBeTruthy();
+      expect(dialog.getByText("home@x.com")).toBeTruthy();
+      expect(
+        (dialog.getByRole("radio", { name: /Only new sessions/ }) as HTMLInputElement).checked,
+      ).toBe(true);
+      expect(dialog.getByText("2 active")).toBeTruthy();
+      expect(dialog.getByText("1 pinned session keeps its account.")).toBeTruthy();
+      expect(patches()).toEqual([]);
+    });
+
+    it("sends applyToActive false for Only new sessions", async () => {
+      const dialog = await openDialog();
+      fireEvent.click(dialog.getByRole("button", { name: "Set default" }));
+
+      await waitFor(() =>
+        expect(patches()).toEqual([
+          {
+            url: "/api/auth-pools/claude",
+            method: "PATCH",
+            body: { defaultAccountId: "claude-home", applyToActive: false },
+          },
+        ]),
+      );
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    });
+
+    it("sends applyToActive true for Also switch active sessions", async () => {
+      const dialog = await openDialog();
+      fireEvent.click(dialog.getByRole("radio", { name: /Also switch active sessions/ }));
+      fireEvent.click(dialog.getByRole("button", { name: "Set default" }));
+
+      await waitFor(() =>
+        expect(patches()[0]?.body).toEqual({
+          defaultAccountId: "claude-home",
+          applyToActive: true,
+        }),
+      );
+    });
+
+    it("sends nothing when cancelled", async () => {
+      const dialog = await openDialog();
+      fireEvent.click(dialog.getByRole("button", { name: "Cancel" }));
+
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(patches()).toEqual([]);
+    });
+
+    it("applies at once when no running Auto session would move", async () => {
+      const claude = await openMenu();
+      cacheSessions([sessions[3], sessions[4]]);
+      fireEvent.click(await claude.findByRole("button", { name: "Switch Claude to home@x.com" }));
+
+      await waitFor(() =>
+        expect(patches()).toEqual([
+          {
+            url: "/api/auth-pools/claude",
+            method: "PATCH",
+            body: { defaultAccountId: "claude-home" },
+          },
+        ]),
+      );
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
   });
 
   it("shows the daemon conflict, then clears it when the next action starts", async () => {

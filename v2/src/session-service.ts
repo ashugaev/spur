@@ -1496,6 +1496,22 @@ type PaneGeneration = {
   processStarttime: number;
 };
 
+type SwitchAuthOptions = {
+  reason: "manual" | "auto_rate_limit";
+  force?: boolean;
+};
+
+type SwitchAuthOutcome =
+  | { switched: false }
+  | {
+      switched: true;
+      view: SessionView;
+      previousAccountId: string | undefined;
+      effectiveAccountId: string | undefined;
+    };
+
+type DefaultMigrationGuard = { provider: AuthProvider; defaultAccountId: string };
+
 type SessionLifecycleStamp = {
   id: string;
   workspaceId: string;
@@ -25628,8 +25644,20 @@ export class SessionService {
   async switchAuth(
     sessionId: string,
     accountId: string | null,
-    opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
+    opts: SwitchAuthOptions,
   ): Promise<SessionView> {
+    const outcome = await this.switchAuthIf(sessionId, accountId, opts);
+    if (!outcome.switched) throw new Error(`Session ${sessionId} changed during auth selection`);
+    return outcome.view;
+  }
+
+  /** With a guard, skips (switched: false, no side effects) unless the session is still a live running Auto session of the provider not yet on the default, checked under the session lock. */
+  private async switchAuthIf(
+    sessionId: string,
+    accountId: string | null,
+    opts: SwitchAuthOptions,
+    guard?: DefaultMigrationGuard,
+  ): Promise<SwitchAuthOutcome> {
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     return this.withPaneWriteLock(hint.tmuxSession, async () => {
@@ -25640,16 +25668,32 @@ export class SessionService {
         }
         return this.lifecycleStamp(current);
       });
-      return this.switchAuthLocked(sessionId, accountId, opts, claim);
+      return this.switchAuthLocked(sessionId, accountId, opts, claim, guard);
     });
+  }
+
+  /** Running status and a live runtime: the same predicate as the web count. */
+  private async isLiveRunning(session: SessionRecord): Promise<boolean> {
+    return (
+      session.status === "running" && (await getTmuxSessionPresence(session.tmuxSession)).present
+    );
+  }
+
+  private async isLiveAutoOf(session: SessionRecord, provider: AuthProvider): Promise<boolean> {
+    return (
+      session.agent === provider &&
+      session.auth?.mode === "auto" &&
+      (await this.isLiveRunning(session))
+    );
   }
 
   private async switchAuthLocked(
     sessionId: string,
     accountId: string | null,
-    opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
+    opts: SwitchAuthOptions,
     claim: SessionLifecycleStamp,
-  ): Promise<SessionView> {
+    guard?: DefaultMigrationGuard,
+  ): Promise<SwitchAuthOutcome> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -25672,6 +25716,7 @@ export class SessionService {
       }
     }
     let pingKey: string | undefined;
+    let previousAccountId: string | undefined;
     const updated = await this.withSessionLifecycleLocks(
       this.lifecycleIdsFor(session),
       async () => {
@@ -25679,6 +25724,14 @@ export class SessionService {
         if (!current || !this.lifecycleStampMatches(current, claim)) {
           throw new Error(`Session ${sessionId} changed during auth selection`);
         }
+        if (
+          guard &&
+          (current.auth?.effectiveAccountId === guard.defaultAccountId ||
+            !(await this.isLiveAutoOf(current, guard.provider)))
+        ) {
+          return null;
+        }
+        previousAccountId = current.auth?.effectiveAccountId;
         const registration = await this.authProxy.switchSession(sessionId, accountId);
         this.authSnapshot = undefined;
         const { claudeAccountId: _legacyAccountId, ...base } = current;
@@ -25696,6 +25749,7 @@ export class SessionService {
         return next;
       },
     );
+    if (!updated) return { switched: false };
     if (pingKey) void this.sendAuthChangePing(sessionId, pingKey);
     this.logEvent("session.auth.switched", {
       level: "info",
@@ -25704,7 +25758,12 @@ export class SessionService {
       message: `Selected ${session.agent} authorization for the next request`,
       details: { accountId, reason: opts.reason, method: "proxy" },
     });
-    return this.enrich(updated);
+    return {
+      switched: true,
+      view: await this.enrich(updated),
+      previousAccountId,
+      effectiveAccountId: updated.auth?.effectiveAccountId,
+    };
   }
 
   /**
@@ -25776,7 +25835,8 @@ export class SessionService {
   async updateAuthorizationPool(
     provider: AuthProvider,
     update: { defaultAccountId?: string | null; autoRotate?: boolean },
-  ) {
+    applyToActive = false,
+  ): Promise<{ pool: ReturnType<AuthAccounts["updatePool"]>; moved: number }> {
     if (update.defaultAccountId !== null && update.defaultAccountId !== undefined) {
       const { accounts } = await this.listAuthorizationAccounts(provider);
       if (
@@ -25791,7 +25851,47 @@ export class SessionService {
     const pool = this.authAccounts.updatePool(provider, update);
     await this.authProxy.configure();
     this.authSnapshot = undefined;
-    return pool;
+    // The companion never moves an existing Auto binding on a default change: running Auto
+    // sessions of the provider move only here, one per-session switch to Auto at a time.
+    let moved = 0;
+    if (applyToActive && pool.defaultAccountId !== null) {
+      // Same predicate as the web count: running status and a live runtime.
+      const targets = [];
+      for (const binding of (await this.authProxy.getState()).sessions) {
+        if (
+          binding.provider !== provider ||
+          binding.mode !== "auto" ||
+          binding.effectiveAccountId === pool.defaultAccountId
+        ) {
+          continue;
+        }
+        const session = readSession(this.config.dataDir, binding.sessionId);
+        if (session && (await this.isLiveRunning(session))) targets.push(binding);
+      }
+      for (const binding of targets) {
+        try {
+          // The snapshot above is stale by now: the switch re-checks eligibility under its lock.
+          const outcome = await this.switchAuthIf(
+            binding.sessionId,
+            null,
+            { reason: "manual" },
+            { provider, defaultAccountId: pool.defaultAccountId },
+          );
+          if (outcome.switched && outcome.effectiveAccountId !== outcome.previousAccountId) {
+            moved += 1;
+          }
+        } catch (error) {
+          this.logEvent("session.auth.switch_failed", {
+            level: "warn",
+            sessionId: binding.sessionId,
+            message: `Could not move ${binding.sessionId} to the new ${provider} default: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          });
+        }
+      }
+    }
+    return { pool, moved };
   }
 
   async removeAuthorizationAccount(accountId: string): Promise<void> {

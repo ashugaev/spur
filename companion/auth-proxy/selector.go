@@ -31,11 +31,11 @@ func authFileID(id string) string    { return id + ".json" }
 func profileID(authID string) string { return strings.TrimSuffix(authID, ".json") }
 
 // refreshAdmissionLocked adopts the saved binding while the admission still tracks it, so parallel
-// requests of one session share rotation and episode state. A manual switch or default change
-// (new generation) keeps the admitted snapshot. Reports whether the admission tracks saved state.
+// requests of one session share rotation and episode state. A switch (new session generation)
+// keeps the admitted snapshot. Reports whether the admission tracks saved state.
 func (r *router) refreshAdmissionLocked(a *admission) bool {
 	saved, exists := r.state.Sessions[a.SessionID]
-	if !exists || saved.Session.Generation != a.Binding.Session.Generation || saved.DefaultGeneration != a.Binding.DefaultGeneration {
+	if !exists || saved.Session.Generation != a.Binding.Session.Generation {
 		return false
 	}
 	a.Binding = saved
@@ -108,20 +108,6 @@ func (r *router) rotateLocked(b *binding, candidates map[string]bool) error {
 	}
 	b.Episode.Rotations++
 	b.Session.EffectiveAccountID = next
-	return nil
-}
-
-func (r *router) rebaseDefaultLocked(b *binding) error {
-	pool, exists := r.pools[b.Session.Provider]
-	if !exists {
-		return errors.New("managed provider pool does not exist")
-	}
-	if b.Session.Mode == "auto" && b.DefaultGeneration != pool.DefaultGeneration {
-		if pool.DefaultAccountID != nil {
-			b.Session.EffectiveAccountID = *pool.DefaultAccountID
-		}
-		b.DefaultGeneration = pool.DefaultGeneration
-	}
 	return nil
 }
 
@@ -323,11 +309,6 @@ func (r *router) middleware(probeKey string) gin.HandlerFunc {
 		// r.mu serializes admission; concurrent requests of one session proceed in parallel.
 		b := r.state.Sessions[sessionID]
 		before := b.Session.EffectiveAccountID
-		if err := r.rebaseDefaultLocked(&b); err != nil {
-			r.mu.Unlock()
-			c.AbortWithStatus(http.StatusServiceUnavailable)
-			return
-		}
 		if err := r.rotateLocked(&b, nil); err != nil {
 			until := r.state.Cooldowns[b.Session.EffectiveAccountID]
 			r.mu.Unlock()

@@ -9,6 +9,7 @@ import type {
   AuthPool,
   AuthProvider,
   SpurSessionAuth,
+  SpurSessionsResponse,
   TerminalLogin,
 } from "@/lib/types";
 
@@ -151,6 +152,27 @@ export function autoAccount(
 ): AuthAccountSummary | undefined {
   const id = auth?.mode === "auto" ? auth.effectiveAccountId : pool?.defaultAccountId;
   return accounts.find((account) => account.id === id && account.authenticated);
+}
+
+/**
+ * Running sessions of a provider a default change touches: Auto sessions on another account move
+ * when applied to active sessions, pinned ones never do. Read from the dashboard's session cache;
+ * without it nothing counts, so the change applies to new sessions only.
+ */
+export function countRunningAuthSessions(
+  sessions: SpurSessionsResponse | undefined,
+  provider: AuthProvider,
+  newDefaultId: string,
+): { active: number; pinned: number } {
+  const counts = { active: 0, pinned: 0 };
+  for (const session of sessions?.sessions ?? []) {
+    const auth = session.auth;
+    if (!auth || auth.provider !== provider || session.status !== "running") continue;
+    if (!session.runtimeAlive) continue;
+    if (auth.mode === "pinned") counts.pinned += 1;
+    else if (auth.effectiveAccountId !== newDefaultId) counts.active += 1;
+  }
+  return counts;
 }
 
 /** One shared cache of every managed account and pool, filtered per caller. `poll` refetches while a menu or dialog is open. */

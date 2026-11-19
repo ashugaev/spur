@@ -3476,6 +3476,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<agent>", "claude or codex")
     .option("--auto-rotate <state>", "on or off")
     .option("--default <accountId>", "Default profile for Auto sessions")
+    .option("--apply-to-active", "With --default: also move running Auto sessions")
     .option("--json", "Print raw JSON")
     .action(async (agent: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
@@ -3483,32 +3484,42 @@ export function createProgram(cliEntrypoint: string): Command {
       if (options.autoRotate !== undefined && !["on", "off"].includes(options.autoRotate)) {
         throw new Error("--auto-rotate must be on or off");
       }
+      if (options.applyToActive && options.default === undefined) {
+        throw new Error("--apply-to-active requires --default");
+      }
       const update = {
         ...(options.autoRotate !== undefined ? { autoRotate: options.autoRotate === "on" } : {}),
         ...(options.default !== undefined ? { defaultAccountId: options.default } : {}),
+        ...(options.applyToActive ? { applyToActive: true } : {}),
       };
-      const pool =
-        Object.keys(update).length > 0
-          ? (
-              await patchJson<{ pool: AuthPool }>(
-                cliEntrypoint,
-                `/auth-pools/${provider}`,
-                update,
-                configPath,
-              )
-            ).pool
-          : ((
-              await getJson<{ pools: Partial<Record<AuthProvider, AuthPool>> }>(
-                cliEntrypoint,
-                `/auth-accounts?agent=${provider}`,
-                configPath,
-              )
-            ).pools[provider] ?? null);
-      if (options.json) printJson({ provider, pool });
+      let pool: AuthPool | null;
+      let moved: number | undefined;
+      if (Object.keys(update).length > 0) {
+        const result = await patchJson<{ pool: AuthPool; moved: number }>(
+          cliEntrypoint,
+          `/auth-pools/${provider}`,
+          update,
+          configPath,
+        );
+        pool = result.pool;
+        if (options.applyToActive) moved = result.moved;
+      } else {
+        pool =
+          (
+            await getJson<{ pools: Partial<Record<AuthProvider, AuthPool>> }>(
+              cliEntrypoint,
+              `/auth-accounts?agent=${provider}`,
+              configPath,
+            )
+          ).pools[provider] ?? null;
+      }
+      if (options.json) printJson({ provider, pool, ...(moved !== undefined ? { moved } : {}) });
       else if (!pool) writeStdout(`${provider}: no pool; sessions use host authorization`);
       else
         writeStdout(
-          `${provider}\tdefault=${pool.defaultAccountId ?? "none"}\tauto-rotate=${pool.autoRotate ? "on" : "off"}`,
+          `${provider}\tdefault=${pool.defaultAccountId ?? "none"}\tauto-rotate=${pool.autoRotate ? "on" : "off"}${
+            moved !== undefined ? `\tmoved=${moved}` : ""
+          }`,
         );
     });
   auth
