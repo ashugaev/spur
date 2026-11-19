@@ -4132,15 +4132,15 @@ describe("SessionService", () => {
         await resolveOneItem(service);
         const original = (
           Object.getPrototypeOf(service) as {
-            applyManualStatusLocked: (...a: unknown[]) => Promise<unknown>;
+            commitManualStatusLocked: (...a: unknown[]) => Promise<unknown>;
           }
-        ).applyManualStatusLocked;
+        ).commitManualStatusLocked;
         const seen: { options: unknown; before: number; after: number }[] = [];
         vi.spyOn(
           service as unknown as {
-            applyManualStatusLocked: (...args: unknown[]) => Promise<unknown>;
+            commitManualStatusLocked: (...args: unknown[]) => Promise<unknown>;
           },
-          "applyManualStatusLocked",
+          "commitManualStatusLocked",
         ).mockImplementation(async (...args: unknown[]) => {
           const before = readWorktreeHeadMock.mock.calls.length;
           const result = await original.apply(service, args);
@@ -61180,9 +61180,9 @@ describe("SessionService", () => {
       it("keeps successor copies when completing the source fails after the commit", async () => {
         const { service } = await seedHandoff();
         const internals = service as unknown as {
-          applyManualStatusLocked(): Promise<SessionView>;
+          commitManualStatusLocked(): Promise<unknown>;
         };
-        vi.spyOn(internals, "applyManualStatusLocked").mockRejectedValueOnce(
+        vi.spyOn(internals, "commitManualStatusLocked").mockRejectedValueOnce(
           new Error("complete failed"),
         );
 
@@ -62147,9 +62147,9 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = service as unknown as {
-        applyManualStatusLocked(): Promise<SessionView>;
+        commitManualStatusLocked(): Promise<unknown>;
       };
-      vi.spyOn(internals, "applyManualStatusLocked").mockRejectedValueOnce(
+      vi.spyOn(internals, "commitManualStatusLocked").mockRejectedValueOnce(
         new Error("complete failed"),
       );
 
@@ -85934,6 +85934,352 @@ describe("SessionService", () => {
       expect(state.get("api-1")).toMatchObject({ binding: true, target: true });
       service.dispose();
     });
+  });
+
+  describe("handoff postcommit housekeeping", () => {
+    const sourceActor = { kind: "agent", agent: "claude", sessionId: "api-1" } as const;
+    const successorActor = { kind: "agent", agent: "cursor", sessionId: "api-2" } as const;
+    type CleanupInternals = SessionServiceInternals & {
+      terminateDetachedSessionProcesses(session: SessionRecord): Promise<void>;
+      cleanupTerminalTelegram(session: SessionRecord): Promise<void>;
+      refreshDashboardCacheEntry(session: SessionRecord): Promise<void>;
+      enrich(session: SessionRecord): Promise<SessionView>;
+      handoffsInFlight: Map<string, unknown>;
+      handoffSuccessors: Map<string, string>;
+    };
+
+    async function bounded<T>(promise: Promise<T>): Promise<T> {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () => reject(new Error("operation blocked behind housekeeping")),
+              2000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function setup(stage: "sweep" | "telegram" | "dashboard" | "enrichment") {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore(
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          closeoutOwner: true,
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const internals = service as unknown as CleanupInternals;
+      await service.mutateTodo(
+        "api-1",
+        { action: "add", text: "Carry work", reason: "handoff" },
+        sourceActor,
+      );
+      let entered!: () => void;
+      let release!: () => void;
+      let reject!: (error: Error) => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve, rejectGate) => {
+        release = resolve;
+        reject = rejectGate;
+      });
+      let intercepted = false;
+      const wait = async (record: SessionRecord) => {
+        if (record.id === "api-1" && record.status === "completed" && !intercepted) {
+          intercepted = true;
+          entered();
+          await gate;
+        }
+      };
+      if (stage === "sweep") {
+        const original = internals.terminateDetachedSessionProcesses.bind(internals);
+        vi.spyOn(internals, "terminateDetachedSessionProcesses").mockImplementation(
+          async (record) => {
+            await wait(record);
+            return original(record);
+          },
+        );
+      } else if (stage === "telegram") {
+        const original = internals.cleanupTerminalTelegram.bind(internals);
+        vi.spyOn(internals, "cleanupTerminalTelegram").mockImplementation(async (record) => {
+          await wait(record);
+          return original(record);
+        });
+      } else if (stage === "dashboard") {
+        const original = internals.refreshDashboardCacheEntry.bind(internals);
+        vi.spyOn(internals, "refreshDashboardCacheEntry").mockImplementation(async (record) => {
+          await wait(record);
+          return original(record);
+        });
+      } else {
+        const original = internals.enrich.bind(internals);
+        vi.spyOn(internals, "enrich").mockImplementation(async (record) => {
+          await wait(record);
+          return original(record);
+        });
+      }
+      let settled = false;
+      const handoff = service.handoff("api-1", {
+        agent: "cursor",
+        idempotencyKey: "cleanup-proof",
+      });
+      void handoff.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await bounded(ready);
+      return { service, sessions, internals, handoff, release, reject, settled: () => settled };
+    }
+
+    it.each(["sweep", "telegram", "dashboard", "enrichment"] as const)(
+      "releases successor state locks while source %s waits and keeps source fences",
+      async (stage) => {
+        const run = await setup(stage);
+        try {
+          expect(run.sessions.get("api-1")).toMatchObject({
+            status: "completed",
+            handoffIdempotency: { successorId: "api-2" },
+            closeoutOwner: false,
+          });
+          expect(run.internals.lifecycle.snapshot("api-1").operation?.phase).toBe("pending");
+          expect(run.settled()).toBe(false);
+          const task = await bounded(run.service.readTaskStatus("api-2"));
+          const launch = run.sessions.get("api-2")?.agentLaunchId;
+          if (!launch) throw new Error("Missing successor launch identity");
+          await bounded(
+            run.service.writeTaskStatus("api-2", {
+              state: "clear",
+              revision: task.revision,
+              agentLaunchId: launch,
+            }),
+          );
+          const inherited = await bounded(run.service.readTodo("api-2"));
+          expect(inherited.items.map((item) => item.text)).toEqual(["Carry work"]);
+          const added = await bounded(
+            run.service.mutateTodo(
+              "api-2",
+              { action: "add", text: "Successor work", reason: "progress before cleanup" },
+              successorActor,
+            ),
+          );
+          const itemId = added.items.find((item) => item.text === "Successor work")?.id;
+          if (!itemId) throw new Error("Missing added item");
+          const completed = await bounded(
+            run.service.mutateTodo(
+              "api-2",
+              { action: "complete", itemId, reason: "finished before cleanup" },
+              successorActor,
+            ),
+          );
+          const sourceLedger = await bounded(run.service.readTodo("api-1"));
+          expect(sourceLedger.items.map((item) => item.status)).toEqual(["cancelled"]);
+          await expect(bounded(run.service.restore("api-1"))).rejects.toMatchObject({
+            statusCode: 409,
+            payload: { code: "session_lifecycle_conflict", sessionIds: ["api-1"] },
+          });
+          await expect(bounded(run.service.reopen("api-1"))).rejects.toMatchObject({
+            statusCode: 409,
+            payload: { code: "session_lifecycle_conflict", sessionIds: ["api-1"] },
+          });
+          await expect(bounded(run.service.handoff("api-1", { agent: "cursor" }))).rejects.toThrow(
+            "Handoff already in flight",
+          );
+          await expect(bounded(run.service.handoff("api-2", { agent: "cursor" }))).rejects.toThrow(
+            "Handoff already in flight",
+          );
+          expect(run.settled()).toBe(false);
+          expect(
+            logSpurEventMock.mock.calls.filter(([, e]) => e.event === "session.handoff.completed"),
+          ).toHaveLength(stage === "enrichment" ? 1 : 0);
+          run.release();
+          expect(await bounded(run.handoff)).toMatchObject({ id: "api-2", movedTodoItems: 1 });
+          expect((await run.service.readTodo("api-2")).revision).toBe(completed.revision);
+          expect((await run.service.readTodo("api-1")).revision).toBe(sourceLedger.revision);
+          expect((await run.service.readTaskStatus("api-2")).revision).toBe(task.revision);
+          expect(run.sessions.get("api-2")?.closeoutOwner).toBe(true);
+          expect(removeWorktreeMock).not.toHaveBeenCalled();
+          expect(
+            terminateDetachedSessionProcessesMock.mock.calls.every(
+              ([call]) =>
+                call.sessionId === "api-1" &&
+                call.sessionToolDir === join(TEST_DATA_DIR, "session-tools", "api-1"),
+            ),
+          ).toBe(true);
+        } finally {
+          run.release();
+          await run.handoff.catch(() => {});
+          run.service.dispose();
+        }
+      },
+    );
+
+    it.each(["sweep", "telegram", "dashboard", "enrichment"] as const)(
+      "retains committed custody after rejected source %s without late rollback",
+      async (stage) => {
+        const run = await setup(stage);
+        try {
+          run.reject(new Error(`source ${stage} failed`));
+          await expect(bounded(run.handoff)).rejects.toThrow(`source ${stage} failed`);
+          expect(run.sessions.get("api-1")).toMatchObject({
+            status: "completed",
+            handoffIdempotency: { successorId: "api-2" },
+            closeoutOwner: false,
+          });
+          expect(run.sessions.get("api-2")).toMatchObject({
+            status: "running",
+            closeoutOwner: true,
+          });
+          expect((await run.service.readTodo("api-2")).items.map((item) => item.status)).toEqual([
+            "open",
+          ]);
+          expect((await run.service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+            "cancelled",
+          ]);
+          expect(run.internals.lifecycle.snapshot("api-1").operation?.phase).toBe("failed");
+          expect(run.internals.handoffsInFlight.size).toBe(0);
+          expect(run.internals.handoffSuccessors.size).toBe(0);
+          expect(
+            logSpurEventMock.mock.calls.filter(([, e]) => e.event === "session.handoff.completed"),
+          ).toHaveLength(stage === "enrichment" ? 1 : 0);
+        } finally {
+          run.release();
+          await run.handoff.catch(() => {});
+          run.service.dispose();
+        }
+      },
+    );
+
+    it("allows new-ID respawn while old source cleanup retains its native ownership fence", async () => {
+      const run = await setup("sweep");
+      try {
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        const respawned = await bounded(run.service.respawn("api-1", { agent: "cursor" }));
+        expect(respawned.id).toBe("api-3");
+        expect(run.sessions.get("api-3")?.agentLaunchId).not.toBe(
+          run.sessions.get("api-2")?.agentLaunchId,
+        );
+        expect(run.internals.lifecycle.snapshot("api-1").operation?.phase).toBe("pending");
+        expect(run.settled()).toBe(false);
+        run.release();
+        await bounded(run.handoff);
+        expect(terminateDetachedSessionProcessesMock.mock.calls.length).toBeGreaterThan(0);
+        for (const [call] of terminateDetachedSessionProcessesMock.mock.calls) {
+          expect(call).toMatchObject({
+            sessionId: "api-1",
+            sessionToolDir: join(TEST_DATA_DIR, "session-tools", "api-1"),
+          });
+        }
+        expect(run.sessions.get("api-3")?.status).toBe("running");
+      } finally {
+        run.release();
+        await run.handoff.catch(() => {});
+        run.service.dispose();
+      }
+    });
+
+    it("returns current successor after terminal change without old-source worktree cleanup", async () => {
+      const run = await setup("sweep");
+      try {
+        await bounded(
+          run.service.complete(
+            "api-2",
+            { skipPrCheck: true },
+            { todoActor: { kind: "human", origin: "ui" } },
+          ),
+        );
+        const removals = removeWorktreeMock.mock.calls.length;
+        const successor = run.sessions.get("api-2");
+        if (!successor) throw new Error("Missing successor");
+        writeSessionMock(TEST_DATA_DIR, { ...successor, prompt: "updated successor prompt" });
+        const source = run.sessions.get("api-1");
+        if (!source) throw new Error("Missing source");
+        writeSessionMock(TEST_DATA_DIR, { ...source, prompt: "updated source prompt" });
+        run.release();
+        expect(await bounded(run.handoff)).toMatchObject({
+          id: "api-2",
+          status: "completed",
+          prompt: "updated successor prompt",
+        });
+        expect(removeWorktreeMock).toHaveBeenCalledTimes(removals);
+        expect(run.sessions.get("api-1")?.prompt).toBe("updated source prompt");
+      } finally {
+        run.release();
+        await run.handoff.catch(() => {});
+        run.service.dispose();
+      }
+    });
+  });
+
+  describe("handoff postcommit housekeeping ownership", () => {
+    it.each(["source", "successor generation"])(
+      "rolls back uncommitted inherited copies after finalizer %s validation fails",
+      async (changed) => {
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore(sessionRecord({ id: "api-1", closeoutOwner: true }));
+        workspaceExistsMock.mockReturnValue(true);
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        await useRealTodoLedger();
+        const service = await createDisposedSessionService();
+        try {
+          await service.mutateTodo(
+            "api-1",
+            { action: "add", text: "Uncommitted work", reason: "source ownership" },
+            { kind: "agent", agent: "claude", sessionId: "api-1" },
+          );
+          const originalSpawn = service.spawn.bind(service);
+          vi.spyOn(service, "spawn").mockImplementation(async (...args) => {
+            const successor = await originalSpawn(...args);
+            const source = sessions.get("api-1");
+            if (!source) throw new Error("Missing source");
+            if (changed === "source") {
+              writeSessionMock(TEST_DATA_DIR, { ...source, updatedAt: "2026-03-18T11:00:00.000Z" });
+            } else {
+              vi.spyOn(
+                sessionServiceInternals(service),
+                "paneGenerationMatches",
+              ).mockImplementation(async (record) => record.id !== "api-2");
+            }
+            return successor;
+          });
+          await expect(
+            service.handoff("api-1", { agent: "cursor", idempotencyKey: "precommit" }),
+          ).rejects.toThrow("Handoff state changed before finalization");
+          expect(sessions.get("api-1")).not.toHaveProperty("handoffIdempotency");
+          expect(sessions.get("api-1")?.status).not.toBe("completed");
+          expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+          expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+            "open",
+          ]);
+          expect((await service.readTodo("api-2")).items.map((item) => item.status)).toEqual([
+            "cancelled",
+          ]);
+          expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+          expect(
+            logSpurEventMock.mock.calls.filter(
+              ([, event]) => event.event === "session.handoff.completed",
+            ),
+          ).toHaveLength(0);
+        } finally {
+          service.dispose();
+        }
+      },
+    );
   });
 
   describe("terminal detached process sweep", () => {

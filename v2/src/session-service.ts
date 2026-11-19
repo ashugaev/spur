@@ -1464,6 +1464,29 @@ const RESTRICT_WRITES_PROMPT_SUFFIX =
   "Restricted writes mode: do not modify, create, or delete files in the workspace. You may still post GitHub PR review comments via `gh` and call any MCP tool. Use these to communicate review feedback.";
 type ManualSessionStatus = "stopped" | "completed";
 type ManualStatusAction = "complete" | "pause" | "self_destruct" | "desk_complete" | "handoff";
+type ManualStatusOptions = {
+  retainInList?: boolean;
+  skipEnrichment?: boolean;
+  todoActor?: TodoActor;
+  handoffDetails?: HandoffEventDetails;
+  handoffReceipt?: HandoffIdempotencyReceipt;
+  eventAction?: ManualStatusAction;
+  stopReason?: SessionRecord["stopReason"];
+  restoreOperation?: RestoreOperationContext;
+  closeoutHeadSha?: string | null;
+  closeoutReport?: CloseoutReport;
+};
+type ManualStatusCommit =
+  | { kind: "finished"; view: SessionView | undefined }
+  | {
+      kind: "committed";
+      record: SessionRecord;
+      targetStatus: ManualSessionStatus;
+      eventAction: ManualStatusAction;
+      skipEnrichment: boolean;
+      handoffDetails?: HandoffEventDetails;
+      worktreeCleanup: "retain" | "evaluate";
+    };
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 /**
@@ -22968,19 +22991,20 @@ export class SessionService {
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest = {},
-    options?: {
-      retainInList?: boolean;
-      skipEnrichment?: boolean;
-      todoActor?: TodoActor;
-      handoffDetails?: HandoffEventDetails;
-      handoffReceipt?: HandoffIdempotencyReceipt;
-      eventAction?: ManualStatusAction;
-      stopReason?: SessionRecord["stopReason"];
-      restoreOperation?: RestoreOperationContext;
-      closeoutHeadSha?: string | null;
-      closeoutReport?: CloseoutReport;
-    },
+    options?: ManualStatusOptions,
   ): Promise<SessionView | void> {
+    return this.finishManualStatus(
+      await this.commitManualStatusLocked(sessionId, targetStatus, request, options),
+    );
+  }
+
+  private async commitManualStatusLocked(
+    sessionId: string,
+    targetStatus: ManualSessionStatus,
+    request: CompleteSessionRequest,
+    options?: ManualStatusOptions,
+    worktreeCleanup: "retain" | "evaluate" = "evaluate",
+  ): Promise<ManualStatusCommit> {
     const reopenClaim = this.reopensInFlight.get(sessionId);
     if (reopenClaim) reopenClaim.invalidated = true;
     const pauseReason = options?.stopReason ?? "manual_pause";
@@ -23004,9 +23028,9 @@ export class SessionService {
       delete migrated.errorSource;
       writeSession(this.config.dataDir, migrated);
       this.stateCache.delete(sessionId);
-      if (options?.skipEnrichment) return;
+      if (options?.skipEnrichment) return { kind: "finished", view: undefined };
       await this.refreshDashboardCacheEntry(migrated);
-      return this.enrich(migrated);
+      return { kind: "finished", view: await this.enrich(migrated) };
     }
     if (session.status === targetStatus) {
       if (targetStatus === "stopped" && hasSessionErrorEvidence(session)) {
@@ -23024,11 +23048,14 @@ export class SessionService {
         delete record.errorSource;
         writeSession(this.config.dataDir, record);
         this.stateCache.delete(sessionId);
-        if (options?.skipEnrichment) return;
+        if (options?.skipEnrichment) return { kind: "finished", view: undefined };
         await this.refreshDashboardCacheEntry(record);
-        return this.enrich(record);
+        return { kind: "finished", view: await this.enrich(record) };
       }
-      return options?.skipEnrichment ? undefined : this.enrich(session);
+      return {
+        kind: "finished",
+        view: options?.skipEnrichment ? undefined : await this.enrich(session),
+      };
     }
     if (isTerminalSessionStatus(session.status)) {
       throw new Error(`Session ${sessionId} is already ${session.status}`);
@@ -23145,25 +23172,47 @@ export class SessionService {
     }
     if (options?.handoffReceipt) record.handoffIdempotency = options.handoffReceipt;
     writeSession(this.config.dataDir, record);
+    return {
+      kind: "committed",
+      record,
+      targetStatus,
+      eventAction,
+      skipEnrichment: options?.skipEnrichment === true,
+      ...(options?.handoffDetails ? { handoffDetails: options.handoffDetails } : {}),
+      worktreeCleanup,
+    };
+  }
+
+  private async finishManualStatus(commit: ManualStatusCommit): Promise<SessionView | undefined> {
+    if (commit.kind === "finished") return commit.view;
+    const { record, targetStatus, eventAction } = commit;
     if (targetStatus === "completed") await this.terminateDetachedSessionProcesses(record);
     if (targetStatus === "completed") await this.cleanupTerminalTelegram(record);
-    if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
+    if (
+      targetStatus === "completed" &&
+      commit.worktreeCleanup === "evaluate" &&
+      this.shouldRemoveWorktreeOnTerminal(record)
+    ) {
       const cleanup = await this.resolveCleanupContext(record);
       await removeWorktree(cleanup.repoPath, record.worktreePath);
       this.unregisterWorktreeConfig(record.worktreePath);
     }
-    if (!options?.skipEnrichment) await this.refreshDashboardCacheEntry(record);
+    if (!commit.skipEnrichment) {
+      await this.refreshDashboardCacheEntry(readSession(this.config.dataDir, record.id) ?? record);
+    }
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
-      sessionId,
-      projectId: session.project,
-      message: `${targetStatus === "stopped" ? "Stopped" : "Completed"} ${sessionId}`,
+      sessionId: record.id,
+      projectId: record.project,
+      message: `${targetStatus === "stopped" ? "Stopped" : "Completed"} ${record.id}`,
       details: {
-        worktree: session.worktree,
-        ...(eventAction === "handoff" && options?.handoffDetails ? options.handoffDetails : {}),
+        worktree: record.worktree,
+        ...(eventAction === "handoff" && commit.handoffDetails ? commit.handoffDetails : {}),
       },
     });
-    return options?.skipEnrichment ? undefined : this.enrich(record);
+    return commit.skipEnrichment
+      ? undefined
+      : this.enrich(readSession(this.config.dataDir, record.id) ?? record);
   }
 
   private async ensureKillDirtyWorktreeAllowed(
@@ -26322,10 +26371,10 @@ export class SessionService {
         [sessionId],
         async (heads) => heads.get(sessionId) ?? null,
       );
-      const finalized = await this.withPaneWriteLock(receipt.generation.tmuxSession, () =>
+      const committed = await this.withPaneWriteLock(receipt.generation.tmuxSession, () =>
         this.withSessionLifecycleLocks(
           [...prepared.lifecycleIds, spawned.id],
-          async (): Promise<SessionRecord> => {
+          async (): Promise<ManualStatusCommit> => {
             try {
               const claim = this.handoffsInFlight.get(sessionId);
               const source = readSession(this.config.dataDir, sessionId);
@@ -26382,7 +26431,7 @@ export class SessionService {
                 );
               }
               this.clearCloseoutOwner(sessionId);
-              await this.applyManualStatusLocked(
+              const committed = await this.commitManualStatusLocked(
                 sessionId,
                 "completed",
                 { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
@@ -26401,11 +26450,10 @@ export class SessionService {
                       }
                     : {}),
                 },
+                "retain",
               );
-              const latest = readSession(this.config.dataDir, spawned.id);
-              if (!latest)
-                throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
-              return latest;
+              sourceCommitted = true;
+              return committed;
             } catch (error) {
               rollbackCopies();
               throw error;
@@ -26413,8 +26461,9 @@ export class SessionService {
           },
         ),
       );
+      await this.finishManualStatus(committed);
       return {
-        ...(await this.enrich(finalized)),
+        ...(await this.get(spawned.id)),
         movedTodoItems: prepared.inheritedTodo.length,
       };
     } catch (error) {
