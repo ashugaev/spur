@@ -565,6 +565,24 @@ function mockOwnershipAgent(agent: AgentName): void {
   }));
 }
 
+/** Rollout in the unbound Codex session's own codex-home, the root the switch guard reads. */
+function writeUnboundCodexRollout(threadId: string, modelProvider: string): string {
+  const rollout = join(
+    TEST_DATA_DIR,
+    "session-tools",
+    "api-1",
+    "codex-home",
+    "sessions",
+    `${threadId}.jsonl`,
+  );
+  mkdirSync(dirname(rollout), { recursive: true });
+  writeFileSync(
+    rollout,
+    `${JSON.stringify({ type: "session_meta", payload: { id: threadId, model_provider: modelProvider } })}\n`,
+  );
+  return rollout;
+}
+
 function mockExitedThenRestoredProcess() {
   let restoredTmuxCreated = false;
   createTmuxSessionMock.mockImplementation(async () => {
@@ -23697,6 +23715,7 @@ describe("SessionService", () => {
       "binds an unbound running %s session and relaunches it with resume",
       async (provider) => {
         seedManagedAccounts(provider);
+        if (provider === "codex") writeUnboundCodexRollout("native-session-uuid", "spur_managed");
         const sessions = createSessionStore(
           runningSession({ agent: provider, agentSessionId: "native-session-uuid" }),
         );
@@ -23879,6 +23898,92 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")).toEqual(original);
       expect(sessions.get("api-1")).not.toHaveProperty("auth");
       service.dispose();
+    });
+
+    describe("unbound Codex switch thread provider", () => {
+      // Thread ids no host ~/.codex/sessions rollout can carry: the host root is a fallback scan.
+      const threadId = `native-thread-${Math.random().toString(36).slice(2)}`;
+      const refusedSideEffects = (
+        original: SessionRecord,
+        sessions: ReturnType<typeof createSessionStore>,
+      ) => {
+        expect(sessions.get("api-1")).toEqual(original);
+        expect(authProxyRegisterSessionMock).not.toHaveBeenCalled();
+        expect(authProxySwitchSessionMock).not.toHaveBeenCalled();
+        expect(authProxyRevokeSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(terminateAgentProcessesMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(buildAgentResumePlanMock).not.toHaveBeenCalled();
+        expect(
+          logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.auth.switched"),
+        ).toBe(false);
+        expect(sessions.get("api-1")?.status).toBe("running");
+      };
+
+      it("refuses a thread saved on another provider before any change", async () => {
+        seedManagedAccounts("codex");
+        const rollout = writeUnboundCodexRollout(threadId, "openai");
+        const bytes = readFileSync(rollout, "utf8");
+        const original = runningSession({ agent: "codex", agentSessionId: threadId });
+        const sessions = createSessionStore(original);
+        authProxyRegisterSessionMock.mockResolvedValue(registration("codex", "backup"));
+        const service = await createDisposedSessionService();
+
+        await expect(
+          service.switchAuth("api-1", "backup", { reason: "manual" }),
+        ).rejects.toMatchObject({
+          statusCode: 409,
+          message: expect.stringMatching(/saved provider openai cannot change to spur_managed/),
+        });
+
+        refusedSideEffects(original, sessions);
+        expect(readFileSync(rollout, "utf8")).toBe(bytes);
+        service.dispose();
+      });
+
+      it("refuses a thread whose rollout cannot be found", async () => {
+        seedManagedAccounts("codex");
+        const original = runningSession({ agent: "codex", agentSessionId: threadId });
+        const sessions = createSessionStore(original);
+        authProxyRegisterSessionMock.mockResolvedValue(registration("codex", "backup"));
+        const service = await createDisposedSessionService();
+
+        await expect(
+          service.switchAuth("api-1", "backup", { reason: "manual" }),
+        ).rejects.toMatchObject({
+          statusCode: 409,
+          message: expect.stringMatching(/saved provider cannot be verified for spur_managed/),
+        });
+
+        refusedSideEffects(original, sessions);
+        service.dispose();
+      });
+
+      it("only binds a stopped Codex session whose thread is on another provider", async () => {
+        seedManagedAccounts("codex");
+        writeUnboundCodexRollout(threadId, "openai");
+        const sessions = createSessionStore(
+          runningSession({
+            agent: "codex",
+            agentSessionId: threadId,
+            status: "stopped",
+            stopReason: "manual_pause",
+          }),
+        );
+        authProxyRegisterSessionMock.mockResolvedValue(registration("codex", "backup"));
+        const service = await createDisposedSessionService();
+
+        await service.switchAuth("api-1", "backup", { reason: "manual" });
+
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "stopped",
+          auth: { accountId: "backup" },
+        });
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        service.dispose();
+      });
     });
 
     it("only persists the binding for an unbound session that is not running", async () => {

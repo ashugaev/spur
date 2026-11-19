@@ -155,6 +155,7 @@ import {
   codexUsesCustomProvider,
   findLatestCodexSessionFile,
   readCodexConversationTail,
+  readCodexResumeProvider,
   readCodexRolloutState,
   readCodexTranscriptEntries,
   readCodexUserConfig,
@@ -25564,6 +25565,7 @@ export class SessionService {
    * A session without a managed binding does not route through the companion proxy, so it cannot
    * swap in place: bind it to the chosen account (or Auto) and relaunch the agent with resume.
    * A session that is not running only gets the binding; its next restore launches managed.
+   * A running Codex thread not saved on spur_managed is refused before any change.
    * A relaunch that cannot resume the conversation (fresh launch fallback) is a failed switch.
    * A failure removes only the binding it wrote, restores the legacy account id and revokes the
    * new registration; errors, launch ids and sidecars the relaunch stored stay.
@@ -25594,6 +25596,24 @@ export class SessionService {
     }
     // Refuse before the pane is killed: the relaunch would be refused by the same guard.
     if (relaunch) this.assertTokenBudgetAllowsActivation(session);
+    if (relaunch && session.agent === "codex" && session.agentSessionId) {
+      const threadId = session.agentSessionId;
+      const provider = await readCodexResumeProvider(threadId, {
+        sessionRootDir: join(
+          codexHookHomePath(slotToolDir(this.config.dataDir, sessionId)),
+          "sessions",
+        ),
+      });
+      if (provider !== "spur_managed") {
+        const reason = provider
+          ? `saved provider ${provider} cannot change to spur_managed`
+          : "saved provider cannot be verified for spur_managed";
+        throw new AuthorizationError(
+          `Cannot switch Codex thread ${threadId} of ${sessionId} to a managed account: ${reason}; the session keeps running on its current authorization. Use spur handoff ${sessionId} --agent codex to continue on a managed account.`,
+          409,
+        );
+      }
+    }
     const project = this.getProject(session.project);
     const registration = await this.prepareSessionAuthorization(
       sessionId,

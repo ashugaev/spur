@@ -38,7 +38,7 @@ Omission with no ready account launches with host authorization.
 
 Managed Claude/Codex sessions change account for the next request through
 [switch-auth](daemon-api.md#session-routes); current requests retain their account.
-Direct sessions enter managed routing on explicit restore/respawn, or through switch-auth: a running session relaunches on the account with resume, a stopped one is only bound. A working session needs `force`; a relaunch that cannot resume leaves the session on its previous account.
+Direct sessions enter managed routing on explicit restore/respawn, or through switch-auth: a running session relaunches on the account with resume, a stopped one is only bound. A working session needs `force`; a relaunch that cannot resume leaves the session on its previous account. A running Codex session whose conversation is not saved on the managed provider is refused before any change and keeps running.
 Handoff to the same provider keeps a pinned profile; another provider, Auto, or a removed profile gives Auto.
 
 Managed routing preserves native session context and process identity during account changes.
