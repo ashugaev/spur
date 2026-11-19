@@ -104,6 +104,7 @@ import {
   capturePaneAgentProcessesMock,
   terminateAgentProcessesMock,
   terminateDetachedSessionProcessesMock,
+  listDetachedSessionOwnersMock,
   readTmuxServerPidMock,
   findForeignAgentProcessesForSessionMock,
   killTmuxSessionTreeMock,
@@ -277,6 +278,7 @@ import {
 } from "../../src/wake-schedule.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
+import type { DetachedSweepOutcome } from "../../src/agent-processes.js";
 import type * as metadataModule from "../../src/metadata.js";
 import type { AuthRegistration } from "../../src/auth-proxy.js";
 import type { InterfaceConsent } from "../../src/review-interface-consent.js";
@@ -86201,7 +86203,11 @@ describe("SessionService", () => {
     it("sweep survivors do not fail complete and are logged with reason detached_session", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningRecord());
-      terminateDetachedSessionProcessesMock.mockResolvedValue({ status: "survivors", pids: [77] });
+      terminateDetachedSessionProcessesMock.mockResolvedValue({
+        status: "survivors",
+        pids: [77],
+        matched: 1,
+      });
       const service = await createDisposedSessionService();
       try {
         await service.complete("api-1");
@@ -86257,6 +86263,341 @@ describe("SessionService", () => {
       } finally {
         service.dispose();
       }
+    });
+
+    describe("periodic orphan sweep", () => {
+      type OrphanSweeper = { sweepDetachedOrphans(context: "boot" | "tick"): Promise<void> };
+      const sweeper = (service: unknown) => service as OrphanSweeper;
+      const owners = (...sessionIds: string[]) =>
+        listDetachedSessionOwnersMock.mockResolvedValue({ status: "ok", sessionIds });
+      const swept = () =>
+        terminateDetachedSessionProcessesMock.mock.calls.map(([i]) => i.sessionId);
+      const record = (id: string, status: SessionRecord["status"]) => ({
+        ...runningRecord(id),
+        status,
+      });
+
+      it("periodic sweep reaps completed owner", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        owners("api-1");
+        terminateDetachedSessionProcessesMock.mockResolvedValue({ status: "clear", matched: 2 });
+        const service = await createDisposedSessionService();
+        try {
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith({
+            sessionId: "api-1",
+            sessionToolDir: toolDir("api-1"),
+            tmuxServerPid: 4844,
+          });
+          expect(sweepEvents("session.agent_process.detached_reaped")).toEqual([
+            [
+              TEST_DATA_DIR,
+              expect.objectContaining({
+                level: "info",
+                details: { sessionId: "api-1", context: "tick", matched: 2 },
+              }),
+            ],
+          ]);
+          const discovery = listDetachedSessionOwnersMock.mock.calls[0]?.[0];
+          expect(discovery?.toolDirFor("api-1")).toBe(toolDir("api-1"));
+          expect(discovery?.tmuxServerPid).toBe(4844);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("periodic sweep reaps archived terminal owner", async () => {
+        createSessionStore();
+        readArchivedSessionMock.mockReturnValue(record("api-1", "killed"));
+        owners("api-1");
+        const service = await createDisposedSessionService();
+        try {
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(swept()).toEqual(["api-1"]);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it.each(["running", "stopped", "errored", "paused", "absent"] as const)(
+        "periodic sweep spares non-terminal and unknown owners (%s)",
+        async (status) => {
+          const sessions = createSessionStore();
+          if (status !== "absent") sessions.set("api-1", record("api-1", status));
+          owners("api-1");
+          const service = await createDisposedSessionService();
+          const lockSpy = vi.spyOn(
+            service as unknown as { withSessionLifecycleLocks: () => unknown },
+            "withSessionLifecycleLocks",
+          );
+          try {
+            await sweeper(service).sweepDetachedOrphans("tick");
+            expect(swept()).toEqual([]);
+            expect(lockSpy).not.toHaveBeenCalled();
+          } finally {
+            service.dispose();
+          }
+        },
+      );
+
+      it.each(["live", "archived"] as const)(
+        "periodic sweep skips unreadable %s record and continues",
+        async (which) => {
+          const sessions = createSessionStore();
+          sessions.set("api-2", record("api-2", "completed"));
+          const realRead = readSessionMock.getMockImplementation();
+          readSessionMock.mockImplementation((dir: string, id: string) => {
+            if (id === "api-1") {
+              if (which === "live") throw new Error("corrupt");
+              return null;
+            }
+            return realRead?.(dir, id);
+          });
+          if (which === "archived") {
+            readArchivedSessionMock.mockImplementation(() => {
+              throw new Error("corrupt");
+            });
+          }
+          owners("api-1", "api-2");
+          const service = await createDisposedSessionService();
+          try {
+            await sweeper(service).sweepDetachedOrphans("tick");
+            expect(swept()).toEqual(["api-2"]);
+          } finally {
+            service.dispose();
+          }
+        },
+      );
+
+      it.each(["reopen", "warmup"] as const)("periodic sweep spares %s owner", async (guard) => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        owners("api-1");
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        if (guard === "reopen") internals.reopensInFlight.set("api-1", {} as never);
+        else internals.restoreWarmupUntil.set("api-1", Date.now() + 60_000);
+        try {
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(swept()).toEqual([]);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("periodic sweep tolerates unavailable scan and logs once per transition", async () => {
+        createSessionStore();
+        listDetachedSessionOwnersMock.mockResolvedValue({ status: "unavailable" });
+        const service = await createDisposedSessionService();
+        try {
+          await sweeper(service).sweepDetachedOrphans("tick");
+          await sweeper(service).sweepDetachedOrphans("tick");
+          const reasons = () =>
+            sweepEvents("session.agent_process.capture_unavailable").filter(
+              ([, entry]) => entry.details?.["reason"] === "detached_orphan_sweep",
+            );
+          expect(reasons()).toHaveLength(1);
+          owners();
+          await sweeper(service).sweepDetachedOrphans("tick");
+          listDetachedSessionOwnersMock.mockResolvedValue({ status: "unavailable" });
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(reasons()).toHaveLength(2);
+          expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("the GC tick runs the sweep", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        owners("api-1");
+        terminateDetachedSessionProcessesMock.mockResolvedValue({ status: "clear", matched: 1 });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        try {
+          await vi.advanceTimersByTimeAsync(5 * 60_000);
+          expect(listDetachedSessionOwnersMock).toHaveBeenCalled();
+          expect(swept()).toEqual(["api-1"]);
+          await service.settleBackgroundSpawns();
+          expect(sweepEvents("session.agent_process.detached_reaped")).toHaveLength(1);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it.each<[string, DetachedSweepOutcome, string]>([
+        ["survivors", { status: "survivors", pids: [77], matched: 1 }, "survivors"],
+        ["unavailable", { status: "unavailable" }, "capture_unavailable"],
+      ])("owner %s repeats log once until clear", async (_label, outcome, suffix) => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        owners("api-1");
+        terminateDetachedSessionProcessesMock.mockResolvedValue(outcome);
+        const service = await createDisposedSessionService();
+        const events = () => sweepEvents(`session.agent_process.${suffix}`);
+        try {
+          await sweeper(service).sweepDetachedOrphans("tick");
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(events()).toHaveLength(1);
+          terminateDetachedSessionProcessesMock.mockResolvedValue({ status: "clear", matched: 0 });
+          await sweeper(service).sweepDetachedOrphans("tick");
+          terminateDetachedSessionProcessesMock.mockResolvedValue(outcome);
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(events()).toHaveLength(2);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("owner failure logs again after the owner disappears from discovery and returns", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        owners("api-1");
+        terminateDetachedSessionProcessesMock.mockResolvedValue({
+          status: "survivors",
+          pids: [77],
+          matched: 1,
+        });
+        const service = await createDisposedSessionService();
+        const events = () => sweepEvents("session.agent_process.survivors");
+        try {
+          await sweeper(service).sweepDetachedOrphans("tick");
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(events()).toHaveLength(1);
+          owners();
+          await sweeper(service).sweepDetachedOrphans("tick");
+          owners("api-1");
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(events()).toHaveLength(2);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("one owner throwing does not abort later owners and logs the message once", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        sessions.set("api-2", record("api-2", "completed"));
+        owners("api-1", "api-2");
+        terminateDetachedSessionProcessesMock.mockImplementation(async (input) => {
+          if (input.sessionId === "api-1") throw new Error("boom-api-1");
+          return { status: "clear", matched: 1 };
+        });
+        const service = await createDisposedSessionService();
+        try {
+          await sweeper(service).sweepDetachedOrphans("tick");
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(swept()).toEqual(["api-1", "api-2", "api-1", "api-2"]);
+          const failures = sweepEvents("session.agent_process.capture_unavailable");
+          expect(failures).toHaveLength(1);
+          expect(failures[0]?.[1]).toMatchObject({
+            sessionId: "api-1",
+            details: { reason: "detached_orphan_sweep", error: "boom-api-1" },
+          });
+          expect(sweepEvents("session.agent_process.detached_reaped")).toHaveLength(2);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("no detached_reaped when kill matched nothing", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        owners("api-1");
+        const service = await createDisposedSessionService();
+        try {
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(swept()).toEqual(["api-1"]);
+          expect(sweepEvents("session.agent_process.detached_reaped")).toEqual([]);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("second pass is a no-op while first in flight", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        owners("api-1");
+        let release: (outcome: { status: "clear"; matched: number }) => void = () => {};
+        terminateDetachedSessionProcessesMock.mockReturnValueOnce(
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+        );
+        const service = await createDisposedSessionService();
+        try {
+          const first = sweeper(service).sweepDetachedOrphans("boot");
+          await vi.waitFor(() => expect(terminateDetachedSessionProcessesMock).toHaveBeenCalled());
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(listDetachedSessionOwnersMock).toHaveBeenCalledTimes(1);
+          release({ status: "clear", matched: 1 });
+          await first;
+          await sweeper(service).sweepDetachedOrphans("tick");
+          expect(listDetachedSessionOwnersMock).toHaveBeenCalledTimes(2);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("reopen during sweep grace waits for kill", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        owners("api-1");
+        workspaceExistsMock.mockReturnValue(true);
+        mockClaudeJsonlState("waiting");
+        let release: (outcome: { status: "clear"; matched: number }) => void = () => {};
+        terminateDetachedSessionProcessesMock.mockReturnValueOnce(
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+        );
+        const service = await createDisposedSessionService();
+        try {
+          const pass = sweeper(service).sweepDetachedOrphans("tick");
+          await vi.waitFor(() => expect(terminateDetachedSessionProcessesMock).toHaveBeenCalled());
+          const reopening = service.reopen("api-1");
+          await vi.advanceTimersByTimeAsync(1_000);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(sessions.get("api-1")?.status).toBe("completed");
+          release({ status: "clear", matched: 1 });
+          await pass;
+          await reopening;
+          expect(createTmuxSessionMock).toHaveBeenCalled();
+          expect(createTmuxSessionMock.mock.invocationCallOrder[0]).toBeGreaterThan(
+            terminateDetachedSessionProcessesMock.mock.invocationCallOrder[0] ?? 0,
+          );
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("boot runs detached orphan sweep without blocking startup", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        owners("api-1");
+        let release: (outcome: { status: "clear"; matched: number }) => void = () => {};
+        terminateDetachedSessionProcessesMock.mockReturnValueOnce(
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+        );
+        const service = await createDisposedSessionService();
+        try {
+          await service.reconcileStoppedSessions();
+          await vi.waitFor(() => expect(terminateDetachedSessionProcessesMock).toHaveBeenCalled());
+          release({ status: "clear", matched: 1 });
+          await vi.waitFor(() =>
+            expect(sweepEvents("session.agent_process.detached_reaped")).toHaveLength(1),
+          );
+          expect(sweepEvents("session.agent_process.detached_reaped")[0]?.[1]).toMatchObject({
+            details: { context: "boot" },
+          });
+        } finally {
+          service.dispose();
+        }
+      });
     });
 
     it("spawn failure cleanup sweeps the failed session id once", async () => {

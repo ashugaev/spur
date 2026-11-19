@@ -448,7 +448,7 @@ export async function terminateAgentProcesses(
 export async function terminateDetachedSessionProcesses(
   input: { sessionId: string; sessionToolDir: string; tmuxServerPid: number | null },
   options?: Parameters<typeof terminateAgentProcesses>[1],
-): Promise<AgentTerminationOutcome | { status: "unavailable" }> {
+): Promise<DetachedSweepOutcome> {
   if (process.env.SPUR_SESSION === input.sessionId) {
     return { status: "unavailable" };
   }
@@ -459,16 +459,7 @@ export async function terminateDetachedSessionProcesses(
   if (snapshot.status === "unavailable") {
     return { status: "unavailable" };
   }
-  const byPid = new Map(snapshot.processes.map((proc) => [proc.pid, proc]));
-  const excluded = new Set<number>([process.pid]);
-  if (input.tmuxServerPid !== null) excluded.add(input.tmuxServerPid);
-  for (
-    let pid = byPid.get(process.pid)?.ppid;
-    pid !== undefined && pid > 0 && !excluded.has(pid);
-    pid = byPid.get(pid)?.ppid
-  ) {
-    excluded.add(pid);
-  }
+  const excluded = sweepExclusions(snapshot.processes, input.tmuxServerPid);
   const expectation: MarkerExpectation = {
     sessionId: input.sessionId,
     launch: { kind: "any-nonempty" },
@@ -484,7 +475,59 @@ export async function terminateDetachedSessionProcesses(
       refs.push({ pid: proc.pid, identity: before });
     }
   }
-  return terminateAgentProcesses(refs, options);
+  const outcome = await terminateAgentProcesses(refs, options);
+  return { ...outcome, matched: refs.length };
+}
+
+export type DetachedSweepOutcome =
+  | { status: "clear"; matched: number }
+  | { status: "survivors"; pids: number[]; matched: number }
+  | { status: "unavailable" };
+
+// This process, its ancestors and the tmux server are never swept.
+function sweepExclusions(
+  processes: readonly ProcessSnapshotEntry[],
+  tmuxServerPid: number | null,
+): Set<number> {
+  const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
+  const excluded = new Set<number>([process.pid]);
+  if (tmuxServerPid !== null) excluded.add(tmuxServerPid);
+  for (
+    let pid = byPid.get(process.pid)?.ppid;
+    pid !== undefined && pid > 0 && !excluded.has(pid);
+    pid = byPid.get(pid)?.ppid
+  ) {
+    excluded.add(pid);
+  }
+  return excluded;
+}
+
+// Session ids owning live processes under this instance's tool dir root: a
+// non-empty SPUR_AGENT_LAUNCH_ID and SPUR_SESSION_TOOL_DIR === toolDirFor(id).
+// Discovery only; signalling stays in terminateDetachedSessionProcesses, which
+// re-snapshots and re-checks identity. Shares its exclusion set.
+export async function listDetachedSessionOwners(input: {
+  toolDirFor: (sessionId: string) => string;
+  tmuxServerPid: number | null;
+}): Promise<{ status: "unavailable" } | { status: "ok"; sessionIds: string[] }> {
+  if (!(await canReadProcessEnv())) return { status: "unavailable" };
+  const snapshot = await snapshotProcesses();
+  if (snapshot.status === "unavailable") return { status: "unavailable" };
+  const excluded = sweepExclusions(snapshot.processes, input.tmuxServerPid);
+  const sessionIds = new Set<string>();
+  for (const proc of snapshot.processes) {
+    if (excluded.has(proc.pid)) continue;
+    const markers = await readSessionMarkers(proc.pid);
+    const id = markers.sessionEnv.status === "ok" ? markers.sessionEnv.value : undefined;
+    if (!id) continue;
+    const expectation: MarkerExpectation = {
+      sessionId: id,
+      launch: { kind: "any-nonempty" },
+      toolDir: input.toolDirFor(id),
+    };
+    if (markersMatch(markers, expectation)) sessionIds.add(id);
+  }
+  return { status: "ok", sessionIds: [...sessionIds] };
 }
 
 // pids only: this scan is a launch-guard verdict, never a signalling target,
