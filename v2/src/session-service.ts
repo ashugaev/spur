@@ -96,8 +96,10 @@ import {
   captureAgentProcessesForLaunch,
   capturePaneAgentProcesses,
   findForeignAgentProcessesForSession,
+  listDetachedSessionOwners,
   terminateAgentProcesses,
   terminateDetachedSessionProcesses,
+  type DetachedSweepOutcome,
 } from "./agent-processes.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 import {
@@ -4186,6 +4188,11 @@ export class SessionService {
   private compactCursor = 0;
   private sessionGcTimer: NodeJS.Timeout | null = null;
   private sessionGcRunning = false;
+  private detachedOrphanSweepRunning = false;
+  private readonly detachedOrphanSweepAbort = new AbortController();
+  private detachedOrphanScanUnavailable = false;
+  // "<sessionId>:<kind>" owner failures already logged by the periodic sweep.
+  private readonly detachedOrphanLogged = new Set<string>();
   private telegramTopicGcRunning = false;
   private telegramTopicGcClaimAt: number | null = null;
   private backgroundLoopsStarted = false;
@@ -4655,6 +4662,7 @@ export class SessionService {
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
     this.deliveryStopped = true;
+    this.detachedOrphanSweepAbort.abort();
     this.codexPaneLimitObservedAt.clear();
     this.codexRateLimitPoller.dispose();
     this.scheduledWakeClaims.clear();
@@ -9368,6 +9376,7 @@ export class SessionService {
     }
     this.sessionGcTimer = setInterval(() => {
       void this.runSessionGcSweep();
+      void this.trackBackgroundLoop(this.sweepDetachedOrphans("tick"));
       void this.runDiskBudgetSweep();
       this.runArtifactRetentionSweep();
       this.runCloseoutRetentionSweep();
@@ -13832,6 +13841,7 @@ export class SessionService {
     }
 
     await this.sweepLeakedBuiltinSidecars("boot");
+    void this.trackBackgroundLoop(this.sweepDetachedOrphans("boot"));
     // Run the same project-sidecar reap pass the SIDECAR_REAPER_INTERVAL_MS
     // tick runs, once at boot: a host that stays up for weeks between
     // restarts would
@@ -22871,30 +22881,51 @@ export class SessionService {
   // (setsid daemons adopted by a subreaper), which pane capture cannot reach.
   // Runs after the pane kill so a last-session tmux server exit reads as
   // "absent". Never throws; survivors and unreadable inputs are logged only.
-  private async terminateDetachedSessionProcesses(session: Pick<SessionRecord, "id">) {
+  private async terminateDetachedSessionProcesses(
+    session: Pick<SessionRecord, "id">,
+    options?: { onlyOnTransition: true; signal: AbortSignal },
+  ): Promise<DetachedSweepOutcome | null> {
+    // The periodic sweep retries every tick: a failure repeats its event only
+    // after the owner has been clear in between.
+    const shouldLog = (kind: string): boolean => {
+      if (!options) return true;
+      const key = `${session.id}:${kind}`;
+      if (this.detachedOrphanLogged.has(key)) return false;
+      this.detachedOrphanLogged.add(key);
+      return true;
+    };
     const tmuxServer = await readTmuxServerPid();
+    if (options?.signal.aborted) return null;
     if (tmuxServer.status === "unavailable") {
-      this.logEvent("session.agent_process.capture_unavailable", {
-        level: "warn",
-        sessionId: session.id,
-        message: `Session ${session.id}: tmux server pid unreadable; skipped detached process sweep`,
-        details: { reason: "detached_session", cause: "tmux_server_pid_unreadable" },
-      });
-      return;
+      if (shouldLog("tmux")) {
+        this.logEvent("session.agent_process.capture_unavailable", {
+          level: "warn",
+          sessionId: session.id,
+          message: `Session ${session.id}: tmux server pid unreadable; skipped detached process sweep`,
+          details: { reason: "detached_session", cause: "tmux_server_pid_unreadable" },
+        });
+      }
+      return null;
     }
-    const outcome = await terminateDetachedSessionProcesses({
+    const input = {
       sessionId: session.id,
       sessionToolDir: slotToolDir(this.config.dataDir, session.id),
       tmuxServerPid: tmuxServer.status === "running" ? tmuxServer.pid : null,
-    });
+    };
+    const outcome = options
+      ? await terminateDetachedSessionProcesses(input, { signal: options.signal })
+      : await terminateDetachedSessionProcesses(input);
+    if (options?.signal.aborted) return null;
+    if (options && outcome.status === "clear") this.clearDetachedOrphanLatch(session.id);
     if (outcome.status === "unavailable") {
+      if (!shouldLog("unavailable")) return outcome;
       this.logEvent("session.agent_process.capture_unavailable", {
         level: "warn",
         sessionId: session.id,
         message: `Session ${session.id}: could not read the process table; skipped detached process sweep`,
         details: { reason: "detached_session" },
       });
-    } else if (outcome.status === "survivors") {
+    } else if (outcome.status === "survivors" && shouldLog("survivors")) {
       this.logEvent("session.agent_process.survivors", {
         level: "error",
         sessionId: session.id,
@@ -22902,6 +22933,149 @@ export class SessionService {
         details: { pids: outcome.pids, reason: "detached_session" },
       });
     }
+    return outcome;
+  }
+
+  private clearDetachedOrphanLatch(sessionId: string): void {
+    for (const key of this.detachedOrphanLogged) {
+      if (key.startsWith(`${sessionId}:`)) this.detachedOrphanLogged.delete(key);
+    }
+  }
+
+  private readOwnerRecord(sessionId: string): SessionRecord | null | "unreadable" {
+    try {
+      return (
+        readSession(this.config.dataDir, sessionId) ??
+        readArchivedSession(this.config.dataDir, sessionId)
+      );
+    } catch {
+      return "unreadable";
+    }
+  }
+
+  // Boot + periodic reap of detached launch processes whose owner session is
+  // completed or killed (teardown sweep missed them: pre-upgrade leak, or the
+  // one-shot sweep saw an unreadable process table). Absent, unreadable and
+  // non-terminal owners are never touched.
+  private async sweepDetachedOrphans(context: "boot" | "tick"): Promise<void> {
+    if (this.detachedOrphanSweepRunning || this.isDeliveryStopped()) return;
+    this.detachedOrphanSweepRunning = true;
+    const signal = this.detachedOrphanSweepAbort.signal;
+    try {
+      // Only discovery may detach from the tracked sweep. Its late completion
+      // stays read-only; owner termination below always remains awaited.
+      const owners = await new Promise<Awaited<
+        ReturnType<typeof listDetachedSessionOwners>
+      > | null>((resolve) => {
+        const finish = (result: Awaited<ReturnType<typeof listDetachedSessionOwners>> | null) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(result);
+        };
+        const onAbort = () => finish(null);
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        const discover = async () => {
+          const tmuxServer = await readTmuxServerPid();
+          signal.throwIfAborted();
+          return tmuxServer.status === "unavailable"
+            ? ({ status: "unavailable" } as const)
+            : listDetachedSessionOwners({
+                toolDirFor: (id) => slotToolDir(this.config.dataDir, id),
+                tmuxServerPid: tmuxServer.status === "running" ? tmuxServer.pid : null,
+                signal,
+              });
+        };
+        void discover().then(finish, () => finish({ status: "unavailable" }));
+      });
+      if (signal.aborted || !owners) return;
+      if (owners.status === "unavailable") {
+        this.noteDetachedOrphanScanUnavailable();
+        return;
+      }
+      this.detachedOrphanScanUnavailable = false;
+      for (const key of this.detachedOrphanLogged) {
+        if (!owners.sessionIds.includes(key.slice(0, key.lastIndexOf(":")))) {
+          this.detachedOrphanLogged.delete(key);
+        }
+      }
+      for (const sessionId of owners.sessionIds) {
+        if (this.isDeliveryStopped()) return;
+        const prefilter = this.readOwnerRecord(sessionId);
+        if (
+          !prefilter ||
+          prefilter === "unreadable" ||
+          !isTerminalSessionStatus(prefilter.status)
+        ) {
+          continue;
+        }
+        try {
+          await this.reapDetachedOrphanOwner(sessionId, context);
+        } catch (error) {
+          if (this.isDeliveryStopped()) return;
+          if (!this.detachedOrphanLogged.has(`${sessionId}:error`)) {
+            this.detachedOrphanLogged.add(`${sessionId}:error`);
+            this.logEvent("session.agent_process.capture_unavailable", {
+              level: "warn",
+              sessionId,
+              message: `Session ${sessionId}: detached orphan sweep failed`,
+              details: {
+                reason: "detached_orphan_sweep",
+                error: error instanceof Error ? error.message : String(error),
+              },
+            });
+          }
+        }
+      }
+    } finally {
+      this.detachedOrphanSweepRunning = false;
+    }
+  }
+
+  private async reapDetachedOrphanOwner(
+    sessionId: string,
+    context: "boot" | "tick",
+  ): Promise<void> {
+    await this.withSessionLifecycleLocks([sessionId], async () => {
+      const signal = this.detachedOrphanSweepAbort.signal;
+      if (signal.aborted) return;
+      const record = this.readOwnerRecord(sessionId);
+      if (
+        !record ||
+        record === "unreadable" ||
+        !isTerminalSessionStatus(record.status) ||
+        this.reopensInFlight.has(sessionId) ||
+        this.isInRestoreWarmup(sessionId) ||
+        process.env.SPUR_SESSION === sessionId
+      ) {
+        return;
+      }
+      const outcome = await this.terminateDetachedSessionProcesses(
+        { id: sessionId },
+        { onlyOnTransition: true, signal },
+      );
+      if (this.isDeliveryStopped()) return;
+      if (outcome?.status === "clear" && outcome.matched > 0) {
+        this.logEvent("session.agent_process.detached_reaped", {
+          level: "info",
+          sessionId,
+          message: `Session ${sessionId}: reaped ${outcome.matched} orphaned detached process(es)`,
+          details: { sessionId, context, matched: outcome.matched },
+        });
+      }
+    });
+  }
+
+  private noteDetachedOrphanScanUnavailable(): void {
+    if (this.detachedOrphanScanUnavailable) return;
+    this.detachedOrphanScanUnavailable = true;
+    this.logEvent("session.agent_process.capture_unavailable", {
+      level: "warn",
+      message: "could not scan the process table; skipped detached orphan sweep",
+      details: { reason: "detached_orphan_sweep" },
+    });
   }
 
   // P2 launch guard: refuses to launch a replacement pane over a live
