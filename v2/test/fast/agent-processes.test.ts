@@ -556,6 +556,77 @@ describe("capturePaneAgentProcesses", () => {
 });
 
 describe("terminateAgentProcesses", () => {
+  it.each(["liveness", "identity"] as const)(
+    "cancellation during %s validation prevents signalling",
+    async (boundary) => {
+      const controller = new AbortController();
+      let release!: () => void;
+      let started!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const reached = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      if (boundary === "liveness") {
+        snapshotProcessLivenessMock.mockImplementationOnce(async () => {
+          started();
+          await held;
+          return { status: "ok", alivePids: new Set([7]) };
+        });
+      }
+      const pass = terminateAgentProcesses([{ pid: 7, identity: "start-7" }], {
+        signal: controller.signal,
+        readIdentity: async () => {
+          started();
+          await held;
+          return "start-7";
+        },
+      });
+      const rejected = expect(pass).rejects.toMatchObject({ name: "AbortError" });
+      try {
+        await reached;
+        controller.abort();
+        release();
+        await rejected;
+        expect(signalPidMock).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await rejected;
+      }
+    },
+  );
+
+  it("cancellation interrupts grace and prevents later escalation", async () => {
+    forceAllAlive = true;
+    const controller = new AbortController();
+    let sleeping!: () => void;
+    const graceStarted = new Promise<void>((resolve) => {
+      sleeping = resolve;
+    });
+    const onTimer = vi
+      .spyOn(controller.signal, "addEventListener")
+      .mockImplementation((...args) => {
+        EventTarget.prototype.addEventListener.call(controller.signal, ...args);
+        if (args[0] === "abort") sleeping();
+      });
+    const pass = terminateAgentProcesses([{ pid: 7, identity: null }], {
+      hupGraceMs: 60_000,
+      signal: controller.signal,
+    });
+    const rejected = expect(pass).rejects.toMatchObject({ name: "AbortError" });
+    try {
+      await graceStarted;
+      controller.abort();
+      await rejected;
+      expect(signalPidMock.mock.calls).toEqual([[7, "SIGHUP"]]);
+    } finally {
+      controller.abort();
+      await rejected;
+      onTimer.mockRestore();
+    }
+  });
+
   it("returns clear when nothing is alive", async () => {
     deadPids.add(5);
     const outcome = await terminateAgentProcesses([{ pid: 5, identity: null }]);
@@ -1418,6 +1489,52 @@ describe("terminateDetachedSessionProcesses", () => {
     );
   const signalled = () => signalPidMock.mock.calls.map(([pid]) => pid).sort((a, b) => a - b);
 
+  it.each(["identity-before", "markers", "identity-after"] as const)(
+    "cancellation after held %s prevents detached termination",
+    async (boundary) => {
+      setTable([proc(5001, 1201, markers("L1"))]);
+      const controller = new AbortController();
+      let release!: () => void;
+      let started!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const reached = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      if (boundary === "markers") {
+        readProcessEnvValuesMock.mockImplementationOnce(async () => {
+          started();
+          await held;
+          return { status: "ok", values: markers("L1") };
+        });
+      } else {
+        if (boundary === "identity-after")
+          readProcessIdentityMock.mockResolvedValueOnce("start-5001");
+        readProcessIdentityMock.mockImplementationOnce(async () => {
+          started();
+          await held;
+          return "start-5001";
+        });
+      }
+      const pass = terminateDetachedSessionProcesses(
+        { sessionId: "api-1", sessionToolDir: TOOL_DIR, tmuxServerPid: null },
+        { signal: controller.signal },
+      );
+      const rejected = expect(pass).rejects.toMatchObject({ name: "AbortError" });
+      try {
+        await reached;
+        controller.abort();
+        release();
+        await rejected;
+        expect(signalPidMock).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await rejected;
+      }
+    },
+  );
+
   it("signals a subreaper-adopted daemon and its child, any launch generation", async () => {
     setTable([
       proc(5001, 1201, markers("L1")),
@@ -1550,6 +1667,40 @@ describe("listDetachedSessionOwners", () => {
       toolDirFor: (id) => `/data/session-tools/${id}`,
       tmuxServerPid,
     });
+
+  it("cancellation after a held marker read stops serial discovery", async () => {
+    fakeTable = rows([5001, 1201, owned("a")], [5002, 1201, owned("b")]);
+    const controller = new AbortController();
+    let release!: () => void;
+    let started!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reached = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    readProcessEnvValuesMock.mockImplementationOnce(async () => {
+      started();
+      await held;
+      return { status: "ok", values: owned("a") };
+    });
+    const pass = listDetachedSessionOwners({
+      toolDirFor: (id) => `/data/session-tools/${id}`,
+      tmuxServerPid: null,
+      signal: controller.signal,
+    });
+    const rejected = expect(pass).rejects.toMatchObject({ name: "AbortError" });
+    try {
+      await reached;
+      controller.abort();
+      release();
+      await rejected;
+      expect(readProcessEnvValuesMock.mock.calls.map(([pid]) => pid)).toEqual([5001]);
+    } finally {
+      release();
+      await rejected;
+    }
+  });
 
   it("lists owners under this tool dir root once, excluding controls", async () => {
     fakeTable = rows(
