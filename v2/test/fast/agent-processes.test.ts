@@ -133,6 +133,7 @@ const {
   capturePaneAgentProcesses,
   checkAgentProcessOwnership,
   findForeignAgentProcessesForSession,
+  listDetachedSessionOwners,
   scanUnownedAgentProcesses,
   terminateAgentProcesses,
   terminateDetachedSessionProcesses,
@@ -1423,7 +1424,7 @@ describe("terminateDetachedSessionProcesses", () => {
       proc(5002, 5001, markers("L1")),
       proc(5003, 1201, markers("L0")),
     ]);
-    expect(await sweep()).toEqual({ status: "clear" });
+    expect(await sweep()).toEqual({ status: "clear", matched: 3 });
     expect(signalled()).toEqual([5001, 5002, 5003]);
   });
 
@@ -1518,5 +1519,61 @@ describe("terminateDetachedSessionProcesses", () => {
     await sweep();
     expect(readProcessEnvValuesMock.mock.calls.map(([pid]) => pid)).toEqual([5001, 5002, 5003]);
     expect(readProcessEnvValueMock).not.toHaveBeenCalled();
+  });
+
+  it("reports how many pids it matched", async () => {
+    setTable([proc(5001, 1201, markers("L1")), proc(5002, 1201, markers("L1"))]);
+    expect(await sweep()).toEqual({ status: "clear", matched: 2 });
+    setTable([proc(5001, 1201, markers(""))]);
+    expect(await sweep()).toEqual({ status: "clear", matched: 0 });
+  });
+});
+
+describe("listDetachedSessionOwners", () => {
+  const rows = (...specs: [number, number, Record<string, string>][]): FakeProc[] =>
+    specs.map(([pid, ppid, env]) => ({
+      pid,
+      ppid,
+      rssKb: 1,
+      elapsedSeconds: 1,
+      args: `detached-${pid}`,
+      env,
+      sid: pid,
+    }));
+  const owned = (id: string, launch = "L1") => ({
+    SPUR_SESSION: id,
+    SPUR_SESSION_TOOL_DIR: `/data/session-tools/${id}`,
+    SPUR_AGENT_LAUNCH_ID: launch,
+  });
+  const list = (tmuxServerPid: number | null = null) =>
+    listDetachedSessionOwners({
+      toolDirFor: (id) => `/data/session-tools/${id}`,
+      tmuxServerPid,
+    });
+
+  it("lists owners under this tool dir root once, excluding controls", async () => {
+    fakeTable = rows(
+      [5001, 1201, owned("a")],
+      [5002, 5001, owned("a")],
+      [5003, 1201, owned("b", "")],
+      [5004, 1201, { ...owned("c"), SPUR_SESSION_TOOL_DIR: "/other/session-tools/c" }],
+      [5005, 1201, { SPUR_AGENT_LAUNCH_ID: "L1" }],
+      [5006, 1201, {}],
+    );
+    expect(await list()).toEqual({ status: "ok", sessionIds: ["a"] });
+  });
+
+  it("does not list an owner whose only marked pid is an ancestor or the tmux server", async () => {
+    fakeTable = rows([7001, 1, owned("anc")], [process.pid, 7001, {}], [4844, 1201, owned("tmux")]);
+    expect(await list(4844)).toEqual({ status: "ok", sessionIds: [] });
+  });
+
+  it("is unavailable when env or the process table is unreadable", async () => {
+    fakeTable = rows([5001, 1201, owned("a")]);
+    envReadable = false;
+    expect(await list()).toEqual({ status: "unavailable" });
+    envReadable = true;
+    processSnapshotUnavailable = true;
+    expect(await list()).toEqual({ status: "unavailable" });
   });
 });
