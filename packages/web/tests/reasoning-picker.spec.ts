@@ -106,7 +106,12 @@ async function open(
         : surface === "Desk spawn"
           ? /^desk agent$/i
           : /^handoff$/i;
-  await page.getByRole("button", { name: opener }).click();
+  if (surface === "Desk spawn" || surface === "Handoff") {
+    await page.getByRole("button", { name: "More session actions" }).click();
+    await page.getByRole("menuitem", { name: opener }).click();
+  } else {
+    await page.getByRole("button", { name: opener }).click();
+  }
   if (surface === "Spawn") {
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("reasoning-project");
     await page.getByRole("combobox", { name: "Spawn agent" }).selectOption(agent);

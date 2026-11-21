@@ -8,7 +8,7 @@ const longReason =
 function todoItem(
   id: string,
   text: string,
-  status: "open" | "cancelled",
+  status: "open" | "cancelled" | "held",
   extra: Record<string, unknown>,
 ) {
   return {
@@ -45,7 +45,7 @@ const items = [
   }),
 ];
 
-async function mockTodoPage(page: Page, sessionId: string) {
+async function mockTodoPage(page: Page, sessionId: string, held = false) {
   const session = makeCompletedSession({ id: sessionId });
   await mockTagCatalog(page);
   await page.route(`**/api/sessions/${sessionId}`, (route) => {
@@ -62,8 +62,23 @@ async function mockTodoPage(page: Page, sessionId: string) {
       body: JSON.stringify({
         revision: "event-1",
         status: "active",
-        counts: { total: 4, open: 2, held: 0, completed: 0, cancelled: 2 },
-        items,
+        counts: { total: 4, open: held ? 1 : 2, held: held ? 1 : 0, completed: 0, cancelled: 2 },
+        items: held
+          ? [
+              {
+                ...items[0],
+                status: "held",
+                latestTransition: {
+                  type: "held",
+                  reason: longReason,
+                  actor: system,
+                  at,
+                  blocker: { kind: "human", requiredAction: "Confirm the command name" },
+                },
+              },
+              ...items.slice(1),
+            ]
+          : items,
         finishOverrides: [],
       }),
     });
@@ -80,6 +95,7 @@ test.describe("Spur ToDo handoff provenance", () => {
   }) => {
     await mockTodoPage(page, "todo-handoff-desktop");
     await page.goto("/sessions/todo-handoff-desktop");
+    await page.getByText("All tasks & history", { exact: true }).click();
 
     await expect(row(page, "Inherited open item")).toBeVisible();
     await expect(
@@ -108,6 +124,7 @@ test.describe("Spur ToDo handoff provenance", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await mockTodoPage(page, "todo-handoff-phone");
     await page.goto("/sessions/todo-handoff-phone");
+    await page.getByText("All tasks & history", { exact: true }).click();
 
     const line = row(page, "Inherited item with a transition").getByText(/^From api-1 · /);
     await expect(line).toBeVisible();
@@ -127,5 +144,21 @@ test.describe("Spur ToDo handoff provenance", () => {
       clientWidth: element.clientWidth,
     }));
     expect(buttonOverflow.scrollWidth).toBe(buttonOverflow.clientWidth);
+  });
+
+  test("keeps held reasons and required action exposed on phone while history is folded", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockTodoPage(page, "todo-held-phone", true);
+    await page.goto("/sessions/todo-held-phone");
+    await expect(page.getByText(longReason, { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("From api-1 · Human action: Confirm the command name"),
+    ).toBeVisible();
+    await expect(page.getByText("All tasks & history").locator("..")).not.toHaveAttribute("open");
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
   });
 });

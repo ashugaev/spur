@@ -27,6 +27,22 @@ function render(ui: ReactElement) {
   return rtlRender(ui, { wrapper: TestProviders });
 }
 
+function secondaryAction(name: string | RegExp) {
+  if (!screen.queryByRole("menu", { name: "Session actions" })) {
+    fireEvent.click(screen.getByRole("button", { name: "More session actions" }));
+  }
+  return screen.getByRole("menuitem", { name });
+}
+
+async function findSecondaryAction(name: string | RegExp) {
+  await screen.findByRole("button", { name: "More session actions" });
+  return secondaryAction(name);
+}
+
+async function revealDetails(name: string) {
+  fireEvent.click(await screen.findByText(name, { selector: "summary" }));
+}
+
 const pushMock = vi.fn();
 const replaceMock = vi.fn();
 const backMock = vi.fn();
@@ -235,7 +251,7 @@ describe("SessionDetail reasoning validity", () => {
         return new Response(JSON.stringify({}));
       });
       render(<SessionDetail sessionId="api-a1" />);
-      fireEvent.click(await screen.findByRole("button", { name: opener }));
+      fireEvent.click(await findSecondaryAction(opener));
       const surface = opener === "Desk agent" ? "Desk spawn" : "Handoff";
       expect(screen.getByRole("dialog")).toHaveAttribute("aria-modal", "true");
       const submit = screen
@@ -270,6 +286,97 @@ describe("SessionDetail header", () => {
     window.localStorage.clear();
     window.history.replaceState(null, "", "/sessions/api-a1");
   });
+
+  it("folds secondary details, exposes errors and recovery, and returns menu focus on Escape", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              status: "errored",
+              state: "error",
+              runtimeAlive: false,
+              error: "Agent needs recovery",
+              prompt: "Compact title\n\nFull task details",
+            }),
+          ),
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }));
+      }
+      return new Response(JSON.stringify({}));
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const task = await screen.findByText("Task & Handoff", { selector: "summary" });
+    const runtime = screen.getByText("Runtime & Access", { selector: "summary" });
+    expect(task.closest("details")).not.toHaveAttribute("open");
+    expect(runtime.closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "Copy task" })).not.toBeVisible();
+    expect(screen.getByText("Agent needs recovery")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    const more = screen.getByRole("button", { name: "More session actions" });
+    fireEvent.click(more);
+    const logs = screen.getByRole("menuitem", { name: "Logs" });
+    logs.focus();
+    fireEvent.keyDown(logs, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(more).toHaveFocus();
+    fireEvent.click(task);
+    expect(screen.getByRole("button", { name: "Copy task" })).toBeInTheDocument();
+  });
+
+  it.each(["claude", "codex"] as const)(
+    "opens the managed %s account dialog from More",
+    async (provider) => {
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(
+              sessionFixture({
+                agent: provider,
+                auth: {
+                  sessionId: "api-a1",
+                  provider,
+                  mode: "auto",
+                  accountId: null,
+                  effectiveAccountId: "managed-account",
+                  generation: 1,
+                },
+              }),
+            ),
+          );
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()));
+        }
+        if (url === "/api/auth-accounts") {
+          return new Response(JSON.stringify({ accounts: [], pools: {} }));
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }));
+        }
+        return new Response(JSON.stringify({}));
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+
+      await screen.findByRole("button", { name: "More session actions" });
+      expect(screen.queryByRole("button", { name: "Switch account" })).not.toBeInTheDocument();
+      fireEvent.click(secondaryAction("Switch account"));
+      expect(screen.queryByRole("menu", { name: "Session actions" })).not.toBeInTheDocument();
+      expect(
+        await screen.findByRole("dialog", {
+          name: provider === "claude" ? "Switch Claude account" : "Switch Codex account",
+        }),
+      ).toBeVisible();
+    },
+  );
 
   it("shows the session model in the header meta row when present", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -1574,7 +1681,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Handoff" }));
+    fireEvent.click(await findSecondaryAction("Handoff"));
     const submitButton = screen.getAllByRole("button", { name: /^handoff$/i }).at(-1)!;
     expect(submitButton).toBeDisabled();
 
@@ -1612,7 +1719,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Handoff" }));
+    fireEvent.click(await findSecondaryAction("Handoff"));
     const submitButton = screen.getAllByRole("button", { name: /^handoff$/i }).at(-1)!;
     await waitFor(() => {
       expect(submitButton).not.toBeDisabled();
@@ -1955,6 +2062,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
+    await revealDetails("Runtime & Access");
     await waitFor(() => {
       expect(screen.getByText("Workspace Access")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Open Web IDE" })).toHaveAttribute(
@@ -2004,6 +2112,7 @@ describe("SessionDetail voice input", () => {
       ).toBeInTheDocument();
     });
 
+    await revealDetails("Runtime & Access");
     fireEvent.click(screen.getByRole("button", { name: /copy cursor/i }));
 
     expect(writeText).toHaveBeenCalledWith(
@@ -2035,6 +2144,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
+    await revealDetails("Task & Handoff");
     await screen.findByRole("button", { name: "Copy task" });
     fireEvent.click(screen.getByRole("button", { name: "Copy task" }));
 
@@ -2068,6 +2178,7 @@ describe("SessionDetail voice input", () => {
         throw new Error(`Unexpected fetch: ${url}`);
       });
       render(<SessionDetail sessionId="api-a1" />);
+      await revealDetails("Task & Handoff");
       const copy = await screen.findByRole("button", { name: "Copy auto-close conditions" });
       expect(screen.getByText("Auto-close conditions", { exact: true })).toBeInTheDocument();
       expect(copy).toHaveAttribute("title", "Copy auto-close conditions");
@@ -2126,6 +2237,7 @@ describe("SessionDetail voice input", () => {
       ).toBeInTheDocument();
     });
 
+    await revealDetails("Runtime & Access");
     fireEvent.click(screen.getByRole("button", { name: /copy cursor/i }));
 
     expect(execCommand).toHaveBeenCalledWith("copy");
@@ -4610,7 +4722,7 @@ describe("SessionDetail logs", () => {
     ]);
 
     render(<SessionDetail sessionId="api-a1" />);
-    fireEvent.click(await screen.findByRole("button", { name: /^logs$/i }));
+    fireEvent.click(await findSecondaryAction(/^logs$/i));
 
     const dialog = screen.getByRole("dialog", { name: "Logs api-a1" });
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
@@ -4629,7 +4741,7 @@ describe("SessionDetail logs", () => {
       }),
     ]);
     render(<SessionDetail sessionId="api-a1" />);
-    fireEvent.click(await screen.findByRole("button", { name: /^logs$/i }));
+    fireEvent.click(await findSecondaryAction(/^logs$/i));
     const alert = await within(screen.getByRole("dialog", { name: "Logs api-a1" })).findByRole(
       "alert",
     );
@@ -4655,11 +4767,10 @@ describe("SessionDetail logs", () => {
       }),
     ]);
     render(<SessionDetail sessionId="api-a1" />);
-    const open = await screen.findByRole("button", { name: /^logs$/i });
-    fireEvent.click(open);
+    fireEvent.click(await findSecondaryAction(/^logs$/i));
     expect(await screen.findByText("OLD_LOG_ROW")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close logs" }));
-    fireEvent.click(open);
+    fireEvent.click(secondaryAction(/^logs$/i));
     const dialog = screen.getByRole("dialog", { name: "Logs api-a1" });
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "No retained pane for runtime svc-1",
@@ -4680,7 +4791,7 @@ describe("SessionDetail logs", () => {
       retryResponse,
     ]);
     render(<SessionDetail sessionId="api-a1" />);
-    fireEvent.click(await screen.findByRole("button", { name: /^logs$/i }));
+    fireEvent.click(await findSecondaryAction(/^logs$/i));
     const dialog = screen.getByRole("dialog", { name: "Logs api-a1" });
     fireEvent.click(await within(dialog).findByRole("button", { name: /^retry$/i }));
     expect(within(dialog).getByRole("button", { name: "Retrying…" })).toBeDisabled();
@@ -4702,10 +4813,9 @@ describe("SessionDetail logs", () => {
       }),
     ]);
     render(<SessionDetail sessionId="api-a1" />);
-    const open = await screen.findByRole("button", { name: /^logs$/i });
-    fireEvent.click(open);
+    fireEvent.click(await findSecondaryAction(/^logs$/i));
     fireEvent.click(screen.getByRole("button", { name: "Close logs" }));
-    fireEvent.click(open);
+    fireEvent.click(secondaryAction(/^logs$/i));
     const dialog = screen.getByRole("dialog", { name: "Logs api-a1" });
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "No retained pane for runtime svc-1",
@@ -4749,10 +4859,9 @@ describe("SessionDetail logs", () => {
       ),
     ]);
     render(<SessionDetail sessionId="api-a1" />);
-    const open = await screen.findByRole("button", { name: /^logs$/i });
-    fireEvent.click(open);
+    fireEvent.click(await findSecondaryAction(/^logs$/i));
     fireEvent.click(screen.getByRole("button", { name: "Close logs" }));
-    fireEvent.click(open);
+    fireEvent.click(secondaryAction(/^logs$/i));
     const dialog = screen.getByRole("dialog", { name: "Logs api-a1" });
     expect(await within(dialog).findByText("NEW_ROW")).toBeInTheDocument();
     await act(async () =>
@@ -4835,11 +4944,7 @@ describe("SessionDetail logs", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /^logs$/i })).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: /^logs$/i }));
+    fireEvent.click(await findSecondaryAction(/^logs$/i));
 
     expect(await screen.findByText("waiting")).toBeInTheDocument();
     expect(screen.getByText("needs input")).toBeInTheDocument();
@@ -4926,7 +5031,7 @@ describe("SessionDetail logs", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
-    fireEvent.click(screen.getByRole("button", { name: /^logs$/i }));
+    fireEvent.click(secondaryAction(/^logs$/i));
 
     expect(await screen.findByText("waiting")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /history snapshot/i })).toHaveAttribute(
@@ -5011,7 +5116,7 @@ describe("SessionDetail logs", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Attached (1)" }));
-    fireEvent.click(screen.getByRole("button", { name: /^logs$/i }));
+    fireEvent.click(secondaryAction(/^logs$/i));
 
     expect(await screen.findByText("waiting")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /history snapshot/i })).not.toBeInTheDocument();
@@ -7809,8 +7914,9 @@ describe("SessionDetail load state", () => {
 
     // Pause's follow-up read lands now, ahead of the backed-off poll and the 8s
     // toast auto-dismiss, so only the successful reload can clear the toast.
+    const pause = secondaryAction("Pause");
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+      fireEvent.click(pause);
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
@@ -7888,7 +7994,7 @@ describe("SessionDetail display state", () => {
     );
     render(<SessionDetail sessionId="api-a1" />);
     await expectStateBadge("completed");
-    expect(screen.getByRole("button", { name: "Close Session" })).toHaveAttribute(
+    expect(secondaryAction("Close Session")).toHaveAttribute(
       "title",
       "Stop the agent and services, delete artifacts, remove the worktree",
     );
@@ -7973,7 +8079,8 @@ describe("SessionDetail token usage", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    expect(await screen.findByText("Tokens")).toBeInTheDocument();
+    await revealDetails("Runtime & Access");
+    expect(screen.getByText("Tokens")).toBeInTheDocument();
     fireEvent.focus(screen.getByLabelText("Tokens: 1,234"));
     expect(screen.getByText("1.2K / 2K")).toBeInTheDocument();
     expect(screen.getByText("Cache read")).toBeInTheDocument();
@@ -8013,7 +8120,8 @@ describe("SessionDetail token usage", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    fireEvent.focus(await screen.findByLabelText("Tokens: at least 100"));
+    await revealDetails("Runtime & Access");
+    fireEvent.focus(screen.getByLabelText("Tokens: at least 100"));
     expect(screen.getByText("≥100 / 100")).toBeInTheDocument();
     expect(screen.getByRole("tooltip")).toHaveTextContent("Total2080");
     expect(screen.getByText("Token budget reached")).toBeInTheDocument();
@@ -8057,7 +8165,8 @@ describe("SessionDetail token usage", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    fireEvent.focus(await screen.findByLabelText("Tokens: at least 100"));
+    await revealDetails("Runtime & Access");
+    fireEvent.focus(screen.getByLabelText("Tokens: at least 100"));
     const row = (label: string) =>
       within(screen.getByRole("tooltip")).getByText(label).closest("tr");
     expect(row("Input")).toHaveTextContent("1560");
@@ -8097,7 +8206,8 @@ describe("SessionDetail token usage", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    fireEvent.focus(await screen.findByLabelText("Tokens: at least 20"));
+    await revealDetails("Runtime & Access");
+    fireEvent.focus(screen.getByLabelText("Tokens: at least 20"));
     expect(screen.getByText("≥20 / 100")).toBeInTheDocument();
     expect(screen.getByText("Budget not enforced · main usage unavailable")).toBeInTheDocument();
   });
@@ -8264,6 +8374,7 @@ describe("SessionDetail token usage", () => {
     });
     render(<SessionDetail sessionId="api-a1" />);
     expect(await screen.findByText("110 / 100")).toBeInTheDocument();
+    await revealDetails("Runtime & Access");
     fireEvent.focus(screen.getByLabelText("Tokens: 110"));
     expect(screen.getByText("110 of 100 · 110% · limit ignored")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
@@ -8283,6 +8394,7 @@ describe("SessionDetail token usage", () => {
     });
     render(<SessionDetail sessionId="api-a1" />);
     expect(await screen.findByText("≥20 / 100")).toBeInTheDocument();
+    await revealDetails("Runtime & Access");
     fireEvent.focus(screen.getByLabelText("Tokens: at least 20"));
     expect(screen.getByText("20 of 100 · 20% · limit ignored")).toBeInTheDocument();
     expect(
@@ -9172,7 +9284,7 @@ describe("SessionDetail GitHub PR check unavailable", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Close Session" }));
+    fireEvent.click(await findSecondaryAction("Close Session"));
 
     await waitFor(() => {
       expect(
@@ -9396,7 +9508,7 @@ describe("SessionDetail lifecycle operation", () => {
     expect(screen.getByText("starting")).toBeInTheDocument();
     expect(screen.queryByText("working")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Terminal" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "More session actions" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: /Send now/ })).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/^Message\.\.\./)).not.toBeInTheDocument();
     current = sessionFixture({ state: "waiting", lifecycle: receipt(operationId, "succeeded", 2) });
@@ -9408,7 +9520,7 @@ describe("SessionDetail lifecycle operation", () => {
       target: { value: "Ready" },
     });
     expect(screen.getByRole("button", { name: /Send now/ })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    expect(secondaryAction("Pause")).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
     current = sessionFixture({
       status: "stopped",
@@ -9442,12 +9554,12 @@ describe("SessionDetail lifecycle operation", () => {
     );
     const mounted = render(<SessionDetail sessionId="api-a1" />);
     await advance();
-    expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "More session actions" })).toBeDisabled();
     expect(screen.getByText("starting")).toBeInTheDocument();
     mounted.unmount();
     render(<SessionDetail sessionId="api-a1" />);
     await advance();
-    expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "More session actions" })).toBeDisabled();
     expect(screen.getByText("starting")).toBeInTheDocument();
     expect(screen.queryByText("working")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Terminal" })).not.toBeInTheDocument();
@@ -9483,18 +9595,16 @@ describe("SessionDetail lifecycle operation", () => {
       );
       render(<SessionDetail sessionId="api-a1" />);
       await advance();
-      const button = screen.getByRole("button", {
-        name: action === "complete" ? "Close Session" : "Reopen",
-      });
+      const button =
+        action === "complete"
+          ? secondaryAction("Close Session")
+          : screen.getByRole("button", { name: "Reopen" });
       fireEvent.click(button);
       fireEvent.click(button);
       await advance();
       expect(posts).toBe(1);
       if (action === "complete") {
-        expect(screen.getByRole("button", { name: "Closing session" })).toHaveAttribute(
-          "aria-busy",
-          "true",
-        );
+        expect(screen.getByRole("button", { name: "More session actions" })).toBeDisabled();
       }
       current = { ...current, lifecycle: receipt(operationId, "pending", 1, action) };
       await advance(12_000);
@@ -9503,7 +9613,7 @@ describe("SessionDetail lifecycle operation", () => {
         expect(screen.getByText("starting")).toBeInTheDocument();
         expect(screen.queryByText("working")).not.toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "Terminal" })).not.toBeInTheDocument();
-        expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+        expect(screen.getByRole("button", { name: "More session actions" })).toBeDisabled();
         expect(screen.queryByRole("button", { name: /Send now/ })).not.toBeInTheDocument();
       } else {
         expect(screen.queryByText("starting")).not.toBeInTheDocument();
@@ -9513,16 +9623,16 @@ describe("SessionDetail lifecycle operation", () => {
         lifecycle: receipt(operationId, "succeeded", 2, action),
       });
       await advance(4_000);
-      expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+      expect(secondaryAction("Pause")).toBeEnabled();
       expect(screen.queryByText("starting")).not.toBeInTheDocument();
       expect(screen.getByText("waiting")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Terminal" })).toBeEnabled();
       current = sessionFixture({ lifecycle: receipt(operationId, "pending", 1, action) });
       await advance(4_000);
-      expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+      expect(secondaryAction("Pause")).toBeEnabled();
       delivery.resolve(new Response(JSON.stringify(current)));
       await advance();
-      expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+      expect(secondaryAction("Pause")).toBeEnabled();
     },
   );
 
@@ -9560,7 +9670,7 @@ describe("SessionDetail lifecycle operation", () => {
           ),
         );
       await advance();
-      expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+      expect(secondaryAction("Pause")).toBeEnabled();
       expect(
         fetchMock.mock.calls.filter(([input]) => input === "/api/sessions/api-a1/restore"),
       ).toHaveLength(1);
@@ -9583,7 +9693,7 @@ describe("SessionDetail lifecycle operation", () => {
     delivery.resolve(new Response(JSON.stringify({ error: "Old action error" }), { status: 409 }));
     await advance();
     expect(screen.queryByText("Old action error")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "More session actions" })).toBeDisabled();
     current = sessionFixture({
       status: "stopped",
       state: "stopped",

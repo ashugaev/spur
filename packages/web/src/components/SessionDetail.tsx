@@ -243,16 +243,6 @@ function CopyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   );
 }
 
-function KebabIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
-  return (
-    <svg aria-hidden="true" className={className} fill="currentColor" viewBox="0 0 16 16">
-      <circle cx="8" cy="2.5" r="1.5" />
-      <circle cx="8" cy="8" r="1.5" />
-      <circle cx="8" cy="13.5" r="1.5" />
-    </svg>
-  );
-}
-
 function PromptSectionCopyButton({
   label,
   value,
@@ -266,7 +256,7 @@ function PromptSectionCopyButton({
   return (
     <button
       aria-label={`Copy ${copyLabel}`}
-      className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-[var(--color-text-tertiary)] opacity-70 transition hover:text-[var(--color-text-secondary)] hover:opacity-100 active:scale-[0.97]"
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] active:scale-[0.97]"
       onClick={() => void onCopy(label, value)}
       title={`Copy ${copyLabel}`}
       type="button"
@@ -2515,9 +2505,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const closeTitleEditor = useCallback(() => {
     setTitleEditing(false);
   }, []);
+  function closeSessionMenu(): void {
+    setSessionMenuOpen(false);
+    sessionMenu.buttonRef.current?.focus();
+  }
   const sessionMenu = useAnchoredMenu({
     open: sessionMenuOpen,
-    onClose: () => setSessionMenuOpen(false),
+    onClose: closeSessionMenu,
     contentDeps: [],
     preferredSide: "below",
     align: "end",
@@ -2842,7 +2836,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       {session ? (
         <>
           {/* Header */}
-          <header className="mt-4 border-b-2 border-[var(--color-accent)] pb-4">
+          <header className="mt-4 border-b border-[var(--color-border-default)] pb-3">
             <div className="flex flex-wrap items-center gap-2 text-[var(--color-text-tertiary)] uppercase tracking-[0.1em]">
               <span>{session.projectName}</span>
               <span>•</span>
@@ -2869,75 +2863,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 onCancel={closeTitleEditor}
               />
             ) : null}
-            {promptView &&
-            (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
-              <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
-                {promptView.task ? (
-                  <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                        Task
-                      </div>
-                      <PromptSectionCopyButton
-                        label="Task"
-                        value={promptView.task}
-                        onCopy={copyLabeledValue}
-                      />
-                    </div>
-                    <p
-                      className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
-                    >
-                      {promptView.task}
-                    </p>
-                  </div>
-                ) : null}
-                {promptView.handoff ? (
-                  <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                        Handoff
-                      </div>
-                      <PromptSectionCopyButton
-                        label="Handoff"
-                        value={[
-                          `From ${promptView.handoff.sourceAgent} · ${promptView.handoff.sourceSessionId}`,
-                          promptView.handoff.notes,
-                        ]
-                          .filter(Boolean)
-                          .join("\n\n")}
-                        onCopy={copyLabeledValue}
-                      />
-                    </div>
-                    <p className="mt-1 text-[var(--color-text-secondary)]">
-                      From {promptView.handoff.sourceAgent} · {promptView.handoff.sourceSessionId}
-                    </p>
-                    {promptView.handoff.notes ? (
-                      <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
-                        {promptView.handoff.notes}
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-                {promptView.selfDestructLabel ? (
-                  <div>
-                    <div className="flex items-center justify-between gap-2 [&>button]:text-[var(--color-text-secondary)] [&>button]:opacity-100">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
-                        Auto-close conditions
-                      </div>
-                      <PromptSectionCopyButton
-                        label="Auto-close conditions"
-                        value={`Close this session when ${promptView.selfDestructLabel}.`}
-                        onCopy={copyLabeledValue}
-                      />
-                    </div>
-                    <p className="mt-1 text-[var(--color-text-secondary)]">
-                      Close this session when {promptView.selfDestructLabel}.
-                    </p>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
             {deskMembers.total > 1 ? (
               <nav
                 aria-label="Checkout group"
@@ -3039,59 +2964,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 Terminal
               </button>
             ) : null}
-            {session ? (
-              <button
-                type="button"
-                disabled={
-                  busyAction !== null || actionDialogs.deskSpawning || !canUseDeskCheckout(session)
-                }
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                onClick={() => actionDialogs.openDeskSpawn(session)}
-                title={
-                  canUseDeskCheckout(session)
-                    ? "Opens a second agent in this checkout directory with the same branch"
-                    : "No reusable checkout is available"
-                }
-              >
-                Desk agent
-              </button>
-            ) : null}
-            {canHandoff(session) ? (
-              <button
-                aria-busy={busyAction === "handoff" || undefined}
-                aria-label={busyAction === "handoff" ? "Handing off session" : undefined}
-                type="button"
-                disabled={busyAction !== null}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                onClick={() => actionDialogs.openHandoff(session)}
-                title="Pass this task to another agent in the same workspace"
-              >
-                <BusyContent busy={busyAction === "handoff"}>Handoff</BusyContent>
-              </button>
-            ) : null}
-            {canSwitchAuth(session) ? (
-              <button
-                type="button"
-                disabled={busyAction !== null}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                onClick={() => actionDialogs.openSwitchAuth(session)}
-                title="Switch credentials in place — the live process rereads the new account on its next request"
-              >
-                Switch account
-              </button>
-            ) : null}
-            {canPause(session) ? (
-              <button
-                aria-busy={busyAction === "pause" || undefined}
-                aria-label={busyAction === "pause" ? "Pausing session" : undefined}
-                type="button"
-                disabled={busyAction !== null}
-                onClick={() => void handleAction("pause")}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-              >
-                <BusyContent busy={busyAction === "pause"}>Pause</BusyContent>
-              </button>
-            ) : null}
             {isRestorable(session) && !tokenBudgetBlocked ? (
               <button
                 aria-busy={busyAction === "restore" || undefined}
@@ -3142,31 +3014,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 Recover
               </button>
             ) : null}
-            {canComplete(session) || busyAction === "complete" ? (
-              <button
-                aria-busy={busyAction === "complete" || undefined}
-                aria-label={busyAction === "complete" ? "Closing session" : undefined}
-                type="button"
-                disabled={busyAction !== null}
-                onClick={() => void handleAction("complete")}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                title={CLOSE_SESSION_TOOLTIP}
-              >
-                <BusyContent busy={busyAction === "complete"}>Close Session</BusyContent>
-              </button>
-            ) : null}
-            {!isTerminalSession(session) ? (
-              <button
-                aria-busy={busyAction === "kill" || undefined}
-                aria-label={busyAction === "kill" ? "Killing session" : undefined}
-                type="button"
-                disabled={busyAction !== null}
-                onClick={() => void handleAction("kill", { force: true })}
-                className="border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:opacity-50"
-              >
-                <BusyContent busy={busyAction === "kill"}>Kill</BusyContent>
-              </button>
-            ) : null}
             {canRespawn(session) ? (
               <button
                 aria-busy={busyAction === "respawn" || undefined}
@@ -3179,13 +3026,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <BusyContent busy={busyAction === "respawn"}>Edit &amp; Respawn</BusyContent>
               </button>
             ) : null}
-            <button
-              type="button"
-              onClick={() => void openLogs()}
-              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-            >
-              Logs
-            </button>
             <div className="relative" ref={sessionMenu.containerRef}>
               <button
                 aria-expanded={sessionMenuOpen}
@@ -3197,22 +3037,104 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 ref={sessionMenu.buttonRef}
                 type="button"
               >
-                <KebabIcon />
+                More <span aria-hidden="true">▾</span>
               </button>
               {sessionMenuOpen ? (
                 <div
                   aria-label="Session actions"
-                  className="fixed z-30 w-44 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                  className="fixed z-30 max-h-[calc(100dvh-1rem)] w-56 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)] [&>button]:block [&>button]:w-full [&>button]:px-3 [&>button]:py-1.5 [&>button]:text-left [&>button]:font-bold [&>button]:uppercase [&>button]:text-[var(--color-text-primary)] [&>button:hover]:bg-[var(--color-hover-overlay)] [&>button:disabled]:opacity-50"
                   ref={sessionMenu.menuRef}
                   role="menu"
                   style={sessionMenu.menuStyle}
+                  onKeyDown={(event) => {
+                    const buttons = Array.from(
+                      event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                        "button:not(:disabled)",
+                      ),
+                    );
+                    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+                    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                      event.preventDefault();
+                      buttons[
+                        (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) %
+                          buttons.length
+                      ]?.focus();
+                    } else if (event.key === "Home" || event.key === "End") {
+                      event.preventDefault();
+                      buttons[event.key === "Home" ? 0 : buttons.length - 1]?.focus();
+                    }
+                  }}
                 >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={
+                      busyAction !== null ||
+                      actionDialogs.deskSpawning ||
+                      !canUseDeskCheckout(session)
+                    }
+                    title={
+                      canUseDeskCheckout(session)
+                        ? "Opens a second agent in this checkout directory with the same branch"
+                        : "No reusable checkout is available"
+                    }
+                    onClick={() => {
+                      closeSessionMenu();
+                      actionDialogs.openDeskSpawn(session);
+                    }}
+                  >
+                    Desk agent
+                  </button>
+                  {canHandoff(session) ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      aria-busy={busyAction === "handoff" || undefined}
+                      aria-label={busyAction === "handoff" ? "Handing off session" : undefined}
+                      disabled={busyAction !== null}
+                      title="Pass this task to another agent in the same workspace"
+                      onClick={() => {
+                        closeSessionMenu();
+                        actionDialogs.openHandoff(session);
+                      }}
+                    >
+                      <BusyContent busy={busyAction === "handoff"}>Handoff</BusyContent>
+                    </button>
+                  ) : null}
+                  {canSwitchAuth(session) ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={busyAction !== null}
+                      title="Switch credentials in place — the live process rereads the new account on its next request"
+                      onClick={() => {
+                        closeSessionMenu();
+                        actionDialogs.openSwitchAuth(session);
+                      }}
+                    >
+                      Switch account
+                    </button>
+                  ) : null}
                   {canPause(session) ? (
                     <button
-                      className="block w-full px-3 py-1.5 text-left font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                      type="button"
+                      role="menuitem"
+                      aria-busy={busyAction === "pause" || undefined}
+                      aria-label={busyAction === "pause" ? "Pausing session" : undefined}
                       disabled={busyAction !== null}
                       onClick={() => {
-                        setSessionMenuOpen(false);
+                        closeSessionMenu();
+                        void handleAction("pause");
+                      }}
+                    >
+                      <BusyContent busy={busyAction === "pause"}>Pause</BusyContent>
+                    </button>
+                  ) : null}
+                  {canPause(session) ? (
+                    <button
+                      disabled={busyAction !== null}
+                      onClick={() => {
+                        closeSessionMenu();
                         void handleAction("restore", { restart: true });
                       }}
                       role="menuitem"
@@ -3222,9 +3144,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     </button>
                   ) : null}
                   <button
-                    className="block w-full px-3 py-1.5 text-left font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
                     onClick={() => {
-                      setSessionMenuOpen(false);
+                      closeSessionMenu();
                       openTitleEditor();
                     }}
                     role="menuitem"
@@ -3232,15 +3153,65 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   >
                     Change title
                   </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      closeSessionMenu();
+                      void openLogs();
+                    }}
+                  >
+                    Logs
+                  </button>
+                  {canComplete(session) || busyAction === "complete" ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      aria-busy={busyAction === "complete" || undefined}
+                      aria-label={busyAction === "complete" ? "Closing session" : undefined}
+                      disabled={busyAction !== null}
+                      title={CLOSE_SESSION_TOOLTIP}
+                      onClick={() => {
+                        closeSessionMenu();
+                        void handleAction("complete");
+                      }}
+                    >
+                      <BusyContent busy={busyAction === "complete"}>Close Session</BusyContent>
+                    </button>
+                  ) : null}
+                  {!isTerminalSession(session) ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      aria-busy={busyAction === "kill" || undefined}
+                      aria-label={busyAction === "kill" ? "Killing session" : undefined}
+                      disabled={busyAction !== null}
+                      className="!text-[var(--color-status-error)]"
+                      onClick={() => {
+                        closeSessionMenu();
+                        void handleAction("kill", { force: true });
+                      }}
+                    >
+                      <BusyContent busy={busyAction === "kill"}>Kill</BusyContent>
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
             </div>
           </div>
 
+          {session.error ? (
+            <div
+              role="alert"
+              className={`mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-2 text-[var(--color-chip-error-text)] ${HARD_WRAP_TEXT_CLASS}`}
+            >
+              {session.error}
+            </div>
+          ) : null}
+
           {/* Content */}
-          <div className="mt-4 grid gap-4 [&>*]:min-w-0 lg:grid-cols-[minmax(0,1.2fr)_minmax(16rem,0.8fr)]">
-            <div className="space-y-4">
-              <SessionTodo sessionId={session.id} />
+          <div className="mt-4 grid gap-4 [&>*]:min-w-0 lg:grid-cols-[minmax(0,1fr)_280px] lg:items-start">
+            <div className="order-2 min-w-0 space-y-4 lg:order-1">
               {/* Conversation dialog - all agents */}
               <ConversationView
                 entries={conversation?.entries ?? []}
@@ -3690,202 +3661,291 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               ) : null}
             </div>
 
-            {/* Runtime sidebar */}
-            <section>
-              <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
-                Runtime
-                <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
-              </h2>
-              <dl className="space-y-2 text-[var(--color-text-secondary)]">
-                {(
-                  [
-                    ["Created", formatAbsoluteTime(session.createdAt)],
-                    ["Last activity", formatRelativeTime(session.lastActivityAt)],
-                    ["Worktree", session.worktree ? "isolated" : "shared"],
-                    ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
-                    ["Workspace", session.workspaceExists ? "present" : "missing"],
-                    ["Tokens", <TokenCount session={session} sidebar />],
-                    ...(wakeSummary && wakeCountdown
-                      ? [
-                          ["Wake", wakeSummary.label],
-                          ["Next wake", wakeCountdown],
-                        ]
-                      : []),
-                    ...(wakeSummary?.intervalMs
-                      ? [["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]]
-                      : []),
-                    ...(wakeSummary?.dailyAt
-                      ? [["Wake daily at", wakeSummary.dailyAt.join(", ")]]
-                      : []),
-                  ] as Array<[string, ReactNode]>
-                ).map(([label, value]) => (
-                  <div
-                    key={label}
-                    className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
-                  >
-                    <dt className="text-[var(--color-text-tertiary)]">{label}</dt>
-                    <dd>{value}</dd>
-                  </div>
-                ))}
-              </dl>
-
-              <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
-                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  Worktree path
-                </div>
-                <div className="mt-1 font-mono text-[var(--color-text-secondary)]">
-                  {truncateMiddle(session.worktreePath, 60)}
-                </div>
+            <div className="contents lg:order-2 lg:block lg:space-y-4">
+              <div className="order-1 min-w-0">
+                <SessionTodo sessionId={session.id} />
               </div>
-
-              {wakeSummary?.stopCondition ? (
-                <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
-                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                    Wake stop condition
-                  </div>
-                  <div className="mt-1 text-[var(--color-text-secondary)]">
-                    {wakeSummary.stopCondition}
-                  </div>
-                </div>
-              ) : null}
-
-              {workspaceAccessItems.length > 0 ? (
-                <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
-                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                    Workspace Access
-                  </div>
-                  <div className="mt-2 space-y-2">
-                    {workspaceAccessItems.map((item) => (
-                      <div
-                        key={`${item.kind}:${item.label}:${item.value}`}
-                        className="border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] px-2.5 py-2"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]">
-                              {item.label}
-                            </div>
-                          </div>
-                          {item.kind === "link" ? (
-                            <a
-                              aria-label={`Open ${item.label}`}
-                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-[10px] font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                              href={item.value}
-                              rel="noreferrer"
-                              target="_blank"
-                            >
-                              Open
-                            </a>
-                          ) : (
-                            <button
-                              aria-label={`Copy ${item.label}`}
-                              type="button"
-                              className="inline-flex h-7 w-7 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
-                              onClick={() => void copyLabeledValue(item.label, item.value)}
-                            >
-                              <CopyIcon />
-                            </button>
-                          )}
+              {promptView &&
+              (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
+                <details
+                  key={`task-${session.id}`}
+                  className="order-3 min-w-0 border-t border-[var(--color-border-default)]"
+                >
+                  <summary className="cursor-pointer py-3 font-bold uppercase tracking-[0.1em] text-[var(--color-text-secondary)]">
+                    Task &amp; Handoff
+                  </summary>
+                  <div className="space-y-3 pb-3">
+                    {promptView.task ? (
+                      <div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold uppercase text-[var(--color-text-secondary)]">
+                            Task
+                          </span>
+                          <PromptSectionCopyButton
+                            label="Task"
+                            value={promptView.task}
+                            onCopy={copyLabeledValue}
+                          />
                         </div>
-                        <code className="mt-2 block whitespace-pre-wrap break-all font-mono text-[var(--color-text-secondary)]">
-                          {item.value}
-                        </code>
+                        <p
+                          className={`mt-1 text-[var(--color-text-secondary)] ${HARD_WRAP_TEXT_CLASS}`}
+                        >
+                          {promptView.task}
+                        </p>
                       </div>
-                    ))}
+                    ) : null}
+                    {promptView.handoff ? (
+                      <div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold uppercase text-[var(--color-text-secondary)]">
+                            Handoff
+                          </span>
+                          <PromptSectionCopyButton
+                            label="Handoff"
+                            value={[
+                              `From ${promptView.handoff.sourceAgent} · ${promptView.handoff.sourceSessionId}`,
+                              promptView.handoff.notes,
+                            ]
+                              .filter(Boolean)
+                              .join("\n\n")}
+                            onCopy={copyLabeledValue}
+                          />
+                        </div>
+                        <p
+                          className={`mt-1 text-[var(--color-text-secondary)] ${HARD_WRAP_TEXT_CLASS}`}
+                        >
+                          From {promptView.handoff.sourceAgent} ·{" "}
+                          {promptView.handoff.sourceSessionId}
+                        </p>
+                        {promptView.handoff.notes ? (
+                          <p
+                            className={`mt-1 text-[var(--color-text-secondary)] ${HARD_WRAP_TEXT_CLASS}`}
+                          >
+                            {promptView.handoff.notes}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {promptView.selfDestructLabel ? (
+                      <div>
+                        <div className="flex items-center justify-between gap-2 [&>button]:text-[var(--color-text-secondary)] [&>button]:opacity-100">
+                          <span className="font-bold uppercase text-[var(--color-text-secondary)]">
+                            Auto-close conditions
+                          </span>
+                          <PromptSectionCopyButton
+                            label="Auto-close conditions"
+                            value={`Close this session when ${promptView.selfDestructLabel}.`}
+                            onCopy={copyLabeledValue}
+                          />
+                        </div>
+                        <p
+                          className={`mt-1 text-[var(--color-text-secondary)] ${HARD_WRAP_TEXT_CLASS}`}
+                        >
+                          Close this session when {promptView.selfDestructLabel}.
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
+                </details>
+              ) : null}
+
+              {/* Runtime sidebar */}
+              <details
+                key={`runtime-${session.id}`}
+                className="order-5 min-w-0 border-t border-[var(--color-border-default)]"
+              >
+                <summary className="cursor-pointer py-3 font-bold uppercase tracking-[0.1em] text-[var(--color-text-secondary)]">
+                  Runtime &amp; Access
+                </summary>
+                <dl className="space-y-2 text-[var(--color-text-secondary)]">
+                  {(
+                    [
+                      ["Created", formatAbsoluteTime(session.createdAt)],
+                      ["Last activity", formatRelativeTime(session.lastActivityAt)],
+                      ["Worktree", session.worktree ? "isolated" : "shared"],
+                      ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
+                      ["Workspace", session.workspaceExists ? "present" : "missing"],
+                      ["Tokens", <TokenCount session={session} sidebar />],
+                      ...(wakeSummary && wakeCountdown
+                        ? [
+                            ["Wake", wakeSummary.label],
+                            ["Next wake", wakeCountdown],
+                          ]
+                        : []),
+                      ...(wakeSummary?.intervalMs
+                        ? [["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]]
+                        : []),
+                      ...(wakeSummary?.dailyAt
+                        ? [["Wake daily at", wakeSummary.dailyAt.join(", ")]]
+                        : []),
+                    ] as Array<[string, ReactNode]>
+                  ).map(([label, value]) => (
+                    <div
+                      key={label}
+                      className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                    >
+                      <dt className="text-[var(--color-text-tertiary)]">{label}</dt>
+                      <dd>{value}</dd>
+                    </div>
+                  ))}
+                </dl>
+
+                <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Worktree path
+                  </div>
+                  <div className="mt-1 font-mono text-[var(--color-text-secondary)]">
+                    <span className="break-all">{session.worktreePath}</span>
                   </div>
                 </div>
-              ) : null}
 
-              {session.error ? (
-                <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-2 text-[var(--color-chip-error-text)]">
-                  {session.error}
-                </div>
-              ) : null}
-            </section>
+                {wakeSummary?.stopCondition ? (
+                  <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                      Wake stop condition
+                    </div>
+                    <div className="mt-1 text-[var(--color-text-secondary)]">
+                      {wakeSummary.stopCondition}
+                    </div>
+                  </div>
+                ) : null}
 
-            {/* Sidecars */}
-            {session.sidecars.length > 0 ? (
-              <section>
-                <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
-                  Sidecars
-                  <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
-                </h2>
-                <div className="space-y-2">
-                  {session.sidecars.map((sc) => {
-                    const sidecarOpenUrl = sc.url;
-                    return (
-                      <div
-                        key={sc.name}
-                        className="border-b border-[var(--color-border-subtle)] py-1.5"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
-                            <span
-                              className={`inline-block h-2 w-2 shrink-0 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
-                              data-testid={`sidecar-status-${sc.name}`}
-                            />
-                            <span className="min-w-0 break-all text-[var(--color-text-secondary)]">
-                              {sc.name}
-                            </span>
-                            {sc.ports?.map((port) => (
-                              <span
-                                key={port.env}
-                                className="shrink-0 text-[var(--color-text-tertiary)]"
-                              >
-                                :{port.port}
-                              </span>
-                            ))}
-                            {sc.ageSeconds !== undefined ? (
-                              <span
-                                className={`shrink-0 ${sc.ageWarn ? "text-[var(--color-status-attention)]" : "text-[var(--color-text-tertiary)]"}`}
-                                data-testid={`sidecar-age-${sc.name}`}
-                              >
-                                {formatSidecarAge(sc.ageSeconds)}
-                              </span>
-                            ) : null}
-                          </div>
-                          <div className="flex shrink-0 items-center gap-2">
-                            {(sc.alive || sc.deadPane) && canAttach ? (
-                              <button
-                                type="button"
-                                className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                                onClick={() => syncTerminalFilter(sc.tmuxSession)}
-                              >
-                                Terminal
-                              </button>
-                            ) : null}
-                            {sidecarOpenUrl ? (
+                {workspaceAccessItems.length > 0 ? (
+                  <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                      Workspace Access
+                    </div>
+                    <div className="mt-2 space-y-2">
+                      {workspaceAccessItems.map((item) => (
+                        <div
+                          key={`${item.kind}:${item.label}:${item.value}`}
+                          className="border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] px-2.5 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="truncate text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]">
+                                {item.label}
+                              </div>
+                            </div>
+                            {item.kind === "link" ? (
                               <a
-                                className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                                href={sidecarOpenUrl}
+                                aria-label={`Open ${item.label}`}
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 text-[10px] font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                                href={item.value}
                                 rel="noreferrer"
                                 target="_blank"
                               >
                                 Open
                               </a>
-                            ) : null}
-                            <button
-                              aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
-                              className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                              disabled={
-                                busyAction === `sidecar:start:${sc.name}` ||
-                                busyAction === `sidecar:stop:${sc.name}`
-                              }
-                              onClick={() =>
-                                void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
-                              }
-                              type="button"
-                            >
-                              {sc.alive ? <StopSquareIcon className="h-3.5 w-3.5" /> : <PlayIcon />}
-                            </button>
+                            ) : (
+                              <button
+                                aria-label={`Copy ${item.label}`}
+                                type="button"
+                                className="inline-flex h-7 w-7 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
+                                onClick={() => void copyLabeledValue(item.label, item.value)}
+                              >
+                                <CopyIcon />
+                              </button>
+                            )}
+                          </div>
+                          <code className="mt-2 block whitespace-pre-wrap break-all font-mono text-[var(--color-text-secondary)]">
+                            {item.value}
+                          </code>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </details>
+
+              {/* Sidecars */}
+              {session.sidecars.length > 0 ? (
+                <section className="order-4 min-w-0">
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Sidecars
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                  </h2>
+                  <div className="space-y-2">
+                    {session.sidecars.map((sc) => {
+                      const sidecarOpenUrl = sc.url;
+                      return (
+                        <div
+                          key={sc.name}
+                          className="border-b border-[var(--color-border-subtle)] py-1.5"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+                              <span
+                                className={`inline-block h-2 w-2 shrink-0 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                                data-testid={`sidecar-status-${sc.name}`}
+                              />
+                              <span className="min-w-0 break-all text-[var(--color-text-secondary)]">
+                                {sc.name}
+                              </span>
+                              {sc.ports?.map((port) => (
+                                <span
+                                  key={port.env}
+                                  className="shrink-0 text-[var(--color-text-tertiary)]"
+                                >
+                                  :{port.port}
+                                </span>
+                              ))}
+                              {sc.ageSeconds !== undefined ? (
+                                <span
+                                  className={`shrink-0 ${sc.ageWarn ? "text-[var(--color-status-attention)]" : "text-[var(--color-text-tertiary)]"}`}
+                                  data-testid={`sidecar-age-${sc.name}`}
+                                >
+                                  {formatSidecarAge(sc.ageSeconds)}
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="flex shrink-0 items-center gap-2">
+                              {(sc.alive || sc.deadPane) && canAttach ? (
+                                <button
+                                  type="button"
+                                  className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                                  onClick={() => syncTerminalFilter(sc.tmuxSession)}
+                                >
+                                  Terminal
+                                </button>
+                              ) : null}
+                              {sidecarOpenUrl ? (
+                                <a
+                                  className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                                  href={sidecarOpenUrl}
+                                  rel="noreferrer"
+                                  target="_blank"
+                                >
+                                  Open
+                                </a>
+                              ) : null}
+                              <button
+                                aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                                className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
+                                disabled={
+                                  busyAction === `sidecar:start:${sc.name}` ||
+                                  busyAction === `sidecar:stop:${sc.name}`
+                                }
+                                onClick={() =>
+                                  void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                                }
+                                type="button"
+                              >
+                                {sc.alive ? (
+                                  <StopSquareIcon className="h-3.5 w-3.5" />
+                                ) : (
+                                  <PlayIcon />
+                                )}
+                              </button>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </section>
-            ) : null}
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
+            </div>
           </div>
 
           {/* Logs modal */}

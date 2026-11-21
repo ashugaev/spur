@@ -412,7 +412,8 @@ test.describe("Session switch account", () => {
     });
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: "Switch account" }).click();
+    await page.getByRole("button", { name: "More session actions" }).click();
+    await page.getByRole("menuitem", { name: "Switch account" }).click();
     const dialog = page.getByRole("dialog", { name: "Switch Claude account" });
     const group = dialog.getByRole("radiogroup", { name: "Switch Claude account" });
     await expect(group.getByRole("img", { name: "current" })).toBeVisible();
