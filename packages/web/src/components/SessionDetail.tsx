@@ -2318,13 +2318,19 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const handleOpenPrAction = async (prAction: OpenPrAction) => {
     if (!openPrAction) return;
+    const dialog = openPrAction;
     const body = {
-      ...(openPrAction.body ?? {}),
+      ...(dialog.body ?? {}),
       prAction,
     };
-    const completed = await handleAction(openPrAction.action, body, { skipKillConfirm: true });
+    const pending = handleAction(dialog.action, body, { skipKillConfirm: true });
+    if (prAction === "leave_open") {
+      setOpenPrAction((current) => (current === dialog ? null : current));
+      actionDialogs.closeRecover();
+    }
+    const completed = await pending;
     if (completed) {
-      setOpenPrAction(null);
+      setOpenPrAction((current) => (current === dialog ? null : current));
       actionDialogs.closeRecover();
     }
   };
