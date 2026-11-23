@@ -117,6 +117,35 @@ describe("GET /sessions/transitions", () => {
     expect(slowEvents()[0]?.details?.durationMs).toBeGreaterThanOrEqual(5_000);
   });
 
+  it("omits the status code from http.request.slow when the client left before a response", async () => {
+    const realNow = performance.now.bind(performance);
+    const clock = vi.spyOn(performance, "now");
+    let entered: (() => void) | undefined;
+    const listing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    vi.spyOn(SessionService.prototype, "list").mockImplementation(async (options) => {
+      clock.mockImplementation(() => realNow() + 5_000);
+      entered?.();
+      await new Promise((resolve) => options?.signal?.addEventListener("abort", resolve));
+      return [];
+    });
+    const { base, dataDir } = await setup();
+    const client = new AbortController();
+    const request = fetch(`${base}/sessions`, { signal: client.signal }).catch(() => undefined);
+    await listing;
+    client.abort();
+    await request;
+    await vi.waitFor(() =>
+      expect(readEventLog(dataDir).filter((e) => e.event === "http.request.slow")).toEqual([
+        expect.objectContaining({
+          path: "/sessions",
+          details: { durationMs: expect.any(Number) },
+        }),
+      ]),
+    );
+  });
+
   it("fails the request on refresh or journal errors", async () => {
     vi.spyOn(SessionService.prototype, "listSessionTransitions").mockRejectedValue(
       new Error("Journal append failed"),

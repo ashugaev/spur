@@ -3532,7 +3532,11 @@ export async function startServer(
           method,
           path,
           message: `${method} ${path} took ${latencyMs} ms`,
-          details: { durationMs: latencyMs, statusCode: response.statusCode },
+          // A handler that returns after the client left never sent a status.
+          details: {
+            durationMs: latencyMs,
+            ...(response.headersSent ? { statusCode: response.statusCode } : {}),
+          },
         });
       }
       try {
