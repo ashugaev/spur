@@ -74,6 +74,12 @@ function record(overrides: Partial<SessionRecord> = {}) {
   return runningSession({ worktree: false, slots: { links: [task] }, ...overrides });
 }
 const poll = (query: SessionTransitionsQuery = {}) => service.listSessionTransitions(query);
+const binding = () =>
+  (
+    service as unknown as {
+      transitionsBinding: { store: { observedState(id: string): SessionState | undefined } };
+    }
+  ).transitionsBinding;
 function enrichedIds() {
   const internals = service as unknown as {
     enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
@@ -401,6 +407,91 @@ describe("session transitions service", () => {
     expect(next.entries.map((entry) => [entry.kind, entry.from, entry.to])).toEqual([
       ["state", "stopped", "killed"],
     ]);
+  });
+
+  it("does not settle a finalizer rebuild whose classified record differs from the file", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.complete("api-1", { skipPrCheck: true, skipRuntimeTeardown: true });
+    await poll();
+    metadata.writeSession(TEST_DATA_DIR, {
+      ...metadata.readSession(TEST_DATA_DIR, "api-1")!,
+      updatedAt: "2026-03-18T10:05:00.000Z",
+    });
+    const path = join(TEST_DATA_DIR, "sessions", "api", "api-1.json");
+    const completedText = readFileSync(path, "utf8");
+    const internals = service as unknown as {
+      enrichWithClassified(...args: unknown[]): Promise<unknown>;
+      classifySessionRecord(...args: unknown[]): Promise<unknown>;
+    };
+    const enrich = internals.enrichWithClassified.bind(internals);
+    const classify = internals.classifySessionRecord.bind(internals);
+    // Killed before the finalizer read, restored before the rebuild's re-read.
+    vi.spyOn(internals, "enrichWithClassified").mockImplementationOnce(async (...args) => {
+      const result = await enrich(...args);
+      const completed = JSON.parse(completedText) as SessionRecord;
+      writeFileSync(path, JSON.stringify({ ...completed, status: "killed" }));
+      return result;
+    });
+    vi.spyOn(internals, "classifySessionRecord")
+      .mockImplementationOnce(classify)
+      .mockImplementationOnce(async (...args) => {
+        const result = await classify(...args);
+        writeFileSync(path, completedText);
+        return result;
+      });
+    const cursor = (await poll()).nextCursor;
+    expect(binding().store.observedState("api-1")).toBe("killed");
+    const next = await poll({ since: cursor });
+    expect(next.entries.map((entry) => [entry.kind, entry.from, entry.to])).toEqual([
+      ["state", "killed", "stopped"],
+    ]);
+  });
+
+  it("drains running finalizer rebuilds before a failed rebuild fails the poll", async () => {
+    for (const id of ["a", "b"]) {
+      metadata.writeSession(TEST_DATA_DIR, record({ id }));
+      await service.complete(id, { skipPrCheck: true, skipRuntimeTeardown: true });
+    }
+    await poll();
+    for (const id of ["a", "b"])
+      metadata.writeSession(TEST_DATA_DIR, {
+        ...metadata.readSession(TEST_DATA_DIR, id)!,
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+    const internals = service as unknown as {
+      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+    };
+    const enrich = internals.enrichWithClassified.bind(internals);
+    const calls = new Map<string, number>();
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let heldDone = false;
+    vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (record, ...rest) => {
+      const call = (calls.get(record.id) ?? 0) + 1;
+      calls.set(record.id, call);
+      if (call === 1) {
+        const result = await enrich(record, ...rest);
+        // Unsettles the row so finalization rebuilds it.
+        metadata.writeSession(TEST_DATA_DIR, { ...record, updatedAt: "2026-03-18T10:06:00.000Z" });
+        return result;
+      }
+      if (record.id === "a") throw new Error("rebuild failed");
+      await held;
+      heldDone = true;
+      return enrich(record, ...rest);
+    });
+    let settled = false;
+    const pending = poll().finally(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(calls.get("b")).toBe(2));
+    for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+    expect(settled).toBe(false);
+    release?.();
+    await expect(pending).rejects.toThrow("rebuild failed");
+    expect(heldDone).toBe(true);
   });
 
   it("enriches a full refresh pass in parallel under the concurrency cap", async () => {

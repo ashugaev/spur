@@ -12964,6 +12964,8 @@ export class SessionService {
       );
     };
     const gate = createConcurrencyGate(TRANSITIONS_ENRICH_CONCURRENCY);
+    const vanished = (error: unknown, id: string): boolean =>
+      error instanceof SessionResourceNotFoundError && !readSession(binding.dataDir, id);
     for (let pass = 0; pass < LIFECYCLE_REBUILD_PASSES; pass += 1) {
       assertCurrent();
       const records = listSessions(binding.dataDir);
@@ -12990,11 +12992,7 @@ export class SessionService {
           seen.add(record.id);
         } catch (error) {
           assertCurrent();
-          if (
-            error instanceof SessionResourceNotFoundError &&
-            !readSession(binding.dataDir, record.id)
-          )
-            return;
+          if (vanished(error, record.id)) return;
           throw error;
         }
       };
@@ -13014,12 +13012,37 @@ export class SessionService {
       // Rows cover every unsettled record; the listing below catches records that
       // appeared meanwhile, and a settled record whose operation began is unsettled
       // next poll — so finalization rereads rows only instead of a third listing.
-      await this.finalizeLifecycleRows(
-        rows,
-        (record, listing) =>
-          gate.run(() => this.enrichWithClassified(record, accounts, listing, assertCurrent)),
-        { includePending: false, onExhausted: "refuse" },
-      );
+      // A rebuild replaces a row's view and source, so its classified record becomes
+      // the row's input. On a failed rebuild, queued ones stop and running ones
+      // settle before the error leaves this refresh.
+      const rebuiltInputs = new Map<string, SessionRecord>();
+      const rebuilds: Promise<unknown>[] = [];
+      let rebuildFailed = false;
+      try {
+        await this.finalizeLifecycleRows(
+          rows,
+          (record, listing) => {
+            const rebuild = gate.run(async () => {
+              if (rebuildFailed) throw new Error("Transitions refresh rebuild cancelled");
+              rebuiltInputs.set(record.id, record);
+              try {
+                return await this.enrichWithClassified(record, accounts, listing, assertCurrent);
+              } catch (error) {
+                // finalizeLifecycleRows drops a vanished record; anything else fails it.
+                if (!vanished(error, record.id)) rebuildFailed = true;
+                throw error;
+              }
+            });
+            rebuilds.push(rebuild);
+            return rebuild;
+          },
+          { includePending: false, onExhausted: "refuse" },
+        );
+      } catch (error) {
+        await Promise.allSettled(rebuilds);
+        throw error;
+      }
+      for (const row of rows) row.input = rebuiltInputs.get(row.view.id) ?? row.input;
       assertCurrent();
       const current = listSessions(binding.dataDir);
       if (current.every((record) => seen.has(record.id))) {
