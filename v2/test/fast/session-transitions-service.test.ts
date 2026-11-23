@@ -417,7 +417,7 @@ describe("session transitions service", () => {
     expect(enrich.ids).toEqual([]);
   });
 
-  it("keeps cursor-poll cost flat from N to 10N retained completed records", async () => {
+  it("keeps cursor-poll enrichments and listings constant from N to 10N retained completed records", async () => {
     metadata.writeSession(TEST_DATA_DIR, record({ id: "live" }));
     const measure = async (count: number) => {
       for (let index = 0; index < count; index += 1)
@@ -428,7 +428,11 @@ describe("session transitions service", () => {
       let page = await poll({ limit: 1000 });
       while (page.hasMore) page = await poll({ since: page.nextCursor, limit: 1000 });
       const head = page.nextCursor;
+      const listingStartedAt = realClock();
+      metadata.listSessions(TEST_DATA_DIR);
+      const listingMs = Number(realClock() - listingStartedAt) / 1e6;
       const enrich = enrichedIds();
+      listSessionsMock.mockClear();
       const samples: number[] = [];
       for (let run = 0; run < 5; run += 1) {
         const startedAt = realClock();
@@ -437,17 +441,27 @@ describe("session transitions service", () => {
       }
       enrich.restore();
       samples.sort((left, right) => left - right);
-      return { median: samples[2] as number, enrichments: enrich.ids.length };
+      return {
+        median: samples[2] as number,
+        listingMs,
+        enrichments: enrich.ids.length,
+        listings: listSessionsMock.mock.calls.length,
+      };
     };
     const small = await measure(200);
     const large = await measure(1800);
-    console.info(
-      `transitions cursor poll: N=200 completed median ${small.median.toFixed(1)} ms, ` +
-        `${small.enrichments} enrichments; 10N=2000 completed median ${large.median.toFixed(1)} ms, ` +
-        `${large.enrichments} enrichments (5 polls each)`,
-    );
-    expect(small.enrichments).toBe(5);
-    expect(large.enrichments).toBe(5);
+    for (const [label, result] of [
+      ["N=200", small],
+      ["10N=2000", large],
+    ] as const)
+      console.info(
+        `transitions cursor poll ${label} completed: median ${result.median.toFixed(1)} ms, ` +
+          `one listing ${result.listingMs.toFixed(1)} ms, ${result.enrichments} enrichments, ` +
+          `${result.listings} listings (5 polls)`,
+      );
+    // Only the live record is enriched; each poll lists the session store twice.
+    expect(small).toMatchObject({ enrichments: 5, listings: 10 });
+    expect(large).toMatchObject({ enrichments: 5, listings: 10 });
   }, 120_000);
 
   it("passes a resolved Claude account list, not a promise, to classification during a strict refresh", async () => {

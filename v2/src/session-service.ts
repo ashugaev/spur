@@ -13006,10 +13006,13 @@ export class SessionService {
         ),
       );
       if (failures.length > 0) throw failures[0];
+      // Rows cover every unsettled record; the listing below catches records that
+      // appeared meanwhile, and a settled record whose operation began is unsettled
+      // next poll — so finalization rereads rows only instead of a third listing.
       await this.finalizeLifecycleRows(
         rows,
         (record, listing) => this.enrichWithClassified(record, accounts, listing, assertCurrent),
-        { includePending: true, onExhausted: "refuse" },
+        { includePending: false, onExhausted: "refuse" },
       );
       assertCurrent();
       const current = listSessions(binding.dataDir);
