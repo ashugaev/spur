@@ -46,6 +46,7 @@ import {
   appendEventLog,
   flushEventLogCollapse,
   logSpurEvent,
+  logSpurEventUncollapsed,
   setEventLogConfig,
   type SpurLogEntry,
   type SpurLogLevel,
@@ -416,6 +417,8 @@ const DEFAULT_LOGGER: ServiceLogger = {
   warn: writeStderr,
 };
 const SHUTDOWN_GRACE_MS = 5_000;
+// A request handled for longer than this writes one http.request.slow event.
+const HTTP_REQUEST_SLOW_MS = 1_000;
 const AGENT_STATUS_SAMPLE_MS = 5_000;
 
 // Total budget for a shutdown, measured from the signal to the last teardown step.
@@ -3521,6 +3524,17 @@ export async function startServer(
       }
       failRequest(response, 500, message, { method, path });
     } finally {
+      const latencyMs = Math.round(performance.now() - startedAt);
+      if (method && path && latencyMs > HTTP_REQUEST_SLOW_MS) {
+        logSpurEventUncollapsed(service.config.dataDir, {
+          event: "http.request.slow",
+          level: "warn",
+          method,
+          path,
+          message: `${method} ${path} took ${latencyMs} ms`,
+          details: { durationMs: latencyMs, statusCode: response.statusCode },
+        });
+      }
       try {
         if (method && path) {
           const record = buildUserActionRecord({
@@ -3530,7 +3544,7 @@ export async function startServer(
             body: readParsedBody(request),
             statusCode: response.statusCode,
             ...(errorMessage ? { error: errorMessage } : {}),
-            latencyMs: Math.round(performance.now() - startedAt),
+            latencyMs,
             ...(typeof request.headers["x-spur-caller-session"] === "string"
               ? { callerSession: request.headers["x-spur-caller-session"] }
               : {}),

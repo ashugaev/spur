@@ -74,6 +74,7 @@ Generated Telegram launch instructions require source `chatId<0` and matching `t
 ## Event log retention
 
 `events.jsonl`, `user-actions.jsonl` under `dataDir`, sharded per session. `eventLog`/`userActionLog` cap+rotate via `hotBytes`/`shardHotBytes`/`retainArchives`; `eventLog.collapseWindowMs` (default `60000`) collapses repeated warn/error. Instance config only.
+`http.request.slow` (warn, never collapsed): one per daemon HTTP request slower than `HTTP_REQUEST_SLOW_MS`; `method`, `path`, `details.{durationMs,statusCode}` — `v2/src/server.ts`.
 
 ## Field reference
 
