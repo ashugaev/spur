@@ -12948,7 +12948,7 @@ export class SessionService {
     binding.store.flushPending();
     const accounts = await this.computeClaudeAccountsView();
     const seen = new Set<string>();
-    const rows: TransitionsRefreshRow[] = [];
+    let rows: TransitionsRefreshRow[] = [];
     // A settled terminal record re-derives the status and state it already published:
     // skip it while its file, lifecycle revision and feed observation are unchanged.
     // A settled (succeeded/failed) operation receipt stays on the record after
@@ -13013,20 +13013,28 @@ export class SessionService {
       // appeared meanwhile, and a settled record whose operation began is unsettled
       // next poll — so finalization rereads rows only instead of a third listing.
       // A rebuild replaces a row's view and source, so its classified record becomes
-      // the row's input. On a failed rebuild, queued ones stop and running ones
-      // settle before the error leaves this refresh.
+      // the row's input; a row finalization dropped keeps no settle basis and leaves
+      // this refresh. On a failed rebuild, queued ones stop and running ones settle
+      // before the error leaves this refresh.
       const rebuiltInputs = new Map<string, SessionRecord>();
       const rebuilds: Promise<unknown>[] = [];
       let rebuildFailed = false;
+      let finalized: { id: string }[];
       try {
-        await this.finalizeLifecycleRows(
+        finalized = await this.finalizeLifecycleRows(
           rows,
           (record, listing) => {
             const rebuild = gate.run(async () => {
               if (rebuildFailed) throw new Error("Transitions refresh rebuild cancelled");
-              rebuiltInputs.set(record.id, record);
               try {
-                return await this.enrichWithClassified(record, accounts, listing, assertCurrent);
+                const rebuilt = await this.enrichWithClassified(
+                  record,
+                  accounts,
+                  listing,
+                  assertCurrent,
+                );
+                rebuiltInputs.set(record.id, record);
+                return rebuilt;
               } catch (error) {
                 // finalizeLifecycleRows drops a vanished record; anything else fails it.
                 if (!vanished(error, record.id)) rebuildFailed = true;
@@ -13042,6 +13050,8 @@ export class SessionService {
         await Promise.allSettled(rebuilds);
         throw error;
       }
+      const live = new Set(finalized.map((view) => view.id));
+      rows = rows.filter((row) => live.has(row.view.id));
       for (const row of rows) row.input = rebuiltInputs.get(row.view.id) ?? row.input;
       assertCurrent();
       const current = listSessions(binding.dataDir);

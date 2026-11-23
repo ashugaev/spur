@@ -31,6 +31,7 @@ import type {
 let metadata: typeof Metadata;
 let service: SessionService;
 let config: AppConfig;
+let serviceModule: Awaited<ReturnType<typeof loadSessionServiceModule>>;
 const task = { label: "task", url: "https://example.com/task/1" };
 // Captured before the harness installs fake timers, which also fake hrtime.
 const realClock = process.hrtime.bigint;
@@ -99,6 +100,7 @@ beforeEach(async () => {
   const { tags: _tags, ...rawConfig } = baseConfig();
   config = parseConfigText("/tmp/spur.yaml", JSON.stringify(rawConfig));
   const module = await loadSessionServiceModule();
+  serviceModule = module;
   metadata = sessionMetadataModule();
   readSessionMock.mockImplementation(metadata.readSession);
   writeSessionMock.mockImplementation(metadata.writeSession);
@@ -447,6 +449,58 @@ describe("session transitions service", () => {
     ]);
   });
 
+  it("does not settle a row whose finalizer rebuild was dropped", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.complete("api-1", { skipPrCheck: true, skipRuntimeTeardown: true });
+    await poll();
+    const path = join(TEST_DATA_DIR, "sessions", "api", "api-1.json");
+    const completedText = readFileSync(path, "utf8");
+    const completed = JSON.parse(completedText) as SessionRecord;
+    writeFileSync(path, JSON.stringify({ ...completed, status: "killed" }));
+    const internals = service as unknown as {
+      enrichWithClassified(...args: unknown[]): Promise<unknown>;
+      classifySessionRecord(...args: unknown[]): Promise<unknown>;
+      displaySlotsForSession(...args: unknown[]): unknown;
+    };
+    const enrich = internals.enrichWithClassified.bind(internals);
+    const classify = internals.classifySessionRecord.bind(internals);
+    const slots = internals.displaySlotsForSession.bind(internals);
+    let linksMoved = false;
+    vi.spyOn(internals, "displaySlotsForSession").mockImplementation((...args) =>
+      linksMoved
+        ? { links: [{ label: "task", url: "https://example.com/moved" }] }
+        : slots(...args),
+    );
+    // Classified killed, re-read completed: view and source disagree.
+    vi.spyOn(internals, "classifySessionRecord").mockImplementationOnce(async (...args) => {
+      const result = await classify(...args);
+      writeFileSync(path, completedText);
+      return result;
+    });
+    vi.spyOn(internals, "enrichWithClassified")
+      .mockImplementationOnce(async (...args) => {
+        const result = await enrich(...args);
+        linksMoved = true;
+        return result;
+      })
+      .mockImplementationOnce(async () => {
+        // The rebuild finds the record gone; it is back for the final listing.
+        rmSync(path);
+        listSessionsMock.mockImplementationOnce((dataDir: string) => {
+          writeFileSync(path, completedText);
+          return metadata.listSessions(dataDir);
+        });
+        throw new serviceModule.SessionResourceNotFoundError("Session not found: api-1");
+      });
+    const raced = await poll();
+    linksMoved = false;
+    expect(binding().store.observedState("api-1")).toBe("killed");
+    const next = await poll({ since: raced.nextCursor });
+    expect(next.entries.map((entry) => [entry.kind, entry.from, entry.to])).toEqual([
+      ["state", "killed", "stopped"],
+    ]);
+  });
+
   it("drains running finalizer rebuilds before a failed rebuild fails the poll", async () => {
     for (const id of ["a", "b"]) {
       metadata.writeSession(TEST_DATA_DIR, record({ id }));
@@ -483,14 +537,21 @@ describe("session transitions service", () => {
       return enrich(record, ...rest);
     });
     let settled = false;
-    const pending = poll().finally(() => {
+    const outcome = poll().then(
+      () => "resolved",
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    void outcome.finally(() => {
       settled = true;
     });
-    await vi.waitFor(() => expect(calls.get("b")).toBe(2));
-    for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
-    expect(settled).toBe(false);
-    release?.();
-    await expect(pending).rejects.toThrow("rebuild failed");
+    try {
+      await vi.waitFor(() => expect(calls.get("b")).toBe(2));
+      for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+      expect(settled).toBe(false);
+    } finally {
+      release?.();
+    }
+    expect(await outcome).toBe("rebuild failed");
     expect(heldDone).toBe(true);
   });
 
