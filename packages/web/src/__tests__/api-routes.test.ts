@@ -191,7 +191,7 @@ describe("Spur web API routes", () => {
 
   // ── GET /api/sessions ──────────────────────────────────────────────────
 
-  it("GET /api/sessions returns all sessions when no project filter", async () => {
+  it("GET /api/sessions returns parseable dashboard JSON when the browser accepts gzip", async () => {
     mockedSpurRequest.mockResolvedValueOnce(
       new Response(
         JSON.stringify([
@@ -227,7 +227,11 @@ describe("Spur web API routes", () => {
         },
       ]);
 
-    const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
+    const response = await listSessions(
+      new NextRequest("http://localhost:3000/api/sessions", {
+        headers: { "accept-encoding": "gzip, deflate, br" },
+      }),
+    );
     const payload = (await response.json()) as {
       sessions: unknown[];
       backlog: unknown[];
@@ -235,6 +239,7 @@ describe("Spur web API routes", () => {
     };
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("content-encoding")).toBeNull();
     expect(payload.sessions).toHaveLength(2);
     expect(payload.backlog).toHaveLength(1);
     expect(payload.daemonAlive).toBe(true);
