@@ -758,6 +758,8 @@ import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./up
 
 // Concurrent freshness reads for one by-link snapshot request.
 const SNAPSHOT_READ_CONCURRENCY = 4;
+// Concurrent session enrichments in one transitions-feed refresh pass.
+const TRANSITIONS_ENRICH_CONCURRENCY = 4;
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const STATUS_DETECTION_ERROR_PREFIX = "Session status detection failed: ";
 const REPORTING_DETECTION_ERROR_PREFIX = STATUS_DETECTION_ERROR_PREFIX + "Resource readout ";
@@ -4227,6 +4229,9 @@ export class SessionService {
         dataDir: string;
         store: SessionTransitions;
         unregister: () => void;
+        // Terminal records a strict refresh fully observed, keyed by id. `record` is
+        // the session-file cache object, so identity means the file is unchanged.
+        settled: Map<string, { record: SessionRecord; revision: number; state: SessionState }>;
       }
     | undefined;
   private transitionsRefresh:
@@ -6695,7 +6700,12 @@ export class SessionService {
       this.dashboardCache.clear();
       this.dashboardEnrichedRecords.clear();
       const store = new SessionTransitions(dataDir);
-      const binding = { dataDir, store, unregister: () => {} };
+      const binding: NonNullable<SessionService["transitionsBinding"]> = {
+        dataDir,
+        store,
+        unregister: () => {},
+        settled: new Map(),
+      };
       binding.unregister = observeSessionWrites(dataDir, (record) => {
         if (this.transitionsBinding !== binding) return;
         const links = this.displaySlotsForSession(record)?.links ?? [];
@@ -12936,12 +12946,32 @@ export class SessionService {
       source: SessionRecord | null;
       receipt: SessionLifecycleSnapshot;
     }[] = [];
+    // A settled terminal record re-derives the status and state it already published:
+    // skip it while its file, lifecycle revision and feed observation are unchanged.
+    const unchanged = (record: SessionRecord): boolean => {
+      const settled = binding.settled.get(record.id);
+      if (settled?.record !== record) return false;
+      const lifecycle = this.lifecycle.snapshot(record.id);
+      return (
+        lifecycle.operation === null &&
+        lifecycle.revision === settled.revision &&
+        binding.store.observedState(record.id) === settled.state
+      );
+    };
+    const gate = createConcurrencyGate(TRANSITIONS_ENRICH_CONCURRENCY);
     for (let pass = 0; pass < LIFECYCLE_REBUILD_PASSES; pass += 1) {
       assertCurrent();
       const records = listSessions(binding.dataDir);
+      const stale: SessionRecord[] = [];
       for (const record of records) {
+        if (unchanged(record)) {
+          seen.add(record.id);
+          continue;
+        }
         binding.store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
-        if (seen.has(record.id)) continue;
+        if (!seen.has(record.id)) stale.push(record);
+      }
+      const enrich = async (record: SessionRecord): Promise<void> => {
         const receipt = this.lifecycle.snapshot(record.id);
         try {
           const { view, source } = await this.enrichWithClassified(
@@ -12959,10 +12989,23 @@ export class SessionService {
             error instanceof SessionResourceNotFoundError &&
             !readSession(binding.dataDir, record.id)
           )
-            continue;
+            return;
           throw error;
         }
-      }
+      };
+      // The first failure stops queued enrichments; in-flight ones settle before it is thrown.
+      const failures: unknown[] = [];
+      await Promise.all(
+        stale.map((record) =>
+          gate.run(async () => {
+            if (failures.length > 0) return;
+            await enrich(record).catch((error: unknown) => {
+              failures.push(error);
+            });
+          }),
+        ),
+      );
+      if (failures.length > 0) throw failures[0];
       await this.finalizeLifecycleRows(
         rows,
         (record, listing) => this.enrichWithClassified(record, accounts, listing, assertCurrent),
@@ -12973,11 +13016,52 @@ export class SessionService {
       if (current.every((record) => seen.has(record.id))) {
         // No await between final reconciliation and caller's high-water snapshot.
         for (const record of current)
-          binding.store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
+          if (!unchanged(record))
+            binding.store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
+        this.settleTransitionRecords(binding, rows, current);
         return;
       }
     }
     throw new Error("Session set changed during transitions refresh; retry poll");
+  }
+
+  // Settles a terminal record only when this refresh enriched exactly the file now on
+  // disk and the feed holds the state that enrichment produced. Rate-limit markers
+  // stay unsettled: updateStateHistory still clears them on a later pass.
+  private settleTransitionRecords(
+    binding: NonNullable<SessionService["transitionsBinding"]>,
+    rows: readonly {
+      view: Omit<SessionListItemView, "lifecycle">;
+      source: SessionRecord | null;
+      receipt: SessionLifecycleSnapshot;
+    }[],
+    current: readonly SessionRecord[],
+  ): void {
+    const enriched = new Map(rows.map((row) => [row.view.id, row]));
+    const settled: NonNullable<SessionService["transitionsBinding"]>["settled"] = new Map();
+    for (const record of current) {
+      const row = enriched.get(record.id);
+      if (!row) {
+        const kept = binding.settled.get(record.id);
+        if (kept?.record === record) settled.set(record.id, kept);
+        continue;
+      }
+      const lifecycle = this.lifecycle.snapshot(record.id);
+      const state = binding.store.observedState(record.id);
+      if (
+        isTerminalSessionStatus(record.status) &&
+        !record.rateLimitedAt &&
+        !record.rateLimitResetAt &&
+        lifecycle.operation === null &&
+        lifecycle.revision === row.receipt.revision &&
+        state !== undefined &&
+        state === row.view.state &&
+        row.source !== null &&
+        isDeepStrictEqual(record, row.source)
+      )
+        settled.set(record.id, { record, revision: lifecycle.revision, state });
+    }
+    binding.settled = settled;
   }
 
   getSessionIdentity(sessionId: string): Pick<SessionRecord, "id" | "agent"> {

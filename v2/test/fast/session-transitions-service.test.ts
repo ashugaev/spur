@@ -14,7 +14,7 @@ import {
   sessionMetadataModule,
   probeWorkspaceMock,
 } from "../helpers/session-service-harness.js";
-import { appendFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { appendFileSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import type * as Fs from "node:fs";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,6 +32,8 @@ let metadata: typeof Metadata;
 let service: SessionService;
 let config: AppConfig;
 const task = { label: "task", url: "https://example.com/task/1" };
+// Captured before the harness installs fake timers, which also fake hrtime.
+const realClock = process.hrtime.bigint;
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof Fs>();
@@ -72,6 +74,18 @@ function record(overrides: Partial<SessionRecord> = {}) {
   return runningSession({ worktree: false, slots: { links: [task] }, ...overrides });
 }
 const poll = (query: SessionTransitionsQuery = {}) => service.listSessionTransitions(query);
+function enrichedIds() {
+  const internals = service as unknown as {
+    enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+  };
+  const original = internals.enrichWithClassified.bind(internals);
+  const ids: string[] = [];
+  const spy = vi.spyOn(internals, "enrichWithClassified").mockImplementation((record, ...rest) => {
+    ids.push(record.id);
+    return original(record, ...rest);
+  });
+  return { ids, restore: () => spy.mockRestore() };
+}
 
 beforeEach(async () => {
   await resetSessionServiceHarness(() => []);
@@ -328,6 +342,114 @@ describe("session transitions service", () => {
       }
     },
   );
+
+  it("skips enrichment of unchanged terminal records on a cursor poll and keeps live ones", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "live" }));
+    for (const [id, status] of [
+      ["done", "completed"],
+      ["gone", "killed"],
+    ] as const)
+      metadata.writeSession(TEST_DATA_DIR, record({ id, status }));
+    const enrich = enrichedIds();
+    const first = await poll();
+    expect(new Set(enrich.ids)).toEqual(new Set(["live", "done", "gone"]));
+    enrich.ids.length = 0;
+    const page = await poll({ since: first.nextCursor });
+    expect(page).toEqual({ entries: [], nextCursor: first.nextCursor, hasMore: false });
+    expect(enrich.ids).toEqual(["live"]);
+  });
+
+  it("enriches a full refresh pass in parallel under the concurrency cap", async () => {
+    for (let index = 0; index < 10; index += 1)
+      metadata.writeSession(TEST_DATA_DIR, record({ id: `done-${index}`, status: "completed" }));
+    const internals = service as unknown as {
+      enrichWithClassified(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.enrichWithClassified.bind(internals);
+    let active = 0;
+    let peak = 0;
+    vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (...args) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      try {
+        return await original(...args);
+      } finally {
+        active -= 1;
+      }
+    });
+    await poll();
+    expect(peak).toBe(4);
+  });
+
+  it("re-enriches a settled terminal record whose file changes out of band after completion", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
+    const first = await poll();
+    expect(
+      first.entries.filter((entry) => entry.kind === "state").map((entry) => entry.to),
+    ).toEqual(["stopped"]);
+    const enrich = enrichedIds();
+    expect((await poll({ since: first.nextCursor })).entries).toEqual([]);
+    expect(enrich.ids).toEqual([]);
+    // Bypasses writeSession and its transitions observer, as a manual edit does.
+    const path = join(TEST_DATA_DIR, "sessions", "api", "api-1.json");
+    const completed = JSON.parse(readFileSync(path, "utf8")) as SessionRecord;
+    writeFileSync(path, JSON.stringify({ ...completed, status: "running" }));
+    const page = await poll({ since: first.nextCursor });
+    expect(enrich.ids).toEqual(["api-1"]);
+    expect(page.entries.map((entry) => [entry.kind, entry.from, entry.to])).toEqual([
+      ["status", "completed", "running"],
+      ["state", "stopped", "working"],
+    ]);
+  });
+
+  it("re-enriches a settled terminal record after a record write", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    const cursor = (await poll()).nextCursor;
+    const enrich = enrichedIds();
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({ status: "killed", updatedAt: "2026-03-18T10:05:00.000Z" }),
+    );
+    await poll({ since: cursor });
+    expect(enrich.ids).toEqual(["api-1"]);
+    enrich.ids.length = 0;
+    await poll({ since: cursor });
+    expect(enrich.ids).toEqual([]);
+  });
+
+  it("keeps cursor-poll cost flat from N to 10N retained completed records", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "live" }));
+    const measure = async (count: number) => {
+      for (let index = 0; index < count; index += 1)
+        metadata.writeSession(
+          TEST_DATA_DIR,
+          record({ id: `done-${count}-${index}`, status: "completed" }),
+        );
+      let page = await poll({ limit: 1000 });
+      while (page.hasMore) page = await poll({ since: page.nextCursor, limit: 1000 });
+      const head = page.nextCursor;
+      const enrich = enrichedIds();
+      const samples: number[] = [];
+      for (let run = 0; run < 5; run += 1) {
+        const startedAt = realClock();
+        await poll({ since: head });
+        samples.push(Number(realClock() - startedAt) / 1e6);
+      }
+      enrich.restore();
+      samples.sort((left, right) => left - right);
+      return { median: samples[2] as number, enrichments: enrich.ids.length };
+    };
+    const small = await measure(200);
+    const large = await measure(1800);
+    console.info(
+      `transitions cursor poll: N=200 completed median ${small.median.toFixed(1)} ms, ` +
+        `${small.enrichments} enrichments; 10N=2000 completed median ${large.median.toFixed(1)} ms, ` +
+        `${large.enrichments} enrichments (5 polls each)`,
+    );
+    expect(small.enrichments).toBe(5);
+    expect(large.enrichments).toBe(5);
+  }, 120_000);
+
   it("passes a resolved Claude account list, not a promise, to classification during a strict refresh", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     const accounts = [{ id: "acct-1", authenticated: true }];
