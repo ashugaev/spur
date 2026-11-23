@@ -3525,19 +3525,22 @@ export async function startServer(
       failRequest(response, 500, message, { method, path });
     } finally {
       const latencyMs = Math.round(performance.now() - startedAt);
-      if (method && path && latencyMs > HTTP_REQUEST_SLOW_MS) {
-        logSpurEventUncollapsed(service.config.dataDir, {
-          event: "http.request.slow",
-          level: "warn",
-          method,
-          path,
-          message: `${method} ${path} took ${latencyMs} ms`,
-          // A handler that returns after the client left never sent a status.
-          details: {
-            durationMs: latencyMs,
-            ...(response.headersSent ? { statusCode: response.statusCode } : {}),
-          },
-        });
+      // Kept as `method && path` alone: the daemon-contract route walker reads any
+      // other condition naming `method` as a route method predicate.
+      if (method && path) {
+        if (latencyMs > HTTP_REQUEST_SLOW_MS)
+          logSpurEventUncollapsed(service.config.dataDir, {
+            event: "http.request.slow",
+            level: "warn",
+            method,
+            path,
+            message: `${method} ${path} took ${latencyMs} ms`,
+            // A handler that returns after the client left never sent a status.
+            details: {
+              durationMs: latencyMs,
+              ...(response.headersSent ? { statusCode: response.statusCode } : {}),
+            },
+          });
       }
       try {
         if (method && path) {
