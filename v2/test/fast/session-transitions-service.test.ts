@@ -359,6 +359,50 @@ describe("session transitions service", () => {
     expect(enrich.ids).toEqual(["live"]);
   });
 
+  it("settles a record completed through complete() despite its succeeded lifecycle receipt", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await poll();
+    await service.complete("api-1", { skipPrCheck: true, skipRuntimeTeardown: true });
+    expect(
+      (
+        service as unknown as {
+          lifecycle: { snapshot(id: string): { operation: { phase: string } | null } };
+        }
+      ).lifecycle.snapshot("api-1").operation?.phase,
+    ).toBe("succeeded");
+    const completed = await poll();
+    const enrich = enrichedIds();
+    expect(await poll({ since: completed.nextCursor })).toMatchObject({ entries: [] });
+    expect(enrich.ids).toEqual([]);
+  });
+
+  it("does not settle a terminal record edited out of band between classification and re-read", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
+    const first = await poll();
+    const path = join(TEST_DATA_DIR, "sessions", "api", "api-1.json");
+    // Unsettle it with an ordinary write, then race the next classification.
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({ status: "completed", updatedAt: "2026-03-18T10:05:00.000Z" }),
+    );
+    const internals = service as unknown as {
+      classifySessionRecord(...args: unknown[]): Promise<unknown>;
+    };
+    const classify = internals.classifySessionRecord.bind(internals);
+    vi.spyOn(internals, "classifySessionRecord").mockImplementationOnce(async (...args) => {
+      const result = await classify(...args);
+      const completed = JSON.parse(readFileSync(path, "utf8")) as SessionRecord;
+      writeFileSync(path, JSON.stringify({ ...completed, status: "killed" }));
+      return result;
+    });
+    const raced = await poll({ since: first.nextCursor });
+    expect(raced.entries.map((entry) => [entry.kind, entry.to])).toEqual([["status", "killed"]]);
+    const next = await poll({ since: raced.nextCursor });
+    expect(next.entries.map((entry) => [entry.kind, entry.from, entry.to])).toEqual([
+      ["state", "stopped", "killed"],
+    ]);
+  });
+
   it("enriches a full refresh pass in parallel under the concurrency cap", async () => {
     for (let index = 0; index < 10; index += 1)
       metadata.writeSession(TEST_DATA_DIR, record({ id: `done-${index}`, status: "completed" }));

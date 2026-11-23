@@ -760,6 +760,13 @@ import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./up
 const SNAPSHOT_READ_CONCURRENCY = 4;
 // Concurrent session enrichments in one transitions-feed refresh pass.
 const TRANSITIONS_ENRICH_CONCURRENCY = 4;
+// `input` is the record classification read; `source` the record re-read after it.
+type TransitionsRefreshRow = {
+  view: Omit<SessionListItemView, "lifecycle">;
+  source: SessionRecord | null;
+  receipt: SessionLifecycleSnapshot;
+  input: SessionRecord;
+};
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const STATUS_DETECTION_ERROR_PREFIX = "Session status detection failed: ";
 const REPORTING_DETECTION_ERROR_PREFIX = STATUS_DETECTION_ERROR_PREFIX + "Resource readout ";
@@ -12941,19 +12948,17 @@ export class SessionService {
     binding.store.flushPending();
     const accounts = await this.computeClaudeAccountsView();
     const seen = new Set<string>();
-    const rows: {
-      view: Omit<SessionListItemView, "lifecycle">;
-      source: SessionRecord | null;
-      receipt: SessionLifecycleSnapshot;
-    }[] = [];
+    const rows: TransitionsRefreshRow[] = [];
     // A settled terminal record re-derives the status and state it already published:
     // skip it while its file, lifecycle revision and feed observation are unchanged.
+    // A settled (succeeded/failed) operation receipt stays on the record after
+    // complete() or kill(); only a pending one can still move it.
     const unchanged = (record: SessionRecord): boolean => {
       const settled = binding.settled.get(record.id);
       if (settled?.record !== record) return false;
       const lifecycle = this.lifecycle.snapshot(record.id);
       return (
-        lifecycle.operation === null &&
+        lifecycle.operation?.phase !== "pending" &&
         lifecycle.revision === settled.revision &&
         binding.store.observedState(record.id) === settled.state
       );
@@ -12981,7 +12986,7 @@ export class SessionService {
             assertCurrent,
           );
           assertCurrent();
-          rows.push({ view, source, receipt });
+          rows.push({ view, source, receipt, input: record });
           seen.add(record.id);
         } catch (error) {
           assertCurrent();
@@ -13011,7 +13016,8 @@ export class SessionService {
       // next poll — so finalization rereads rows only instead of a third listing.
       await this.finalizeLifecycleRows(
         rows,
-        (record, listing) => this.enrichWithClassified(record, accounts, listing, assertCurrent),
+        (record, listing) =>
+          gate.run(() => this.enrichWithClassified(record, accounts, listing, assertCurrent)),
         { includePending: false, onExhausted: "refuse" },
       );
       assertCurrent();
@@ -13028,16 +13034,13 @@ export class SessionService {
     throw new Error("Session set changed during transitions refresh; retry poll");
   }
 
-  // Settles a terminal record only when this refresh enriched exactly the file now on
-  // disk and the feed holds the state that enrichment produced. Rate-limit markers
-  // stay unsettled: updateStateHistory still clears them on a later pass.
+  // Settles a terminal record only when this refresh classified exactly the file now
+  // on disk (input and re-read source both equal it) and the feed holds the state
+  // that classification produced. Rate-limit markers stay unsettled:
+  // updateStateHistory still clears them on a later pass.
   private settleTransitionRecords(
     binding: NonNullable<SessionService["transitionsBinding"]>,
-    rows: readonly {
-      view: Omit<SessionListItemView, "lifecycle">;
-      source: SessionRecord | null;
-      receipt: SessionLifecycleSnapshot;
-    }[],
+    rows: readonly TransitionsRefreshRow[],
     current: readonly SessionRecord[],
   ): void {
     const enriched = new Map(rows.map((row) => [row.view.id, row]));
@@ -13055,12 +13058,13 @@ export class SessionService {
         isTerminalSessionStatus(record.status) &&
         !record.rateLimitedAt &&
         !record.rateLimitResetAt &&
-        lifecycle.operation === null &&
+        lifecycle.operation?.phase !== "pending" &&
         lifecycle.revision === row.receipt.revision &&
         state !== undefined &&
         state === row.view.state &&
         row.source !== null &&
-        isDeepStrictEqual(record, row.source)
+        isDeepStrictEqual(record, row.source) &&
+        isDeepStrictEqual(record, row.input)
       )
         settled.set(record.id, { record, revision: lifecycle.revision, state });
     }
