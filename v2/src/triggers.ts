@@ -682,7 +682,9 @@ function sendWindowMs(batch: SendBatch): number {
 function isDeliverableState(session: SessionView, windowMs: number): boolean {
   return (
     session.state === "stale" ||
-    ((session.state === "waiting" || session.state === "completed") &&
+    ((session.state === "waiting" ||
+      session.state === "completed" ||
+      (session.state === "needs_input" && session.stateSource === "task_status")) &&
       isIdleEnoughToReceive(session.lastActivityAt, windowMs))
   );
 }

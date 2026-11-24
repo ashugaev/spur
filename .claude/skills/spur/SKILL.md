@@ -21,7 +21,7 @@ INTERFACES
   Session variables: `env | grep '^SPUR_'`.
   Agent launch identity contract: `docs/commands.md#session-tools-and-environment`.
   Manual-wake response fields: `docs/daemon-api.md`.
-  Task outcomes, session-preserving completion: `docs/commands.md#todo-snapshot`.
+  Task outcomes, input blocking, session-preserving completion: `docs/commands.md#todo-snapshot`.
   Closeout archive (`complete` only, never `kill`; one version per complete), `spur closeout show|get|list --link`: `docs/commands.md#todo-snapshot`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
   Trigger auto-close policy and deprecated config alias: `docs/configuration.md#field-reference`.
