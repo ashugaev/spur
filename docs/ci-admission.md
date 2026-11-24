@@ -16,7 +16,7 @@ Observed PR base and live default-branch head remain separate; admission grants 
 
 Ready pull requests enter the queue immediately.
 Ordinary pull requests wait only while a verified ready pull request has unfinished current-attempt CI work.
-Main, tags, release publishing, and the approval writer receive no admission hold.
+Main, tags, and release publishing receive no admission hold.
 
 ## Limits
 

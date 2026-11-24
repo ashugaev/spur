@@ -83,23 +83,9 @@ PUBLICATION
   Notify matching PR owner only on verdict/attempt/head change; include receipt and bounded aggregate-read request under existing user authorization.
   Resolve owner via Spur PR binding, excluding own session; absent owner/send failure blocks notification only, never completed verdict/receipt or code review.
 
-OWNER GATE
+MERGE READINESS
 
-  Gate merge/release/deploy readiness only; continue authorized fixes/review responses before CI passes. Missing affirmation/public transport holds aggregate action, not independent inspection/findings.
-  Approval/completion wakes resume explicit user-authorized review workflow; absent bounded query authority blocks aggregate reads.
-  Determine required lanes/designated sessions from task/fleet, never successful records alone.
-  Persist aggregate invocation keyed by H/B/digest/lane attempts; send one affirmation request per lane, no automatic retries.
-  Correlated reply resumes same invocation; never starts new aggregate gate or emits completion notification.
-  Lane replies once with invocation/attempt/H/B/digest and current receipt status; unchanged evidence needs no rerun/publication.
-  Changed lane state starts review attempt and invalidates prior affirmation; absent reply leaves invocation BLOCKED.
-  Read shared receipts after each wake/restart and complete paginated GitHub review history, branch-required reviews/checks and blocking threads.
-  Require latest successful record per required lane plus current effective verdict per login; verify receipt/review identity and SHA.
-  Missing/unreadable/PENDING/BLOCKED/unresolved receipt, absent affirmation or newer blocker defeats historical passes, even at unchanged H/B.
-  Reject stale/dismissed/untrusted evidence, pending/failing required checks and unresolved blocking threads.
-  Same-login lanes supply separate evidence records, one GitHub voter; never satisfy multiple-voter rules by lane count.
-  Target automated flow requires current native APPROVED from two distinct designated eligible non-author identities, code and browser/manual; generic two votes fail.
-  Recheck H/B and gate evidence at authorized action boundary; changed pair reruns affected gate.
-  Perform gated action only after gate passes; human merge default, conditional authority only through caller-trusted agent-protocol.md.
-  Before/after reads detect observed races, never atomicity; recurrence provides eventual review, no immediate push invalidation.
-  Use `spur review-gate evaluate` for authenticated public aggregation; trusted Actions writer requires activation proof before auto-merge.
-  Failed public transport before commit leaves historical remote state unchanged; hold aggregate action, never claim remote revocation.
+  Gate merge/release/deploy readiness only; continue authorized fixes/review responses before CI passes.
+  Merge-ready: `gh pr view <n> --json reviewDecision,mergeStateStatus` shows reviewDecision APPROVED and mergeStateStatus CLEAN. Repository ruleset enforces required approvals, required checks and resolved threads.
+  Recheck at the action boundary; a new push dismisses approvals and reruns the check.
+  Interface-changing PRs still need human merge. Conditional authority only through caller-trusted agent-protocol.md.

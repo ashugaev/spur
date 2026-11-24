@@ -905,7 +905,7 @@ test("required jobs retain admission, fan out after Quality and preserve readonl
       (id) => present(ci.jobs[id]).name,
     ),
   ).toEqual(["Quality", "Playwright E2E", "Runtime Integration", "Real-Agent Smoke"]);
-  for (const name of ["release.yml", "review-approval.yml"])
+  for (const name of ["release.yml"])
     expect(JSON.stringify(await workflow(name))).not.toContain("ci-ready-admission");
 });
 
