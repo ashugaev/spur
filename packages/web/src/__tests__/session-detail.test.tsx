@@ -9170,7 +9170,7 @@ describe("SessionDetail pending leave-open action", () => {
     });
     render(<SessionDetail sessionId="api-a1" />);
     fireEvent.click(
-      await screen.findByRole("button", { name: path === "recover" ? "Recover" : "Complete" }),
+      await screen.findByRole("button", { name: path === "recover" ? "Recover" : "Close Session" }),
     );
     if (path === "recover") fireEvent.click(screen.getByRole("button", { name: "Force Kill" }));
     await screen.findByRole("dialog", { name: "Open Pull Request" });
@@ -9206,12 +9206,12 @@ describe("SessionDetail pending leave-open action", () => {
         fireEvent.click(screen.getByRole("button", { name: "Recover" }));
         expect(screen.getByRole("button", { name: "Force Kill" })).toBeEnabled();
       } else {
-        expect(screen.getByRole("button", { name: "Complete" })).toBeEnabled();
+        expect(screen.getByRole("button", { name: "Close Session" })).toBeEnabled();
       }
     } else if (path === "complete") {
       expect(screen.getByRole("button", { name: "Reopen" })).toBeInTheDocument();
     } else {
-      expect(screen.getByText("killed")).toBeInTheDocument();
+      expect(screen.getByText("closed")).toBeInTheDocument();
     }
   });
 });
