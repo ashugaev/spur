@@ -407,14 +407,22 @@ const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
 const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
 const CODEX_READY_SETTLE_DELAY_MS = 500;
 const AGENT_READY_TIMEOUT_MS = 120_000;
-// A Claude dialog footer seen continuously this long fails readiness: nobody
-// is answering it, and typing into it would pick its default option.
-const CLAUDE_DIALOG_SETTLE_MS = 10_000;
+// A Claude dialog footer seen on consecutive captures spanning this long fails
+// readiness: nobody is answering it, and typing into it would pick its default
+// option. The span check needs at least two captures, so one sighting never fails.
+const CLAUDE_DIALOG_REFUSE_AFTER_MS = 1_500;
 // Claude registered with no dialog on screen but the ready markers missing this
 // long: its terminal output drifted. Registration normally leads the markers by
 // well under a second, and startup dialogs never write it. 30s leaves room for a
 // slow first render on a loaded host before proceeding on registration alone.
 const CLAUDE_MARKER_GRACE_MS = 30_000;
+// Before Claude registers, its registration file is re-read at this interval
+// inside each capture wait: a local file read, no tmux load. Registration seen
+// cuts the wait short and the pane is captured at once.
+const CLAUDE_REGISTRATION_POLL_MS = 200;
+// Capture cadence once Claude has registered, until its markers show or the
+// marker grace lapses.
+const CLAUDE_REGISTERED_POLL_MS = 250;
 const AGENT_READY_POLL_INITIAL_MS = 500;
 const AGENT_READY_POLL_MAX_MS = 2_000;
 const AGENT_READY_POLL_JITTER_MAX_MS = 250;
@@ -1882,7 +1890,7 @@ export async function waitForTmuxReady(
         claudeDialogSinceMs = Date.now();
       }
       claudeDialog = dialog;
-      if (dialog !== null && Date.now() - claudeDialogSinceMs >= CLAUDE_DIALOG_SETTLE_MS) {
+      if (dialog !== null && Date.now() - claudeDialogSinceMs >= CLAUDE_DIALOG_REFUSE_AFTER_MS) {
         throw new ClaudeStartupDialogError({ sessionName, screen: dialog, capture });
       }
     }
@@ -1933,7 +1941,31 @@ export async function waitForTmuxReady(
       await wait(sleep(AGENT_READY_POLL_INITIAL_MS));
       continue;
     }
-    await wait(sleep(pollDelayMs + pollJitterMs));
+    const pendingClaudeRegistration =
+      options?.agent === "claude" && claudeDialog === null && !claudeRegistered
+        ? options.claudeRegistration
+        : undefined;
+    if (pendingClaudeRegistration) {
+      // Same capture cadence as before registration; only the file is read
+      // between captures, so registration ends the wait within one slice.
+      const captureDelayMs = pollDelayMs + pollJitterMs;
+      for (
+        let waitedMs = 0;
+        waitedMs < captureDelayMs && !claudeRegistered;
+        waitedMs += CLAUDE_REGISTRATION_POLL_MS
+      ) {
+        await wait(sleep(Math.min(CLAUDE_REGISTRATION_POLL_MS, captureDelayMs - waitedMs)));
+        claudeRegistered = await wait(
+          readClaudeLaunchRegistration(pendingClaudeRegistration, claudePanePid),
+        );
+      }
+      if (claudeRegistered) continue;
+    } else if (claudeRegistered) {
+      await wait(sleep(CLAUDE_REGISTERED_POLL_MS));
+      continue;
+    } else {
+      await wait(sleep(pollDelayMs + pollJitterMs));
+    }
     if (Date.now() - startedAt >= AGENT_READY_POLL_BACKOFF_AFTER_MS) {
       pollDelayMs = Math.min(pollDelayMs * 2, AGENT_READY_POLL_MAX_MS);
     }
