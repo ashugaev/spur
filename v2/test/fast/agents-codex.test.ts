@@ -61,6 +61,7 @@ import {
   ensureCodexHooksConfig,
   appendCodexTrustedProjects,
   findCodexSessionId,
+  readCodexResumeProvider,
   findLatestCodexSessionFile,
   linkCodexAuth,
   captureCodexRolloutBaseline,
@@ -1203,6 +1204,83 @@ function mockStreamsForFiles(mapping: Record<string, string[]>) {
     return makeAsyncIterable(lines);
   });
 }
+
+describe("resume provider", () => {
+  function fixture(files: Record<string, string[]>) {
+    mockReaddir.mockImplementation(async (dir: string) =>
+      Object.keys(files)
+        .filter((path) => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes("/"))
+        .map((path) => path.slice(dir.length + 1)),
+    );
+    mockLstat.mockResolvedValue({ isDirectory: () => false });
+    mockStat.mockResolvedValue({ mtimeMs: 1 });
+    let activePath = "";
+    mockCreateReadStream.mockImplementation((path: string) => {
+      activePath = path;
+      return { on: vi.fn(), destroy: vi.fn() };
+    });
+    mockCreateInterface.mockImplementation(() => makeAsyncIterable(files[activePath] ?? []));
+  }
+
+  function meta(id: string, provider: unknown) {
+    return JSON.stringify({ type: "session_meta", payload: { id, model_provider: provider } });
+  }
+
+  it.each(["openai", "spur_managed"])(
+    "reads exact saved %s identity without writes",
+    async (provider) => {
+      fixture({ "/local/thread.jsonl": [meta("thread", provider)] });
+      expect(await readCodexResumeProvider("thread", { sessionRootDir: "/local" })).toBe(provider);
+      expect(mockWriteFile).not.toHaveBeenCalled();
+      expect(mockRm).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, null, 42, ""])(
+    "does not infer missing/malformed identity %s",
+    async (provider) => {
+      fixture({ "/local/thread.jsonl": [meta("thread", provider)] });
+      expect(await readCodexResumeProvider("thread", { sessionRootDir: "/local" })).toBeNull();
+    },
+  );
+
+  it("ignores newer siblings and keeps local precedence over host", async () => {
+    fixture({
+      "/local/thread.jsonl": [meta("thread", "openai")],
+      "/local/newer.jsonl": [meta("sibling", "spur_managed")],
+      "/home/testuser/.codex/sessions/thread.jsonl": [meta("thread", "spur_managed")],
+    });
+    mockStat.mockImplementation(async (path: string) => ({
+      mtimeMs: path.includes("newer") ? 9 : 1,
+    }));
+    expect(await readCodexResumeProvider("thread", { sessionRootDir: "/local" })).toBe("openai");
+  });
+
+  it("uses host fallback only when exact local thread is absent", async () => {
+    fixture({
+      "/local/sibling.jsonl": [meta("sibling", "spur_managed")],
+      "/home/testuser/.codex/sessions/thread.jsonl": [meta("thread", "openai")],
+    });
+    expect(await readCodexResumeProvider("thread", { sessionRootDir: "/local" })).toBe("openai");
+  });
+
+  it("does not hide unverifiable local metadata behind host identity", async () => {
+    fixture({
+      "/local/thread.jsonl": [meta("thread", undefined)],
+      "/home/testuser/.codex/sessions/thread.jsonl": [meta("thread", "spur_managed")],
+    });
+    expect(await readCodexResumeProvider("thread", { sessionRootDir: "/local" })).toBeNull();
+  });
+
+  it("refuses malformed or out-of-bound headers without guessing", async () => {
+    fixture({ "/local/thread.jsonl": ["{", meta("thread", "spur_managed")] });
+    expect(await readCodexResumeProvider("thread", { sessionRootDir: "/local" })).toBeNull();
+    fixture({
+      "/local/thread.jsonl": [...Array<string>(10).fill("{}"), meta("thread", "spur_managed")],
+    });
+    expect(await readCodexResumeProvider("thread", { sessionRootDir: "/local" })).toBeNull();
+  });
+});
 
 describe("captureCodexRolloutBaseline", () => {
   it("returns empty map when sessions dir is missing", async () => {
