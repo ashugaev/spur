@@ -2360,6 +2360,128 @@ describe("runtime-tmux", () => {
       }
     });
 
+    describe("ready marker drift", () => {
+      const DRIFTED = "Claude Next\n> ";
+      const markerWarning = (spy: ReturnType<typeof vi.spyOn>): boolean =>
+        spy.mock.calls.some(([text]) => String(text).includes("ready markers"));
+
+      it("proceeds on registration alone after the grace and warns", async () => {
+        const dir = makeSessionsDir();
+        writeRegistration(dir);
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        const h = claudeHarness(() => DRIFTED);
+        try {
+          const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+          await waitForTmuxReady("api-1", ["Claude Code", "❯"], 120_000, {
+            agent: "claude",
+            claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
+          });
+          expect(h.elapsed()).toBeGreaterThanOrEqual(10_000);
+          expect(h.elapsed()).toBeLessThan(15_000);
+          expect(markerWarning(stderrSpy)).toBe(true);
+          expect(inputCalls()).toBe(0);
+        } finally {
+          h.restore();
+          stderrSpy.mockRestore();
+        }
+      });
+
+      it("never bypasses the markers while a dialog footer is visible", async () => {
+        const dir = makeSessionsDir();
+        writeRegistration(dir);
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        // Dialog shows mid-grace: the grace would lapse before the dialog settles.
+        const h = claudeHarness((n) => (n <= 5 ? DRIFTED : paneFixture("bypass-warning.txt")));
+        try {
+          const { waitForTmuxReady, ClaudeStartupDialogError } =
+            await import("../../src/runtime-tmux.js");
+          await expect(
+            waitForTmuxReady("api-1", ["Claude Code", "❯"], 120_000, {
+              agent: "claude",
+              claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
+            }),
+          ).rejects.toBeInstanceOf(ClaudeStartupDialogError);
+          expect(markerWarning(stderrSpy)).toBe(false);
+          expect(inputCalls()).toBe(0);
+        } finally {
+          h.restore();
+          stderrSpy.mockRestore();
+        }
+      });
+
+      it("restarts the grace when a dialog interrupts it", async () => {
+        const dir = makeSessionsDir();
+        writeRegistration(dir);
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        const h = claudeHarness((n) =>
+          n >= 6 && n <= 8 ? paneFixture("workspace-trust.txt") : DRIFTED,
+        );
+        try {
+          const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+          await waitForTmuxReady("api-1", ["Claude Code", "❯"], 120_000, {
+            agent: "claude",
+            claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
+          });
+          // Grace restarts at capture 9, so it lapses at capture 19.
+          expect(h.captures()).toBe(19);
+          expect(markerWarning(stderrSpy)).toBe(true);
+        } finally {
+          h.restore();
+          stderrSpy.mockRestore();
+        }
+      });
+
+      it("keeps the timeout when the plan has no registration target", async () => {
+        const h = claudeHarness(() => DRIFTED);
+        try {
+          const { waitForTmuxReady, PromptReadyTimeoutError } =
+            await import("../../src/runtime-tmux.js");
+          await expect(
+            waitForTmuxReady("api-1", ["Claude Code", "❯"], 30_000, { agent: "claude" }),
+          ).rejects.toBeInstanceOf(PromptReadyTimeoutError);
+          expect(tmuxCalls("list-panes")).toBe(0);
+        } finally {
+          h.restore();
+        }
+      });
+
+      it("keeps the timeout when Claude never registers", async () => {
+        const dir = makeSessionsDir();
+        const h = claudeHarness(() => DRIFTED);
+        try {
+          const { waitForTmuxReady, PromptReadyTimeoutError } =
+            await import("../../src/runtime-tmux.js");
+          await expect(
+            waitForTmuxReady("api-1", ["Claude Code", "❯"], 30_000, {
+              agent: "claude",
+              claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
+            }),
+          ).rejects.toBeInstanceOf(PromptReadyTimeoutError);
+        } finally {
+          h.restore();
+        }
+      });
+
+      it("resolves at once when markers and registration are both present", async () => {
+        const dir = makeSessionsDir();
+        writeRegistration(dir);
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        const h = claudeHarness(() => REPL);
+        try {
+          const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+          await waitForTmuxReady("api-1", ["Claude Code", "❯"], 120_000, {
+            agent: "claude",
+            claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
+          });
+          expect(h.captures()).toBe(1);
+          expect(markerWarning(stderrSpy)).toBe(false);
+        } finally {
+          h.restore();
+          stderrSpy.mockRestore();
+        }
+      });
+    });
+
     it("ignores a dismissed dialog left in scrollback above a ready REPL", async () => {
       const dir = makeSessionsDir();
       writeRegistration(dir);

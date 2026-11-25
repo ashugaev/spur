@@ -410,6 +410,10 @@ const AGENT_READY_TIMEOUT_MS = 120_000;
 // A Claude dialog footer seen continuously this long fails readiness: nobody
 // is answering it, and typing into it would pick its default option.
 const CLAUDE_DIALOG_SETTLE_MS = 10_000;
+// Claude registered with no dialog on screen but the ready markers missing this
+// long: its terminal output drifted. Registration normally leads the markers by
+// well under a second, and startup dialogs never write it.
+const CLAUDE_MARKER_GRACE_MS = 10_000;
 const AGENT_READY_POLL_INITIAL_MS = 500;
 const AGENT_READY_POLL_MAX_MS = 2_000;
 const AGENT_READY_POLL_JITTER_MAX_MS = 250;
@@ -1842,6 +1846,8 @@ export async function waitForTmuxReady(
   let claudeDialogSinceMs = 0;
   let claudeRegistrationMissing = false;
   let claudePanePid: number | null = null;
+  let claudeRegistered = false;
+  let claudeMarkerGraceSinceMs: number | null = null;
   let pollDelayMs = AGENT_READY_POLL_INITIAL_MS;
   const pollJitterMs = tmuxReadyPollJitterMs(sessionName);
   while (Date.now() < deadline) {
@@ -1879,20 +1885,32 @@ export async function waitForTmuxReady(
         throw new ClaudeStartupDialogError({ sessionName, screen: dialog, capture });
       }
     }
-    if (
-      options?.agent === "claude" &&
-      claudeDialog === null &&
-      options.claudeRegistration &&
-      readyMarkers.every((marker) => capture.includes(marker))
-    ) {
-      // Markers alone are not enough: Claude draws them before its REPL takes
-      // input. Its own sessions/<pid>.json appears once the REPL is up.
-      claudePanePid ??= await wait(getTmuxPanePid(sessionName, { fresh: true }));
-      if (await wait(readClaudeLaunchRegistration(options.claudeRegistration, claudePanePid))) {
-        return;
+    const markersShown = readyMarkers.every((marker) => capture.includes(marker));
+    if (options?.agent === "claude" && options.claudeRegistration) {
+      if (claudeDialog === null) {
+        // Markers alone are not enough: Claude draws them before its REPL takes
+        // input. Its own sessions/<pid>.json appears once the REPL is up.
+        claudePanePid ??= await wait(getTmuxPanePid(sessionName, { fresh: true }));
+        claudeRegistered ||= await wait(
+          readClaudeLaunchRegistration(options.claudeRegistration, claudePanePid),
+        );
+        if (claudeRegistered && markersShown) return;
+        if (markersShown) claudeRegistrationMissing = true;
+        if (claudeRegistered) {
+          claudeMarkerGraceSinceMs ??= Date.now();
+          if (Date.now() - claudeMarkerGraceSinceMs >= CLAUDE_MARKER_GRACE_MS) {
+            process.stderr.write(
+              `spur: Claude registered in tmux session "${sessionName}" but its ready markers ` +
+                `(${readyMarkers.join(", ")}) never appeared; proceeding on registration alone. ` +
+                `Claude's terminal output may have changed.\n`,
+            );
+            return;
+          }
+        }
+      } else {
+        claudeMarkerGraceSinceMs = null;
       }
-      claudeRegistrationMissing = true;
-    } else if (claudeDialog === null && readyMarkers.every((marker) => capture.includes(marker))) {
+    } else if (claudeDialog === null && markersShown) {
       if (options?.agent === "codex") {
         // Codex can print its prompt before the next stdin read is ready.
         await wait(sleep(CODEX_READY_SETTLE_DELAY_MS));
