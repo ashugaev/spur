@@ -253,6 +253,14 @@ export function fakeAgentScript(
         ? "OpenAI Codex"
         : "Cursor Agent";
   const prompt = agentName === "claude" ? "❯" : agentName === "codex" ? "›" : "Composer 2 Fast";
+  // Real claude writes sessions/<pid>.json once its REPL is up; Spur's launch
+  // readiness waits for it. Mirrors that contract, in the launch's config dir.
+  const registerSession =
+    agentName === "claude"
+      ? `claude_sessions_dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
+mkdir -p "$claude_sessions_dir"
+printf '{"pid":%s,"sessionId":"%s","cwd":"%s","kind":"interactive","status":"idle"}\\n' "$$" "$session_uuid" "$PWD" > "$claude_sessions_dir/$$.json"`
+      : "";
   const startup =
     agentName === "claude"
       ? `if [[ "\${1:-}" == "--print" ]]; then
@@ -805,6 +813,7 @@ else:
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
 printf '%s\n' "${header}"
 printf '%s\n' "${prompt}"
+${registerSession}
 # Backgrounded: a resume/wake triggered by send() holds the session's
 # workspace lock for the whole submit-ack wait, and every SPUR_TODO_COMMAND
 # call below re-enters that same lock. Run synchronously here and a
