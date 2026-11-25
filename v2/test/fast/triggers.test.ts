@@ -4742,47 +4742,58 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it.each(["github", "service"] as const)(
-    "delivers %s feedback once when native waiting projects a declared completed task",
-    async (source) => {
+  it.each(
+    (["completed", "needs_input"] as const).flatMap((state) =>
+      (["github", "service", "ci"] as const).map((source) => ({ state, source })),
+    ),
+  )(
+    "delivers $source feedback once when native waiting projects a declared $state task",
+    async ({ state, source }) => {
       const declaration = {
         status: "running" as const,
         agentLaunchId: "launch-a",
         taskStatusRevision: 0,
         taskStatus: {
-          state: "completed" as const,
+          state,
           revision: 0,
           agentLaunchId: "launch-a",
           updatedAt: new Date().toISOString(),
         },
       };
-      let nativeState: SessionState = "working";
+      let nativeState: SessionState = source === "ci" ? "needs_input" : "working";
       const get = vi.fn(async () => ({
         id: "api-1",
         status: declaration.status,
         state: projectTaskStatus(declaration, nativeState, nativeState, true, true),
+        stateSource: nativeState === "waiting" ? "task_status" : "jsonl",
         runtimeAlive: true,
         workspaceExists: true,
         lastActivityAt: staleActivity(),
       }));
       const deliver = vi.fn().mockResolvedValue(undefined);
-      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      readGitHubSourceSnapshotMock.mockReturnValue(
+        source === "ci" ? ciSnapshot() : commentSnapshot(),
+      );
       const { startConfiguredTriggers } = await loadTriggersModule();
       const bus = new EventBus();
       const controller = startConfiguredTriggers({
-        config: (source === "github" ? config() : serviceConfig()) as never,
+        config: (source === "service"
+          ? serviceConfig()
+          : config(source === "ci" ? { event: "github:ci_failed", interrupt: true } : {})) as never,
         bus,
         sessionService: { get, deliver } as never,
         logger: { warn: vi.fn() },
       });
       try {
-        bus.emit(source === "github" ? githubEvent() : serviceEvent());
+        bus.emit(
+          source === "service" ? serviceEvent() : source === "ci" ? ciFailedEvent() : githubEvent(),
+        );
         await advanceSendWindow();
         expect(deliver).not.toHaveBeenCalled();
         expect(readPendingSendBatchesMock().size).toBe(1);
 
         nativeState = "waiting";
-        expect((await get()).state).toBe("completed");
+        expect((await get()).state).toBe(state);
         controller.nudgeSession("api-1");
         await vi.advanceTimersByTimeAsync(1);
         expect(deliver).toHaveBeenCalledTimes(1);
@@ -4793,6 +4804,65 @@ describe("startConfiguredTriggers", () => {
         controller.nudgeSession("api-1");
         await advanceSendWindow();
         expect(deliver).toHaveBeenCalledTimes(1);
+        expect(readPendingSendBatchesMock().size).toBe(0);
+      } finally {
+        await controller.stop();
+      }
+    },
+  );
+
+  it.each(
+    ([undefined, "jsonl"] as const).flatMap((stateSource) =>
+      (["github", "service", "ci"] as const).map((source) => ({ stateSource, source })),
+    ),
+  )(
+    "holds $source feedback for native/unknown needs_input source $stateSource",
+    async ({ stateSource, source }) => {
+      const get = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "needs_input",
+        stateSource,
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(
+        source === "ci" ? ciSnapshot() : commentSnapshot(),
+      );
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: (source === "service"
+          ? serviceConfig()
+          : config(source === "ci" ? { event: "github:ci_failed", interrupt: true } : {})) as never,
+        bus,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        bus.emit(
+          source === "service" ? serviceEvent() : source === "ci" ? ciFailedEvent() : githubEvent(),
+        );
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        expect(deliver).not.toHaveBeenCalled();
+        expect(readPendingSendBatchesMock().size).toBe(1);
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "trigger.send.failed",
+        );
+
+        get.mockResolvedValue({
+          ...(await get()),
+          stateSource: "task_status",
+          lastActivityAt: new Date().toISOString(),
+        });
+        controller.nudgeSession("api-1");
+        await vi.advanceTimersByTimeAsync(1);
+        expect(deliver).not.toHaveBeenCalled();
+        await advanceSendWindow();
+        expect(deliver).toHaveBeenCalledExactlyOnceWith("api-1", expect.any(String), {
+          interrupt: false,
+        });
         expect(readPendingSendBatchesMock().size).toBe(0);
       } finally {
         await controller.stop();
