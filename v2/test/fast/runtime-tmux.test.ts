@@ -2378,7 +2378,7 @@ describe("runtime-tmux", () => {
     describe("ready marker drift", () => {
       const DRIFTED = "Claude Next\n> ";
       const markerWarning = (spy: ReturnType<typeof vi.spyOn>): boolean =>
-        spy.mock.calls.some(([text]) => String(text).includes("ready markers"));
+        spy.mock.calls.some(([text]: unknown[]) => String(text).includes("ready markers"));
 
       it("proceeds on registration alone after the grace and warns", async () => {
         const dir = makeSessionsDir();
