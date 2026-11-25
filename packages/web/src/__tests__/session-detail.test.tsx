@@ -9122,6 +9122,100 @@ describe("SessionDetail links", () => {
   });
 });
 
+describe("SessionDetail pending leave-open action", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it.each([
+    ["complete", "success"],
+    ["complete", "error"],
+    ["recover", "success"],
+    ["recover", "error"],
+  ] as const)("dismisses consumed dialogs before %s settles with %s", async (path, outcome) => {
+    let current = sessionFixture(
+      path === "recover"
+        ? { status: "errored", state: "error", runtimeAlive: false, workspaceExists: false }
+        : undefined,
+    );
+    const bodies: unknown[] = [];
+    let release!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    const action = path === "recover" ? "kill" : "complete";
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") return new Response(JSON.stringify(current));
+      if (url === "/api/sessions/api-a1/conversation")
+        return new Response(JSON.stringify(conversationFixture()));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "" }));
+      if (url === `/api/sessions/api-a1/${action}` && init?.method === "POST") {
+        bodies.push(JSON.parse(String(init.body)) as unknown);
+        if (bodies.length === 1)
+          return new Response(
+            JSON.stringify({
+              code: "open_pr_action_required",
+              sessionId: "api-a1",
+              pr: { number: 7, title: "Open PR", url: "https://example.com/pr/7" },
+            }),
+            { status: 409 },
+          );
+        return pending;
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: path === "recover" ? "Recover" : "Close Session" }),
+    );
+    if (path === "recover") fireEvent.click(screen.getByRole("button", { name: "Force Kill" }));
+    await screen.findByRole("dialog", { name: "Open Pull Request" });
+    fireEvent.click(screen.getByRole("button", { name: "Leave Pull Request Open" }));
+    expect(screen.queryByRole("dialog", { name: "Open Pull Request" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Recover Session" })).not.toBeInTheDocument();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toEqual(
+      path === "recover"
+        ? { force: true, prAction: "leave_open" }
+        : { operationId: expect.any(String), prAction: "leave_open" },
+    );
+    expect(screen.getByRole("button", { name: "More session actions" })).toBeDisabled();
+    await act(async () => {
+      if (outcome === "success") {
+        current = {
+          ...current,
+          status: path === "recover" ? "killed" : "completed",
+          state: path === "recover" ? "killed" : "stopped",
+          runtimeAlive: false,
+        };
+        release(new Response(JSON.stringify(current)));
+      } else {
+        release(
+          new Response(JSON.stringify({ error: "Leave-open action failed" }), { status: 500 }),
+        );
+      }
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    if (outcome === "error") {
+      expect(await screen.findByText("Leave-open action failed")).toBeInTheDocument();
+      if (path === "recover") {
+        fireEvent.click(screen.getByRole("button", { name: "Recover" }));
+        expect(screen.getByRole("button", { name: "Force Kill" })).toBeEnabled();
+      } else {
+        expect(screen.getByRole("button", { name: "Close Session" })).toBeEnabled();
+      }
+    } else if (path === "complete") {
+      expect(screen.getByRole("button", { name: "Reopen" })).toBeInTheDocument();
+    } else {
+      expect(screen.getByText("closed")).toBeInTheDocument();
+    }
+  });
+});
+
 describe("SessionDetail GitHub PR check unavailable", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

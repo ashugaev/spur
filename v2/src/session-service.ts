@@ -30790,12 +30790,14 @@ export class SessionService {
       classified.runtime.runtimeAlive,
       workspacePresent,
     );
+    const stateSource =
+      state !== rawState && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source;
     await this.updateStateHistory(
       session,
       state,
-      state !== rawState && (state === "completed" || state === "needs_input")
-        ? "task_status"
-        : classified.source,
+      stateSource,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
@@ -30832,6 +30834,7 @@ export class SessionService {
         runtimeAlive: classified.runtime.runtimeAlive,
         workspaceExists: workspacePresent,
         state,
+        stateSource,
         hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
         lastActivityAt,
         ...(hasServiceIssues ? { hasServiceIssues: true } : {}),
@@ -31214,12 +31217,14 @@ export class SessionService {
       classified.runtime.runtimeAlive,
       workspacePresent,
     );
+    const stateSource =
+      state !== classified.state && (state === "completed" || state === "needs_input")
+        ? "task_status"
+        : classified.source;
     await this.updateStateHistory(
       session,
       state,
-      state !== classified.state && (state === "completed" || state === "needs_input")
-        ? "task_status"
-        : classified.source,
+      stateSource,
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
@@ -31310,6 +31315,7 @@ export class SessionService {
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,
       state,
+      stateSource,
       hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
       lastActivityAt,
       services,
