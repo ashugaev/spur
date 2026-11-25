@@ -23106,6 +23106,7 @@ export class SessionService {
         record === "unreadable" ||
         !isTerminalSessionStatus(record.status) ||
         this.reopensInFlight.has(sessionId) ||
+        this.handoffsInFlight.has(sessionId) ||
         this.isInRestoreWarmup(sessionId) ||
         process.env.SPUR_SESSION === sessionId
       ) {

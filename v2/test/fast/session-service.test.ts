@@ -85988,6 +85988,7 @@ describe("SessionService", () => {
       cleanupTerminalTelegram(session: SessionRecord): Promise<void>;
       refreshDashboardCacheEntry(session: SessionRecord): Promise<void>;
       enrich(session: SessionRecord): Promise<SessionView>;
+      sweepDetachedOrphans(context: "boot" | "tick"): Promise<void>;
       handoffsInFlight: Map<string, unknown>;
       handoffSuccessors: Map<string, string>;
     };
@@ -86090,6 +86091,167 @@ describe("SessionService", () => {
       await bounded(ready);
       return { service, sessions, internals, handoff, release, reject, settled: () => settled };
     }
+
+    it("keeps successor task and ToDo reads independent of periodic source reaping during handoff", async () => {
+      vi.useRealTimers();
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore(
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          closeoutOwner: true,
+        }),
+        sessionRecord({ id: "api-3", workspaceId: "api-3", status: "completed" }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const internals = service as unknown as CleanupInternals;
+      const started: Promise<unknown>[] = [];
+      let releaseTelegram!: () => void;
+      let enterTelegram!: () => void;
+      const telegramReady = new Promise<void>((resolve) => {
+        enterTelegram = resolve;
+      });
+      const telegramHeld = new Promise<void>((resolve) => {
+        releaseTelegram = resolve;
+      });
+      let releasePeriodic!: () => void;
+      let enterPeriodic!: () => void;
+      const periodicReady = new Promise<void>((resolve) => {
+        enterPeriodic = resolve;
+      });
+      const periodicHeld = new Promise<void>((resolve) => {
+        releasePeriodic = resolve;
+      });
+      let gatedOwner: string | undefined;
+      let handoffSettled = false;
+      let discoveryReturned = false;
+      const cleanup = internals.cleanupTerminalTelegram.bind(internals);
+      vi.spyOn(internals, "cleanupTerminalTelegram").mockImplementation(async (record) => {
+        if (record.id === "api-1") {
+          enterTelegram();
+          await telegramHeld;
+        }
+        return cleanup(record);
+      });
+      terminateDetachedSessionProcessesMock
+        .mockResolvedValue({ status: "clear", matched: 1 })
+        .mockResolvedValueOnce({ status: "unavailable" })
+        .mockImplementationOnce(async ({ sessionId }) => {
+          gatedOwner = sessionId;
+          enterPeriodic();
+          await periodicHeld;
+          return { status: "clear", matched: 1 };
+        });
+      try {
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Carry work", reason: "handoff" },
+          sourceActor,
+        );
+        const handoff = service.handoff("api-1", {
+          agent: "cursor",
+          idempotencyKey: "periodic-cleanup-proof",
+        });
+        started.push(handoff);
+        void handoff.then(
+          () => {
+            handoffSettled = true;
+          },
+          () => {
+            handoffSettled = true;
+          },
+        );
+        await bounded(telegramReady);
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "completed",
+          handoffIdempotency: { successorId: "api-2" },
+          closeoutOwner: false,
+        });
+        expect(internals.handoffsInFlight.has("api-1")).toBe(true);
+        expect(internals.lifecycle.snapshot("api-1").operation?.phase).toBe("pending");
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ sessionId: "api-1" }),
+        );
+        listDetachedSessionOwnersMock.mockImplementation(async () => {
+          discoveryReturned = true;
+          return { status: "ok", sessionIds: ["api-1", "api-3"] };
+        });
+        const periodic = internals.sweepDetachedOrphans("tick");
+        started.push(periodic);
+        void periodic.catch(() => {});
+        await bounded(periodicReady);
+        expect(discoveryReturned).toBe(true);
+        let taskRevision: number | undefined;
+        let todo: TodoProjection | undefined;
+        let written: TodoProjection | undefined;
+        const reads = [
+          service.readTaskStatus("api-2").then((value) => {
+            taskRevision = value.revision;
+          }),
+          service.readTodo("api-2").then((value) => {
+            todo = value;
+          }),
+          service
+            .mutateTodo(
+              "api-2",
+              { action: "add", text: "Successor work", reason: "progress before cleanup" },
+              successorActor,
+            )
+            .then((value) => {
+              written = value;
+            }),
+        ];
+        started.push(...reads);
+        for (const read of reads) void read.catch(() => {});
+        await vi.waitFor(
+          () => {
+            expect(taskRevision, "successor task read blocked by periodic source sweep").toBe(0);
+            expect(todo?.items.map((item) => item.text)).toContain("Carry work");
+            expect(written?.items.map((item) => item.text)).toContain("Successor work");
+          },
+          { timeout: 1000 },
+        );
+        expect(handoffSettled).toBe(false);
+        expect(gatedOwner).toBe("api-3");
+        expect(
+          terminateDetachedSessionProcessesMock.mock.calls.map(([input]) => input.sessionId),
+        ).toEqual(["api-1", "api-3"]);
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sessionId: "api-3" }),
+          { signal: expect.any(AbortSignal) },
+        );
+        releasePeriodic();
+        await bounded(periodic);
+        expect(handoffSettled).toBe(false);
+        releaseTelegram();
+        expect(await bounded(handoff)).toMatchObject({ id: "api-2", movedTodoItems: 1 });
+        expect(internals.handoffsInFlight.has("api-1")).toBe(false);
+        expect(internals.lifecycle.snapshot("api-1").operation?.phase).toBe("succeeded");
+        expect((await service.readTodo("api-1")).items.map((item) => item.status)).toEqual([
+          "cancelled",
+        ]);
+        listDetachedSessionOwnersMock.mockResolvedValue({ status: "ok", sessionIds: ["api-1"] });
+        const settledPass = internals.sweepDetachedOrphans("tick");
+        started.push(settledPass);
+        void settledPass.catch(() => {});
+        await bounded(settledPass);
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledTimes(3);
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sessionId: "api-1" }),
+          { signal: expect.any(AbortSignal) },
+        );
+      } finally {
+        releasePeriodic();
+        releaseTelegram();
+        await Promise.allSettled(started);
+        service.dispose();
+        await service.settleBackgroundSpawns();
+      }
+    });
 
     it.each(["sweep", "telegram", "dashboard", "enrichment"] as const)(
       "releases successor state locks while source %s waits and keeps source fences",
