@@ -242,9 +242,9 @@ test.describe("Agent accounts menu", () => {
         await expect(page.getByTestId("auth-accounts-popover")).toBeHidden();
         await dialog.getByRole("button", { name: "Set default", exact: true }).tap();
 
-        await expect.poll(() => updates).toEqual([
-          { defaultAccountId: "claude-home", applyToActive: true },
-        ]);
+        await expect
+          .poll(() => updates)
+          .toEqual([{ defaultAccountId: "claude-home", applyToActive: true }]);
         await expect(dialog.getByRole("button", { name: "Setting default" })).toBeDisabled();
         await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
         await page.keyboard.press("Escape");

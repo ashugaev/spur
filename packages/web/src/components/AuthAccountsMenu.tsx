@@ -37,7 +37,11 @@ type SignInRequest = Extract<SignInTarget, { kind: "account" }>;
 type PoolUpdate =
   | { defaultAccountId: string | null; applyToActive?: boolean }
   | { autoRotate: boolean };
-type PoolMutation = UseMutationResult<unknown, Error, { provider: AuthProvider; update: PoolUpdate }>;
+type PoolMutation = UseMutationResult<
+  unknown,
+  Error,
+  { provider: AuthProvider; update: PoolUpdate }
+>;
 type SetDefaultRequest = {
   account: AuthAccountSummary;
   active: number;

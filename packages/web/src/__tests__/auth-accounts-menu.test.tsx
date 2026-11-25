@@ -508,7 +508,10 @@ describe("AuthAccountsMenu", () => {
     });
 
     it("keeps the touch dialog and pending update after the popover dismisses", async () => {
-      vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+      vi.stubGlobal(
+        "matchMedia",
+        vi.fn(() => ({ matches: true })),
+      );
       const dialog = await openDialog();
       const active = dialog.getByRole("radio", { name: /Also switch active sessions/ });
       fireEvent.pointerDown(active, { pointerType: "touch" });
@@ -552,7 +555,10 @@ describe("AuthAccountsMenu", () => {
     });
 
     it("shows the update error after touch dismissed the popover and permits retry", async () => {
-      vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+      vi.stubGlobal(
+        "matchMedia",
+        vi.fn(() => ({ matches: true })),
+      );
       routes["PATCH /api/auth-pools/claude"] = () => ({
         status: 409,
         payload: { error: "Account is no longer ready" },
@@ -577,9 +583,7 @@ describe("AuthAccountsMenu", () => {
       cacheSessions(sessions);
       const trigger = screen.getByRole("button", { name: "Manage agent accounts" });
       fireEvent.mouseEnter(trigger);
-      fireEvent.click(
-        await screen.findByRole("button", { name: "Switch Claude to home@x.com" }),
-      );
+      fireEvent.click(await screen.findByRole("button", { name: "Switch Claude to home@x.com" }));
       const dialog = within(await screen.findByRole("dialog", { name: "Set Claude default" }));
       fireEvent.mouseLeave(trigger.parentElement!);
 
