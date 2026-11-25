@@ -33,6 +33,7 @@ function storedSnapshot(signals: ReviewSignal[], prNumber: number | null = 42): 
 }
 
 const readGitHubSourceSnapshotMock = vi.fn();
+const listSessionsMock = vi.fn<() => SessionRecord[]>();
 const readReviewSourceSnapshotMock = vi.fn();
 const readWorkItemLifecyclesMock = vi.fn();
 const recordWorkItemLifecycleMock = vi.fn();
@@ -69,6 +70,7 @@ vi.mock("../../src/event-log.js", async (importOriginal) => {
 
 vi.mock("../../src/metadata.js", async (importOriginal) => ({
   ...(await importOriginal<typeof metadataModule>()),
+  listSessions: listSessionsMock,
   readPendingSpawnWork: () =>
     new Map([...pendingSpawnWork].map(([id, work]) => [id, structuredClone(work)])),
   writePendingSpawnWork: (_dataDir: string, work: PersistedSpawnWork, revision?: number) => {
@@ -807,6 +809,7 @@ async function advanceSendWindow(): Promise<void> {
 
 describe("startConfiguredTriggers", () => {
   beforeEach(() => {
+    listSessionsMock.mockReset().mockReturnValue([]);
     pendingSpawnWork.clear();
     vi.useFakeTimers();
     refreshSignalsMock
@@ -6292,6 +6295,140 @@ describe("startConfiguredTriggers", () => {
     } finally {
       await controller.stop();
     }
+  });
+
+  describe("delayed work-item intake for a manual review desk", () => {
+    function fixture() {
+      const base = workItemSpawnConfig({ autoClose: false });
+      const trigger = base.projects.api.triggers["pick-up"];
+      const blocks = ["Code {{url}}", "Browser {{url}}"].map((prompt) => ({
+        prompt,
+        agent: "codex",
+        model: "gpt-6.1-sol",
+      }));
+      const config = {
+        ...base,
+        projects: {
+          api: {
+            ...base.projects.api,
+            triggers: {
+              "pick-up": { ...trigger, spawnDeskGroup: true, spawn: { ...trigger.spawn, blocks } },
+            },
+          },
+        },
+      };
+      const sessions: SessionRecord[] = blocks.map((block, index) => ({
+        id: index === 0 ? "manual-code" : "manual-browser",
+        workspaceId: "manual-code",
+        project: "api",
+        agent: "codex",
+        model: block.model,
+        prompt: "later conversation",
+        originalTaskPrompt: block.prompt.replace("{{url}}", workItemEvent().data.url),
+        ...(index === 0
+          ? { slots: { links: [{ label: "tracker", url: workItemEvent().data.url }] } }
+          : {}),
+        branch: "review",
+        worktree: true,
+        worktreePath: "/tmp/manual-review",
+        tmuxSession: `manual-${index}`,
+        launchCommand: "codex",
+        status: "running",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }));
+      return { config, sessions };
+    }
+
+    it.each(["complete", "anchor-only", "browser-only"])(
+      "does not duplicate a live manual desk: %s",
+      async (coverage) => {
+        const { config, sessions } = fixture();
+        const incomplete = coverage !== "complete";
+        if (coverage === "browser-only" && sessions[0]) sessions[0].status = "completed";
+        listSessionsMock.mockReturnValue(
+          coverage === "anchor-only" ? sessions.slice(0, 1) : sessions,
+        );
+        const records = useWorkItemLifecycleStore();
+        const spawn = vi.fn();
+        const { startConfiguredTriggers } = await loadTriggersModule();
+        const bus = new EventBus();
+        const controller = startConfiguredTriggers({
+          config: config as never,
+          bus,
+          sessionService: { spawn } as never,
+          logger: { warn: vi.fn() },
+        });
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() =>
+            expect(logSpurEventMock).toHaveBeenCalledWith(
+              DATA_DIR,
+              expect.objectContaining({
+                event: "trigger.spawn.suppressed",
+                details: expect.objectContaining({
+                  reason: incomplete ? "owner_not_replaceable" : "owner_active",
+                }),
+              }),
+            ),
+          );
+          expect(spawn).not.toHaveBeenCalled();
+          if (incomplete) expect(records.size).toBe(0);
+          else
+            expect(records.get("acme/api#42")).toMatchObject({
+              state: "running",
+              sessionId: "manual-browser",
+            });
+        } finally {
+          await controller.stop();
+        }
+      },
+    );
+
+    it.each(["project", "url", "model", "prompt", "terminal", "non-desk"])(
+      "does not adopt an unrelated or terminal desk: %s",
+      async (mismatch) => {
+        const { config, sessions } = fixture();
+        const anchor = sessions[0];
+        if (!anchor) throw new Error("Missing fixture anchor");
+        if (mismatch === "project") anchor.project = "implementation";
+        if (mismatch === "url")
+          anchor.slots = { links: [{ label: "pr", url: "https://github.com/acme/api/pull/99" }] };
+        if (mismatch === "model") anchor.model = "other-model";
+        if (mismatch === "prompt") anchor.originalTaskPrompt = "unrelated task";
+        if (mismatch === "terminal") for (const session of sessions) session.status = "completed";
+        if (mismatch === "non-desk") config.projects.api.triggers["pick-up"].spawnDeskGroup = false;
+        listSessionsMock.mockReturnValue(sessions);
+        useWorkItemLifecycleStore();
+        const spawn = vi
+          .fn()
+          .mockResolvedValueOnce({ id: "new-anchor" })
+          .mockResolvedValueOnce({ id: "new-browser" });
+        const { startConfiguredTriggers } = await loadTriggersModule();
+        const bus = new EventBus();
+        const controller = startConfiguredTriggers({
+          config: config as never,
+          bus,
+          sessionService: {
+            spawn,
+            get: vi.fn().mockResolvedValue({ status: "running", workspaceExists: true }),
+          } as never,
+          logger: { warn: vi.fn() },
+        });
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+          if (mismatch === "non-desk")
+            expect(spawn.mock.calls[1]?.[0]).not.toHaveProperty("reuseWorkspaceSessionId");
+          else
+            expect(spawn.mock.calls[1]?.[0]).toMatchObject({
+              reuseWorkspaceSessionId: "new-anchor",
+            });
+        } finally {
+          await controller.stop();
+        }
+      },
+    );
   });
 
   it("suppresses active and completed work-item owners", async () => {

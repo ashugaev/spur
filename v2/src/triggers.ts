@@ -13,6 +13,7 @@ import {
 import {
   deletePendingSendBatch,
   readSession,
+  listSessions,
   readPendingSpawnWork,
   writePendingSpawnWork,
   deletePendingSpawnWork,
@@ -41,8 +42,10 @@ import {
   type WorkItemEventData,
   type PersistedPendingBatch,
   type PersistedSpawnWork,
+  type SessionRecord,
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
+import { workspaceIdOf } from "./session-desk.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
@@ -225,6 +228,46 @@ interface WorkItemSuppressed {
   error?: string;
 }
 
+function matchingWorkItemDesk(
+  dataDir: string,
+  projectId: string,
+  data: WorkItemEventData,
+  blocks: TriggerSpawnBlockConfig[],
+): { anchor: SessionRecord; members: SessionRecord[] } | undefined {
+  const sessions = listSessions(dataDir).filter((session) => session.project === projectId);
+  const owned = (session: SessionRecord) =>
+    session.status === "running" || session.status === "spawning" || isStaleParked(session);
+  const matches = (session: SessionRecord, block: TriggerSpawnBlockConfig) =>
+    (session.originalTaskPrompt ?? session.prompt) === renderSpawnPrompt(block.prompt, data) &&
+    (block.agent === undefined || session.agent === block.agent) &&
+    (block.model === undefined || session.model === block.model) &&
+    (block.mode === undefined || session.mode === block.mode) &&
+    (block.reasoningEffort === undefined || session.reasoningEffort === block.reasoningEffort);
+  const first = blocks[0];
+  if (!first) return undefined;
+  for (const anchor of sessions) {
+    if (
+      workspaceIdOf(anchor) !== anchor.id ||
+      !anchor.slots?.links.some((link) => link.url === data.url) ||
+      !matches(anchor, first)
+    )
+      continue;
+    const members = owned(anchor) ? [anchor] : [];
+    for (const block of blocks.slice(1)) {
+      const member = sessions.find(
+        (session) =>
+          workspaceIdOf(session) === anchor.id &&
+          owned(session) &&
+          !members.includes(session) &&
+          matches(session, block),
+      );
+      if (member) members.push(member);
+    }
+    if (members.length > 0) return { anchor, members };
+  }
+  return undefined;
+}
+
 async function shouldClaimWorkItemSpawn(
   dataDir: string,
   service: SessionService,
@@ -234,13 +277,14 @@ async function shouldClaimWorkItemSpawn(
   workItemData: WorkItemEventData,
   autoClose: boolean,
   spawnWorkId?: string,
+  deskBlocks?: TriggerSpawnBlockConfig[],
 ): Promise<WorkItemSuppressed | null> {
   const existing = readWorkItemLifecycles(dataDir, projectId, sourceId).get(
     workItemData.externalId,
   );
   if (existing?.state === "pending") {
-    if (spawnWorkId !== undefined && existing.spawnWorkId === spawnWorkId) return null;
-    return { reason: "work_item_pending" };
+    if (spawnWorkId === undefined || existing.spawnWorkId !== spawnWorkId)
+      return { reason: "work_item_pending" };
   }
   if (existing?.state === "completed") {
     return { reason: "work_item_completed", ownerSessionId: existing.sessionId };
@@ -276,6 +320,21 @@ async function shouldClaimWorkItemSpawn(
       }
     }
   }
+
+  const desk = deskBlocks && matchingWorkItemDesk(dataDir, projectId, workItemData, deskBlocks);
+  if (desk) {
+    if (desk.members.length !== deskBlocks.length)
+      return { reason: "owner_not_replaceable", ownerSessionId: desk.anchor.id };
+    const owner = desk.members[desk.members.length - 1];
+    if (!owner) throw new Error("Missing work-item desk owner");
+    recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+      ...createWorkItemLifecycleBase(workItemData, autoClose),
+      state: "running",
+      sessionId: owner.id,
+    });
+    return { reason: "owner_active", ownerSessionId: owner.id };
+  }
+  if (existing?.state === "pending") return null;
 
   recordWorkItemLifecycle(dataDir, projectId, sourceId, {
     ...createWorkItemLifecycleBase(workItemData, autoClose),
@@ -344,6 +403,7 @@ async function runSpawnTrigger(
         workItemData,
         autoClose === true,
         work.workId,
+        deskGroup === true ? blocks : undefined,
       );
       if (suppressed) {
         logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
