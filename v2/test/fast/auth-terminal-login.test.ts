@@ -158,6 +158,11 @@ describe("auth terminal logins", () => {
 
     it("survives setRunning, the verifying rebuild and finish", async () => {
       const s = await setup();
+      let releaseCleanup!: () => void;
+      const cleanup = new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
+      });
+      s.deps.killTmuxSession.mockResolvedValueOnce(undefined).mockImplementationOnce(() => cleanup);
       s.deps.importNativeLogin.mockRejectedValueOnce(new Error("down"));
       const started = await s.terminals.start({ accountId: ACCOUNT });
       await s.advance();
@@ -172,6 +177,10 @@ describe("auth terminal logins", () => {
         status: "verifying",
         command: "claude auth login",
       });
+      expect(vi.getTimerCount()).toBe(0);
+      releaseCleanup();
+      // Cleanup must finish before the watcher rearms.
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1));
 
       s.deps.loginStatus.mockResolvedValueOnce(login("failed", { errorCode: "duplicate" }));
       await s.advance();
