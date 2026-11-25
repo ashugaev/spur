@@ -25,6 +25,15 @@ RESPONSIVE COLUMNS
   Preserve primary session identity and actions on narrow screens.
 
 
+TARGET SIZES
+
+  Every screen and component is designed and checked at three widths:
+  phone        390      no side panels; context as chips plus bottom sheet; 44px tap targets
+  iPad mini    744 and 1133 landscape   side panel collapsed, opens as overlay; 40px tap targets
+  desktop      1440     full layout, side panel inline
+  Same components at every size; only placement changes. A design missing one size is incomplete.
+
+
 STATES
 
   hover      text one step up; icon buttons and menu items add hover overlay

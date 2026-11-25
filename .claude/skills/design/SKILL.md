@@ -20,7 +20,7 @@ CONTRAST: every actionable element (button, icon, link, control) and its label.
 
 HANDOFF: $SPUR_SESSION_ARTIFACTS_DIR/design/, never committed.
 
-  proposed-ui.png   screenshot of changed components and affected states
+  proposed-ui.png   screenshot of changed components and affected states, at phone, iPad mini and desktop widths (design-system patterns.md TARGET SIZES)
   design-spec.md    current -> proposed behavior; screenshot paths;
                     components/states; acceptance criteria;
                     Approval status: pending | approved by user @ <ISO>;
