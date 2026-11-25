@@ -1603,6 +1603,7 @@ export interface SessionView extends Omit<
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
+  stateSource?: StateSource;
   stateHistory?: SessionStateTransition[];
   hasUnseenAttention?: boolean;
   lastActivityAt: string;
@@ -1674,6 +1675,7 @@ export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmitt
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
+  stateSource?: StateSource;
   hasUnseenAttention?: boolean;
   lastActivityAt: string;
   slots?: SessionSlots;
