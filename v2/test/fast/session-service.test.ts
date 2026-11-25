@@ -680,49 +680,91 @@ describe("SessionService", () => {
       },
     );
 
-    it("declares completed across views without stopping runtime or removing artifacts", async () => {
-      const { sessions, service } = await setup();
-      try {
-        const before = sessions.get("api-1");
-        expect(await service.readTaskStatus("api-1")).toEqual({ revision: 0 });
-        expect((await service.get("api-1")).state).toBe("waiting");
-        expect(
+    it.each(["completed", "needs_input"] as const)(
+      "declares %s across views without stopping runtime or removing artifacts",
+      async (state) => {
+        const { sessions, service } = await setup();
+        try {
+          const before = sessions.get("api-1");
+          expect(await service.readTaskStatus("api-1")).toEqual({ revision: 0 });
+          expect(await service.get("api-1")).toMatchObject({
+            state: "waiting",
+            stateSource: "jsonl",
+          });
+          expect(
+            await service.writeTaskStatus("api-1", {
+              state,
+              revision: 0,
+              agentLaunchId: "launch-a",
+            }),
+          ).toEqual({ revision: 0, state });
+          const detail = await service.get("api-1");
+          expect(detail).toMatchObject({
+            status: "running",
+            state,
+            stateSource: "task_status",
+            runtimeAlive: true,
+            workspaceExists: true,
+          });
+          expect(detail).not.toHaveProperty("taskStatus");
+          expect(detail).not.toHaveProperty("taskStatusRevision");
+          expect((await service.list({ view: "dashboard" }))[0]).toMatchObject({
+            state,
+            stateSource: "task_status",
+          });
+          expect((await service.list())[0]).toMatchObject({ state, stateSource: "task_status" });
+          expect(sessions.get("api-1")).toMatchObject({
+            status: before?.status,
+            worktreePath: before?.worktreePath,
+            agentLaunchId: "launch-a",
+          });
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+          expect(removeWorktreeMock).not.toHaveBeenCalled();
+          expect(
+            logSpurEventMock.mock.calls.some(
+              ([, event]) =>
+                event.event === "session.state.transition" &&
+                event.details?.toState === state &&
+                event.details?.source === "task_status",
+            ),
+          ).toBe(true);
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it.each(["working", "needs_input"] as const)(
+      "preserves native %s provenance with an active needs_input declaration",
+      async (state) => {
+        const { sessions, service } = await setup();
+        try {
           await service.writeTaskStatus("api-1", {
-            state: "completed",
+            state: "needs_input",
             revision: 0,
             agentLaunchId: "launch-a",
-          }),
-        ).toEqual({ revision: 0, state: "completed" });
-        const detail = await service.get("api-1");
-        expect(detail).toMatchObject({
-          status: "running",
-          state: "completed",
-          runtimeAlive: true,
-          workspaceExists: true,
-        });
-        expect(detail).not.toHaveProperty("taskStatus");
-        expect(detail).not.toHaveProperty("taskStatusRevision");
-        expect((await service.list({ view: "dashboard" }))[0]?.state).toBe("completed");
-        expect((await service.list())[0]?.state).toBe("completed");
-        expect(sessions.get("api-1")).toMatchObject({
-          status: before?.status,
-          worktreePath: before?.worktreePath,
-          agentLaunchId: "launch-a",
-        });
-        expect(killTmuxSessionMock).not.toHaveBeenCalled();
-        expect(removeWorktreeMock).not.toHaveBeenCalled();
-        expect(
-          logSpurEventMock.mock.calls.some(
-            ([, event]) =>
-              event.event === "session.state.transition" &&
-              event.details?.toState === "completed" &&
-              event.details?.source === "task_status",
-          ),
-        ).toBe(true);
-      } finally {
-        service.dispose();
-      }
-    });
+          });
+          mockClaudeJsonlState(state);
+          expect(await service.get("api-1")).toMatchObject({ state, stateSource: "jsonl" });
+          expect((await service.list())[0]).toMatchObject({ state, stateSource: "jsonl" });
+          await (
+            service as unknown as {
+              refreshDashboardCacheEntry(record: SessionRecord): Promise<void>;
+            }
+          ).refreshDashboardCacheEntry(sessions.get("api-1")!);
+          expect((await service.list({ view: "dashboard" }))[0]).toMatchObject({
+            state,
+            stateSource: "jsonl",
+          });
+          expect(await service.readTaskStatus("api-1")).toEqual({
+            revision: 0,
+            state: "needs_input",
+          });
+        } finally {
+          service.dispose();
+        }
+      },
+    );
 
     it("hides completed during raw working inside the waiting hold and restores it after the helper tail", async () => {
       const { service } = await setup();
@@ -86476,6 +86518,170 @@ describe("SessionService", () => {
         status,
       });
 
+      it.each(["ok", "unavailable", "rejection"] as const)(
+        "dispose settles blocked boot orphan discovery and fences late %s",
+        async (late) => {
+          const sessions = createSessionStore();
+          sessions.set("api-1", record("api-1", "completed"));
+          let release!: () => void;
+          let started!: () => void;
+          const scanStarted = new Promise<void>((resolve) => {
+            started = resolve;
+          });
+          const held = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          listDetachedSessionOwnersMock.mockImplementationOnce(async () => {
+            started();
+            await held;
+            if (late === "rejection") throw new Error("late scan failure");
+            return late === "ok"
+              ? { status: "ok", sessionIds: ["api-1"] }
+              : { status: "unavailable" };
+          });
+          const service = await createDisposedSessionService();
+          let drain: Promise<void> | undefined;
+          try {
+            await service.reconcileStoppedSessions();
+            await scanStarted;
+            service.dispose();
+            const writes = writeSessionMock.mock.calls.length;
+            const events = logSpurEventMock.mock.calls.length;
+            let drained = false;
+            drain = service.settleBackgroundSpawns().then(() => {
+              drained = true;
+            });
+            for (let turn = 0; turn < 40; turn++) await Promise.resolve();
+            expect(drained).toBe(true);
+            release();
+            await drain;
+            for (let turn = 0; turn < 40; turn++) await Promise.resolve();
+            expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+            expect(writeSessionMock).toHaveBeenCalledTimes(writes);
+            expect(logSpurEventMock).toHaveBeenCalledTimes(events);
+          } finally {
+            release();
+            service.dispose();
+            await drain;
+            await service.settleBackgroundSpawns();
+          }
+        },
+      );
+
+      it("dispose settles blocked GC tick orphan discovery before scan release", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", record("api-1", "completed"));
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        listDetachedSessionOwnersMock.mockImplementationOnce(async () => {
+          await held;
+          return { status: "ok", sessionIds: ["api-1"] };
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        try {
+          await vi.advanceTimersByTimeAsync(5 * 60_000);
+          expect(listDetachedSessionOwnersMock).toHaveBeenCalledTimes(1);
+          service.dispose();
+          const writes = writeSessionMock.mock.calls.length;
+          const events = logSpurEventMock.mock.calls.length;
+          let drained = false;
+          const drain = service.settleBackgroundSpawns().then(() => {
+            drained = true;
+          });
+          for (let turn = 0; turn < 40; turn++) await Promise.resolve();
+          expect(drained).toBe(true);
+          release();
+          await drain;
+          for (let turn = 0; turn < 40; turn++) await Promise.resolve();
+          expect(swept()).toEqual([]);
+          expect(writeSessionMock).toHaveBeenCalledTimes(writes);
+          expect(logSpurEventMock).toHaveBeenCalledTimes(events);
+        } finally {
+          release();
+          service.dispose();
+          await service.settleBackgroundSpawns();
+        }
+      });
+
+      it.each(["lock", "tmux", "clear", "unavailable", "survivors", "rejection"] as const)(
+        "dispose fences owner continuation at %s",
+        async (boundary) => {
+          const sessions = createSessionStore();
+          sessions.set("api-1", record("api-1", "completed"));
+          owners("api-1");
+          let release!: () => void;
+          let started!: () => void;
+          const held = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const reached = new Promise<void>((resolve) => {
+            started = resolve;
+          });
+          const service = await createDisposedSessionService();
+          const internals = sessionServiceInternals(service);
+          const state = service as unknown as {
+            detachedOrphanLogged: Set<string>;
+            detachedOrphanScanUnavailable: boolean;
+          };
+          state.detachedOrphanLogged.add("api-1:survivors");
+          if (boundary === "lock") {
+            internals.sessionLifecycleLocks.set("api-1", held);
+            const original = readSessionMock.getMockImplementation();
+            readSessionMock.mockImplementation((dir, id) => {
+              if (id === "api-1") started();
+              return original?.(dir, id);
+            });
+          } else if (boundary === "tmux") {
+            readTmuxServerPidMock.mockResolvedValueOnce({ status: "running", pid: 4844 });
+            readTmuxServerPidMock.mockImplementationOnce(async () => {
+              started();
+              await held;
+              return { status: "unavailable" };
+            });
+          } else {
+            terminateDetachedSessionProcessesMock.mockImplementationOnce(async () => {
+              started();
+              await held;
+              if (boundary === "rejection") throw new Error("late termination");
+              if (boundary === "survivors") return { status: "survivors", matched: 1, pids: [77] };
+              return boundary === "clear"
+                ? { status: "clear", matched: 1 }
+                : { status: "unavailable" };
+            });
+          }
+          const pass = sweeper(service).sweepDetachedOrphans("tick");
+          try {
+            await reached;
+            for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+            service.dispose();
+            const writes = writeSessionMock.mock.calls.length;
+            const events = logSpurEventMock.mock.calls.length;
+            const latches = [...state.detachedOrphanLogged];
+            const unavailable = state.detachedOrphanScanUnavailable;
+            let finished = false;
+            void pass.then(() => {
+              finished = true;
+            });
+            for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+            expect(finished).toBe(false);
+            release();
+            await pass;
+            expect(swept()).toEqual(boundary === "lock" || boundary === "tmux" ? [] : ["api-1"]);
+            expect(writeSessionMock).toHaveBeenCalledTimes(writes);
+            expect(logSpurEventMock).toHaveBeenCalledTimes(events);
+            expect([...state.detachedOrphanLogged]).toEqual(latches);
+            expect(state.detachedOrphanScanUnavailable).toBe(unavailable);
+          } finally {
+            release();
+            service.dispose();
+            await pass;
+          }
+        },
+      );
+
       it("periodic sweep reaps completed owner", async () => {
         const sessions = createSessionStore();
         sessions.set("api-1", record("api-1", "completed"));
@@ -86484,11 +86690,14 @@ describe("SessionService", () => {
         const service = await createDisposedSessionService();
         try {
           await sweeper(service).sweepDetachedOrphans("tick");
-          expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith({
-            sessionId: "api-1",
-            sessionToolDir: toolDir("api-1"),
-            tmuxServerPid: 4844,
-          });
+          expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+            {
+              sessionId: "api-1",
+              sessionToolDir: toolDir("api-1"),
+              tmuxServerPid: 4844,
+            },
+            { signal: expect.any(AbortSignal) },
+          );
           expect(sweepEvents("session.agent_process.detached_reaped")).toEqual([
             [
               TEST_DATA_DIR,
