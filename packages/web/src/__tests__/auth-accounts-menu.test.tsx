@@ -583,12 +583,22 @@ describe("AuthAccountsMenu", () => {
       cacheSessions(sessions);
       const trigger = screen.getByRole("button", { name: "Manage agent accounts" });
       fireEvent.mouseEnter(trigger);
-      fireEvent.click(await screen.findByRole("button", { name: "Switch Claude to home@x.com" }));
+      const switchButton = await screen.findByRole("button", {
+        name: "Switch Claude to home@x.com",
+      });
+      fireEvent.click(switchButton);
       const dialog = within(await screen.findByRole("dialog", { name: "Set Claude default" }));
-      fireEvent.mouseLeave(trigger.parentElement!);
+      const active = dialog.getByRole("radio", { name: /Also switch active sessions/ });
+      fireEvent.mouseOut(switchButton, { relatedTarget: active });
 
       expect(screen.queryByTestId("auth-accounts-popover")).toBeNull();
       expect(screen.getByRole("dialog", { name: "Set Claude default" })).toBeTruthy();
+      expect(
+        (dialog.getByRole("radio", { name: /Only new sessions/ }) as HTMLInputElement).checked,
+      ).toBe(true);
+      fireEvent.click(active);
+      expect((active as HTMLInputElement).checked).toBe(true);
+      expect(patches()).toEqual([]);
       fireEvent.click(dialog.getByRole("button", { name: "Cancel" }));
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
       expect(patches()).toEqual([]);

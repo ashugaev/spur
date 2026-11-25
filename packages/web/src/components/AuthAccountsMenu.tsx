@@ -409,77 +409,79 @@ export function AuthAccountsMenu() {
   });
 
   return (
-    <div
-      ref={popover.containerRef}
-      // Below sm the wrapper stays static, so the popover anchors to the
-      // full-width footer instead of this trigger and stays on screen.
-      className="sm:relative"
-      onBlur={(event) => {
-        if (!focusHandoff.current) popover.onBlur(event);
-      }}
-      onMouseEnter={popover.onMouseEnter}
-      onMouseLeave={popover.onMouseLeave}
-    >
-      <button
-        aria-expanded={popover.open}
-        aria-haspopup="true"
-        aria-label="Manage agent accounts"
-        className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-hidden transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)]"
-        data-testid="auth-accounts-trigger"
-        title="Manage agent accounts"
-        type="button"
-        onClick={popover.toggle}
+    <>
+      <div
+        ref={popover.containerRef}
+        // Below sm the wrapper stays static, so the popover anchors to the
+        // full-width footer instead of this trigger and stays on screen.
+        className="sm:relative"
+        onBlur={(event) => {
+          if (!focusHandoff.current) popover.onBlur(event);
+        }}
+        onMouseEnter={popover.onMouseEnter}
+        onMouseLeave={popover.onMouseLeave}
       >
-        <AccountsIcon className="h-4 w-4" />
-      </button>
-      {popover.open ? (
-        <div
-          className="absolute inset-x-2 bottom-full z-50 mb-1.5 flex max-h-[70vh] flex-col gap-3 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] sm:inset-x-auto sm:right-0 sm:w-[min(26rem,calc(100vw-1rem))]"
-          data-testid="auth-accounts-popover"
+        <button
+          aria-expanded={popover.open}
+          aria-haspopup="true"
+          aria-label="Manage agent accounts"
+          className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-hidden transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)]"
+          data-testid="auth-accounts-trigger"
+          title="Manage agent accounts"
+          type="button"
+          onClick={popover.toggle}
         >
-          {accountsQuery.isPending ? (
-            <div
-              aria-label="Loading accounts"
-              className="flex items-center justify-center py-2 text-[var(--color-text-tertiary)]"
-              data-testid="auth-accounts-loading"
-              role="status"
-            >
-              <Spinner className="h-4 w-4" strokeWidth={1.5} />
-            </div>
-          ) : accountsQuery.isError ? (
-            <div className="flex items-center justify-between gap-2">
-              <span className={`${NOTE_CLASS} text-[var(--color-status-error)]`} role="alert">
-                {accountsQuery.error.message}
-              </span>
-              <button
-                aria-busy={accountsQuery.isFetching || undefined}
-                className={SECONDARY_BUTTON_CLASS}
-                disabled={accountsQuery.isFetching}
-                type="button"
-                onClick={() => void accountsQuery.refetch()}
+          <AccountsIcon className="h-4 w-4" />
+        </button>
+        {popover.open ? (
+          <div
+            className="absolute inset-x-2 bottom-full z-50 mb-1.5 flex max-h-[70vh] flex-col gap-3 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] sm:inset-x-auto sm:right-0 sm:w-[min(26rem,calc(100vw-1rem))]"
+            data-testid="auth-accounts-popover"
+          >
+            {accountsQuery.isPending ? (
+              <div
+                aria-label="Loading accounts"
+                className="flex items-center justify-center py-2 text-[var(--color-text-tertiary)]"
+                data-testid="auth-accounts-loading"
+                role="status"
               >
-                <BusyContent busy={accountsQuery.isFetching}>Retry</BusyContent>
-              </button>
-            </div>
-          ) : (
-            AUTH_PROVIDERS.map((provider) => (
-              <ProviderSection
-                key={provider}
-                focusHandoff={focusHandoff}
-                accounts={accountsQuery.data.accounts.filter(
-                  (account) => account.provider === provider,
-                )}
-                pool={accountsQuery.data.pools[provider]}
-                poolMutation={poolMutation}
-                provider={provider}
-                onSetDefault={setSetDefault}
-                onSignIn={setSignIn}
-              />
-            ))
-          )}
-        </div>
-      ) : null}
-      {signIn ? <AuthSignInFlow target={signIn} onClose={closeSignIn} /> : null}
+                <Spinner className="h-4 w-4" strokeWidth={1.5} />
+              </div>
+            ) : accountsQuery.isError ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className={`${NOTE_CLASS} text-[var(--color-status-error)]`} role="alert">
+                  {accountsQuery.error.message}
+                </span>
+                <button
+                  aria-busy={accountsQuery.isFetching || undefined}
+                  className={SECONDARY_BUTTON_CLASS}
+                  disabled={accountsQuery.isFetching}
+                  type="button"
+                  onClick={() => void accountsQuery.refetch()}
+                >
+                  <BusyContent busy={accountsQuery.isFetching}>Retry</BusyContent>
+                </button>
+              </div>
+            ) : (
+              AUTH_PROVIDERS.map((provider) => (
+                <ProviderSection
+                  key={provider}
+                  focusHandoff={focusHandoff}
+                  accounts={accountsQuery.data.accounts.filter(
+                    (account) => account.provider === provider,
+                  )}
+                  pool={accountsQuery.data.pools[provider]}
+                  poolMutation={poolMutation}
+                  provider={provider}
+                  onSetDefault={setSetDefault}
+                  onSignIn={setSignIn}
+                />
+              ))
+            )}
+          </div>
+        ) : null}
+        {signIn ? <AuthSignInFlow target={signIn} onClose={closeSignIn} /> : null}
+      </div>
       {setDefault ? (
         <SetDefaultDialog
           account={setDefault.account}
@@ -497,6 +499,6 @@ export function AuthAccountsMenu() {
           }
         />
       ) : null}
-    </div>
+    </>
   );
 }
