@@ -391,7 +391,7 @@ export function CronJobEditor({
             <button
               aria-busy={state.saving || undefined}
               aria-label={state.saving ? "Saving YAML" : undefined}
-              className="bg-[var(--color-accent)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] outline-none transition hover:bg-[var(--color-accent-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
+              className="bg-[var(--color-accent)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] outline-none transition hover:bg-[var(--color-accent-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={state.saving || state.conflict || !dirty || invalid}
               type="submit"
             >

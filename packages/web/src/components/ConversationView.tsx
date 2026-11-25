@@ -104,7 +104,7 @@ function ToolEntryRow({ entry }: { entry: Extract<TranscriptEntry, { kind: "tool
         </div>
       ) : null}
       {output ? (
-        <div className={`mt-0.5 ${HARD_WRAP_TEXT_CLASS} opacity-80`}>
+        <div className={`mt-0.5 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}>
           <span className="text-label font-bold text-[var(--color-text-tertiary)]">out:</span>{" "}
           {truncate(output, MAX_TOOL_CHARS)}
         </div>

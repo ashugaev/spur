@@ -5,8 +5,8 @@ DS version: registry.json version, independent of the npm version. Commit type f
 
 SEMVER
 
-  major   remove or rename token, recipe, primitive, prop, variant; change a token role; add a guard ban
-  minor   add token, recipe, primitive, variant, scale; deprecate with alias; visible value change in the same role, contrast fixes included
+  major   remove or rename token, recipe, primitive, prop, variant; change a token role
+  minor   add token, recipe, primitive, variant, scale, guard ban; deprecate with alias; visible value change in the same role, contrast fixes included
   patch   invisible value fix (deltaE under 2), recipe bug fix, registry metadata
 
   Visible change at any bump: `design` approval first.
@@ -38,7 +38,9 @@ MIGRATION FILE
 
 GUARD, design-system.test.ts
 
-  sync        light block equals dark block minus derived equals registry tokens; registry recipes equal classes.ts exports
+  sync        registry tokens equal first-block tokens; light block equals color tokens minus derived; registry recipes equal classes.ts exports
+  role        every registry token states a role
+  alias       deprecated token value is var(replacement), with removeIn
   version     registry version equals newest migration file
   literals    no color literal outside tokens.css, colors.ts, literalAllow
   refs        every var(--color-*) in src names a registry token

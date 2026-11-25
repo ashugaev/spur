@@ -498,7 +498,7 @@ export function SpawnModal({
             <button
               aria-busy={submitting || undefined}
               aria-label={submitting ? submitBusyAriaLabel : undefined}
-              className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={submitDisabled}
               onClick={onSubmit}
               type="button"

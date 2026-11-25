@@ -304,7 +304,7 @@ function ConfirmStrip({
           Discard
         </button>
         <button
-          className={`inline-flex items-center justify-center gap-1.5 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-label font-bold uppercase tracking-label text-[var(--color-text-inverse)] transition hover:opacity-90 ${FOCUS_RING}`}
+          className={`inline-flex items-center justify-center gap-1.5 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-label font-bold uppercase tracking-label text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] ${FOCUS_RING}`}
           onClick={(event) => onSend(event.nativeEvent.isTrusted)}
           type="button"
         >

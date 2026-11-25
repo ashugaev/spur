@@ -408,7 +408,13 @@ export function SessionRow({
   const [activePopover, setActivePopover] = useState<ActiveRowPopover>(null);
   const isAttentionState = session.state === "needs_input";
   const hasSeenAttention = isAttentionState && session.hasUnseenAttention === false;
-  const attentionTextOpacity = hasSeenAttention ? "opacity-70" : "";
+  // Seen attention steps text down one level; opacity would break AA.
+  const projectColor = hasSeenAttention
+    ? "text-[var(--color-text-secondary)]"
+    : "text-[var(--color-text-primary)]";
+  const branchColor = hasSeenAttention
+    ? "text-[var(--color-text-tertiary)]"
+    : "text-[var(--color-text-secondary)]";
   const titleColor =
     isAttentionState && !hasSeenAttention
       ? "text-[var(--color-text-primary)]"
@@ -421,7 +427,7 @@ export function SessionRow({
   return (
     <DataRow>
       <span
-        className={`hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline ${attentionTextOpacity}`}
+        className={`hidden w-[7rem] shrink-0 truncate font-bold uppercase ${projectColor} sm:inline`}
       >
         {session.projectName}
       </span>
@@ -467,7 +473,7 @@ export function SessionRow({
       />
 
       <Link
-        className={`min-w-0 flex-1 truncate ${titleColor} hover:text-[var(--color-text-primary)] hover:no-underline ${attentionTextOpacity}`}
+        className={`min-w-0 flex-1 truncate ${titleColor} hover:text-[var(--color-text-primary)] hover:no-underline`}
         href={buildSessionPath(session.id, projectFilterId)}
       >
         {title}
@@ -498,7 +504,7 @@ export function SessionRow({
       ) : null}
 
       <span
-        className={`hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline ${attentionTextOpacity}`}
+        className={`hidden w-[8rem] shrink-0 truncate text-right font-mono ${branchColor} lg:inline`}
       >
         {session.branch}
       </span>

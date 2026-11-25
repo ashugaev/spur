@@ -302,7 +302,7 @@ export function FiltersModal({
             <div className="flex flex-wrap gap-2">
               <button
                 aria-pressed={prReadyOnly}
-                className={`${optionClass(prReadyOnly)}${prReadyUnavailable ? " opacity-60" : ""}`}
+                className={`${optionClass(prReadyOnly)}${prReadyUnavailable ? " opacity-50" : ""}`}
                 onClick={() => onPrReadyOnlyChange(!prReadyOnly)}
                 title={prReadyUnavailable ? "GitHub only — status unavailable" : "GitHub only"}
                 type="button"

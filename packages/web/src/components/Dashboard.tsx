@@ -315,7 +315,7 @@ function BacklogZone({
               >
                 {BACKLOG_PROVIDER_ICONS[item.provider]}
               </span>
-              <span className="shrink-0 font-semibold uppercase text-[var(--color-text-primary)]">
+              <span className="shrink-0 font-bold uppercase text-[var(--color-text-primary)]">
                 {item.key}
               </span>
               <span className="min-w-0 truncate">{item.title}</span>
@@ -446,7 +446,7 @@ function IconSliders() {
   return (
     <svg
       aria-hidden="true"
-      className="h-[13px] w-[13px] opacity-75"
+      className="h-[13px] w-[13px]"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -876,7 +876,7 @@ function NewProjectModal({
           >
             <span>Folder doesn&apos;t exist. Create it?</span>
             <button
-              className="self-start bg-[var(--color-accent)] px-3 py-1 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+              className="self-start bg-[var(--color-accent)] px-3 py-1 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={submitting}
               onClick={onCreateFolder}
               type="button"
@@ -896,7 +896,7 @@ function NewProjectModal({
           <button
             aria-busy={submitting || undefined}
             aria-label={submitting ? "Creating project" : undefined}
-            className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+            className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
             disabled={submitting}
             onClick={onSubmit}
             type="button"
@@ -1051,7 +1051,7 @@ function EditProjectModal({
               <button
                 aria-busy={deleting || undefined}
                 aria-label={deleting ? `${deleteLabel} in progress` : undefined}
-                className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-60"
+                className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={deleting}
                 onClick={onDelete}
                 type="button"
@@ -1067,7 +1067,7 @@ function EditProjectModal({
         <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-2">
           {deletable ? (
             <button
-              className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={deleting || confirmDeleteOpen}
               onClick={() => setConfirmDeleteOpen(true)}
               type="button"
@@ -1090,7 +1090,7 @@ function EditProjectModal({
               <button
                 aria-busy={submitting || undefined}
                 aria-label={submitting ? "Saving project" : undefined}
-                className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={submitting}
                 onClick={onSubmit}
                 type="button"

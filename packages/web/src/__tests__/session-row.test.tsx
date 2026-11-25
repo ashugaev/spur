@@ -882,7 +882,8 @@ describe("SessionRow", () => {
       />,
     );
 
-    expect(titleLink).toHaveClass("opacity-70");
+    expect(titleLink).toHaveClass("text-[var(--color-text-secondary)]");
+    expect(titleLink).not.toHaveClass("text-[var(--color-text-primary)]");
   });
 
   it("does not dim row text for non-needs_input states even when unseen", () => {

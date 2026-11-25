@@ -12,7 +12,7 @@ export function DataRow({ children }: { children: ReactNode }) {
 
 const BASE_BTN = `inline-flex h-6 w-6 shrink-0 items-center justify-center border transition ${FOCUS_RING_CLASS}`;
 const DISABLED_BTN =
-  "border-transparent text-[var(--color-text-tertiary)] opacity-25 cursor-not-allowed";
+  "border-transparent text-[var(--color-text-tertiary)] opacity-50 cursor-not-allowed";
 
 export function RowIconButton({
   label,

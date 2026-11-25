@@ -1,6 +1,6 @@
 ---
 name: design-system
-description: Spur web design system contract — tokens, recipes, primitives, patterns, contrast, versioning and migrations for packages/web. Use when adding, changing or reviewing a token, color, recipe, component variant or cross-screen pattern, or when planning a design-system phase. Don't use for non-visual web logic.
+description: Spur web design system contract — tokens, recipes, primitives, patterns, contrast, versioning and migrations for packages/web. Use when adding, changing or reviewing a token, color, recipe, component variant or cross-screen pattern, when the user gives design feedback, or when planning design-system work. Don't use for non-visual web logic.
 ---
 
 DESIGN SYSTEM
@@ -56,13 +56,30 @@ CHANGE
 
 REVIEW
 
-  designer and reviewer fail a diff on: literal color, copied recipe string, raw color prop on a tone component, missing focus ring, deprecated name past removeIn, contrast rule broken.
+  designer and reviewer fail a diff on any references/errors.md entry the diff adds. Guard entries fail CI first.
+
+LEARN
+
+User design feedback evolves the rules. Run on every correction, rejection or stated preference about visuals, tokens or design process.
+
+  1  Fix the instance the feedback names.
+  2  Classify: one-off taste for this screen, or a rule that applies beyond it. Repeated or general wording ("always", "never", "everywhere", "again") is a rule.
+  3  Rule: edit the owning file (tokens, patterns, contrast, components, errors, versioning). Contradiction: replace the old rule, never stack both.
+  4  Append one line to references/decisions.md: date, feedback, rule, file.
+  5  Regex-detectable without false positives: add a registry banned pattern; otherwise an errors.md review entry.
+  6  Token or recipe change: normal CHANGE procedure, version bump.
+  7  Mirror .agents and .claude in the same commit; PR body lists rule changes.
+  8  Heavy follow-up out of scope: GitHub issue linked from #1518 and roadmap.md.
+
+  Before designing, read decisions.md newest-first; a logged decision overrides a default in this skill.
 
 REFERENCES
 
-  references/tokens.md      token groups, roles, planned scales
-  references/components.md  recipes, primitives, consolidation targets
+  references/tokens.md      placement, naming, adding a token
+  references/components.md  recipes, tone helpers, primitives
   references/patterns.md    status map, zones, responsive columns, states, copy, voice
   references/contrast.md    guidelines C1-C9
+  references/errors.md      typical design errors, guard or review
+  references/decisions.md   user feedback log, newest last
   references/versioning.md  semver, lifecycle, migration format, guard checks
-  references/roadmap.md     phase status, next phases
+  references/roadmap.md     version status, follow-up issues

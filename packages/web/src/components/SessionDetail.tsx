@@ -266,7 +266,7 @@ function PromptSectionCopyButton({
   return (
     <button
       aria-label={`Copy ${copyLabel}`}
-      className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-[var(--color-text-tertiary)] opacity-70 transition hover:text-[var(--color-text-secondary)] hover:opacity-100 active:scale-[0.97]"
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-secondary)] active:scale-[0.97]"
       onClick={() => void onCopy(label, value)}
       title={`Copy ${copyLabel}`}
       type="button"
@@ -1220,7 +1220,7 @@ function ArtifactLightbox({
           ? `Copying ${artifact.name}`
           : `Copy ${artifact.name}`;
   const phoneImage = isPhone && artifact.kind === "image";
-  const phoneNavButtonClass = `${overlayButtonClass()} disabled:cursor-not-allowed disabled:opacity-40`;
+  const phoneNavButtonClass = `${overlayButtonClass()} disabled:cursor-not-allowed disabled:opacity-50`;
   const headerClassName = !isPhone
     ? "mb-4 flex items-center justify-between gap-3"
     : phoneImage
@@ -1366,7 +1366,7 @@ function ArtifactLightbox({
           {isPhone ? null : (
             <button
               aria-label="Previous artifact"
-              className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+              className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={!canGoPrevious}
               onClick={onPrevious}
               type="button"
@@ -1476,7 +1476,7 @@ function ArtifactLightbox({
           {isPhone ? null : (
             <button
               aria-label="Next artifact"
-              className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+              className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={!canGoNext}
               onClick={onNext}
               type="button"

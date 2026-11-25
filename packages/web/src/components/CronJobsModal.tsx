@@ -299,7 +299,7 @@ function JobRow({
         >
           <span className="flex min-w-0 items-baseline gap-2">
             <span
-              className={`truncate font-semibold ${PRIMARY_TEXT} underline-offset-2 group-focus-visible:text-[var(--color-accent)] group-focus-visible:underline`}
+              className={`truncate font-bold ${PRIMARY_TEXT} underline-offset-2 group-focus-visible:text-[var(--color-accent)] group-focus-visible:underline`}
             >
               {row.name}
             </span>

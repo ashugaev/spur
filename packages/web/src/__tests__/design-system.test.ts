@@ -13,6 +13,7 @@ const designDir = resolve(srcRoot, "design");
 
 type TokenEntry = {
   group: string;
+  role: string;
   since: string;
   contrast?: number;
   // Defined once from other tokens (color-mix); absent from the light block.
@@ -69,6 +70,12 @@ function colorTokens(block: string): Map<string, string> {
 }
 
 const dark = colorTokens(darkBlock);
+const allDark = new Map(
+  [...darkBlock.matchAll(/^\s*(--[a-z0-9-]+):\s*([^;]+);/gm)].map((m) => [
+    m[1],
+    m[2].replace(/\s+/g, " ").trim(),
+  ]),
+);
 const light = new Map([...dark, ...colorTokens(lightBlock)]);
 
 type Rgba = [number, number, number, number];
@@ -129,8 +136,21 @@ describe("design system: sync", () => {
     expect([...colorTokens(lightBlock).keys()].sort()).toEqual(themed.sort());
   });
 
-  it("registry lists exactly the declared --color-* tokens", () => {
-    expect(Object.keys(registry.tokens).sort()).toEqual([...dark.keys()].sort());
+  it("registry lists exactly the tokens declared in the first block", () => {
+    expect(Object.keys(registry.tokens).sort()).toEqual([...allDark.keys()].sort());
+  });
+
+  it("every registry token states its role", () => {
+    const missing = Object.entries(registry.tokens).filter(([, entry]) => !entry.role?.trim());
+    expect(missing.map(([name]) => name)).toEqual([]);
+  });
+
+  it("every deprecated token aliases its replacement", () => {
+    const deprecated = Object.entries(registry.tokens).filter(([, entry]) => entry.deprecated);
+    for (const [name, entry] of deprecated) {
+      expect(entry.replacement && entry.removeIn).toBeTruthy();
+      expect(allDark.get(name)).toBe(`var(${entry.replacement})`);
+    }
   });
 
   it("registry lists exactly the recipes exported by design/classes.ts", () => {
