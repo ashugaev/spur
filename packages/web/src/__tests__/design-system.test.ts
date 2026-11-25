@@ -79,6 +79,8 @@ const allDark = new Map(
 const light = new Map([...dark, ...colorTokens(lightBlock)]);
 
 type Rgba = [number, number, number, number];
+const themes = ["dark", "light"] as const;
+const tones = ["working", "ready", "attention", "error", "inactive"] as const;
 
 function parseColor(value: string): Rgba {
   const hex = /^#([0-9a-f]{6})$/i.exec(value);
@@ -92,6 +94,22 @@ function parseColor(value: string): Rgba {
     return [r, g, b, a];
   }
   throw new Error(`unsupported color literal: ${value}`);
+}
+
+function readColor(token: string, values: ReadonlyMap<string, string>): Rgba {
+  const value = values.get(token);
+  if (!value) throw new Error(`missing color token: ${token}`);
+  const alias = /^var\((--color-[a-z0-9-]+)\)$/.exec(value);
+  if (alias) return readColor(alias[1], values);
+  const mix =
+    /^color-mix\(\s*in srgb,\s*var\((--color-[a-z0-9-]+)\)\s+(\d+(?:\.\d+)?)%,\s*transparent\s*\)$/.exec(value);
+  if (mix) {
+    const weight = Number(mix[2]) / 100;
+    if (weight > 1) throw new Error(`invalid color-mix percentage: ${value}`);
+    const [r, g, b, alpha] = readColor(mix[1], values);
+    return [r, g, b, alpha * weight];
+  }
+  return parseColor(value);
 }
 
 function over(top: Rgba, under: Rgba): Rgba {
@@ -217,30 +235,107 @@ describe("design system: literals and deprecations", () => {
 
 describe("design system: contrast", () => {
   const rules = Object.entries(registry.tokens).filter(([, entry]) => entry.contrast);
+  const valuesFor = (theme: (typeof themes)[number]) => (theme === "dark" ? dark : light);
+  const groundsFor = (values: ReadonlyMap<string, string>) => {
+    const base = readColor("--color-bg-base", values);
+    return registry.surfaces.flatMap((surface) => {
+      const ground = over(readColor(surface, values), base);
+      return [
+        ground,
+        ...registry.overlays.map((overlay) => over(readColor(overlay, values), ground)),
+      ];
+    });
+  };
+
+  it("resolves derived percentages against the active theme", () => {
+    const values = new Map([
+      ["--color-source", "rgba(20, 40, 60, 0.8)"],
+      ["--color-alias", "var(--color-source)"],
+      ["--color-derived", "color-mix(in srgb, var(--color-alias) 25%, transparent)"],
+    ]);
+    expect(readColor("--color-derived", values)).toEqual([20, 40, 60, 0.2]);
+    const lightValues = new Map([...values, ["--color-source", "#ffffff"]]);
+    expect(readColor("--color-derived", lightValues)).toEqual([255, 255, 255, 0.25]);
+  });
+
+  it("rejects missing references and unsupported color expressions", () => {
+    expect(() => readColor("--color-missing", dark)).toThrow("missing color token");
+    for (const value of [
+      "var(--color-missing)",
+      "color-mix(in srgb, var(--color-missing) 12%, transparent)",
+      "color-mix(in oklab, var(--color-bg-base) 12%, transparent)",
+      "color-mix(in srgb, var(--color-bg-base) 101%, transparent)",
+    ]) {
+      expect(() => readColor("--color-test", new Map([...dark, ["--color-test", value]]))).toThrow();
+    }
+  });
 
   it.each(
-    (["dark", "light"] as const).flatMap((theme) =>
+    themes.flatMap((theme) =>
       rules.map(([name, entry]) => [theme, name, entry.contrast ?? 0] as const),
     ),
   )("%s %s meets %s:1 on every surface and overlay", (theme, name, min) => {
-    const values = theme === "dark" ? dark : light;
-    const read = (token: string) => {
-      const value = values.get(token);
-      if (!value) throw new Error(`${token} missing in ${theme}`);
-      return parseColor(value);
-    };
-    const base = read("--color-bg-base");
-    const grounds = registry.surfaces.flatMap((surface) => {
-      const ground = over(read(surface), base);
-      return [ground, ...registry.overlays.map((overlay) => over(read(overlay), ground))];
-    });
-    const worst = Math.min(...grounds.map((ground) => ratio(over(read(name), ground), ground)));
+    const values = valuesFor(theme);
+    const worst = Math.min(
+      ...groundsFor(values).map((ground) => ratio(over(readColor(name, values), ground), ground)),
+    );
     expect(worst).toBeGreaterThanOrEqual(min);
   });
+
+  it.each(themes.flatMap((theme) => tones.map((tone) => [theme, tone] as const)))(
+    "%s %s words meet their contrast rule on own tint, every surface and overlay",
+    (theme, tone) => {
+      const values = valuesFor(theme);
+      const token = toneColor(tone).slice(4, -1);
+      const foreground = readColor(token, values);
+      const tint = readColor(toneBg(tone).slice(4, -1), values);
+      const worst = Math.min(
+        ...groundsFor(values).map((ground) => {
+          const background = over(tint, ground);
+          return ratio(over(foreground, background), background);
+        }),
+      );
+      const min = registry.tokens[token].contrast;
+      if (!min) throw new Error(`missing contrast rule: ${token}`);
+      expect(worst).toBeGreaterThanOrEqual(min);
+    },
+  );
+
+  const solidPairs = [
+    ["--color-text-inverse", "--color-accent"],
+    ["--color-text-inverse", "--color-accent-hover"],
+    ["--color-bg-elevated", "--color-status-error"],
+    ["--color-bg-elevated", "--color-status-attention"],
+  ] as const;
+  it("primary recipe uses the guarded inverse label and accent fills", () => {
+    const colorUtilities = recipes.PRIMARY_BUTTON_CLASS.split(/\s+/).filter((name) =>
+      /^(?:hover:)?(?:bg|text)-\[var\(--color-/.test(name),
+    );
+    expect(colorUtilities).toEqual([
+      `bg-[var(${solidPairs[0][1]})]`,
+      `text-[var(${solidPairs[0][0]})]`,
+      `hover:bg-[var(${solidPairs[1][1]})]`,
+    ]);
+  });
+  it.each(
+    themes.flatMap((theme) => solidPairs.map(([label, fill]) => [theme, label, fill] as const)),
+  )(
+    "%s recipe label %s meets 4.5:1 on %s",
+    (theme, label, fill) => {
+      const values = valuesFor(theme);
+      const worst = Math.min(
+        ...groundsFor(values).map((ground) => {
+          const background = over(readColor(fill, values), ground);
+          return ratio(over(readColor(label, values), background), background);
+        }),
+      );
+      expect(worst).toBeGreaterThanOrEqual(4.5);
+    },
+  );
 });
 
 describe("design system: tone set", () => {
-  it.each(["working", "ready", "attention", "error", "inactive"] as const)(
+  it.each(tones)(
     "%s resolves to registry tokens",
     (tone) => {
       for (const ref of [toneColor(tone), toneBg(tone), toneBorder(tone)]) {

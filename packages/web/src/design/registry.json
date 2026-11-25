@@ -1,5 +1,5 @@
 {
-  "version": "2.1.0",
+  "version": "2.2.0",
   "surfaces": ["--color-bg-base", "--color-bg-surface", "--color-bg-elevated"],
   "overlays": ["--color-hover-overlay"],
   "tokens": {

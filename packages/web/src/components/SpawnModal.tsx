@@ -507,7 +507,7 @@ export function SpawnModal({
                 <span>{submitLabel}</span>
                 <span
                   aria-hidden="true"
-                  className="whitespace-nowrap font-mono text-label font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                  className="whitespace-nowrap font-mono text-label font-medium normal-case tracking-normal"
                 >
                   {PRIMARY_SUBMIT_HINT}
                 </span>
