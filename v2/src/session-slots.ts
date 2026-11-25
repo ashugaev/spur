@@ -832,10 +832,15 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
     );
   }
   if (args.snapshotHook?.enabled === false) {
-    writeToolFileAtomic(join(toolDir, SNAPSHOT_HOOK_TOOL_NAME), "#!/usr/bin/env bash\nexit 0\n", {
-      encoding: "utf8",
-      mode: 0o755,
-    });
+    // Drain hook input before exiting so the caller's stdin writer cannot hit EPIPE.
+    writeToolFileAtomic(
+      join(toolDir, SNAPSHOT_HOOK_TOOL_NAME),
+      "#!/usr/bin/env bash\nexec cat >/dev/null\n",
+      {
+        encoding: "utf8",
+        mode: 0o755,
+      },
+    );
   } else if (args.snapshotHook) {
     writeToolFileAtomic(
       join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME),
