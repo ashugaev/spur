@@ -49,7 +49,7 @@ CHANGE
   4  registry.json: add, deprecate or remove entry; bump version.
   5  Write migrations/<version>.md: names and intent, never values.
   6  Rename: alias old to new and deprecate. Remove only in next major.
-  7  Migrate callsites by hand, one file at a time. `rg` the old name first.
+  7  Migrate callsites; `rg` the old name first.
   8  Run named tests: design-system.test.ts, snippet-protocol.test.ts, snippet-tokens.test.ts, touched component tests.
   9  Phase merged: update references/roadmap.md status.
   10 PR body states DS version before -> after.
@@ -68,7 +68,7 @@ User design feedback evolves the rules. Run on every correction, rejection or st
   4  Append one line to references/decisions.md: date, feedback, rule, file.
   5  Regex-detectable without false positives: add a registry banned pattern; otherwise an errors.md review entry.
   6  Token or recipe change: normal CHANGE procedure, version bump.
-  7  Mirror .agents and .claude in the same commit; PR body lists rule changes.
+  7  PR body lists rule changes.
   8  Heavy follow-up out of scope: GitHub issue linked from #1518 and roadmap.md.
 
   Before designing, read decisions.md newest-first; a logged decision overrides a default in this skill.

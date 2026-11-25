@@ -17,7 +17,7 @@ LIFECYCLE
 
   1  add         token per references/tokens.md placement plus registry entry; minor
   2  deprecate   old name aliases new: --old: var(--new); registry entry gains deprecated, replacement, removeIn
-  3  migrate     callsites by hand, one file at a time; never sed or codemods
+  3  migrate     callsites use replacement
   4  remove      next major deletes alias and entry; guard fails on leftovers once version >= removeIn
 
   Never add and remove in one version.

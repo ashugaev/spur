@@ -18,6 +18,5 @@ DO NOT
 VALIDATION
 
   Follow manager's check ownership and cheapest boundary tier.
-  Run named tests for changed modules and direct callers.
   Verify changed visual flows on branch's real isolated-ui sidecar; check secure-context behavior through HTTPS when required.
   Capture and inspect affected states in both themes.
