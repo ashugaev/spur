@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import type * as FsPromises from "node:fs/promises";
 import { join } from "node:path";
+import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DAEMON_OPERATIONS,
@@ -26,9 +27,9 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
   "server.ts": "cbb577ed8b94cea18c7fe215cf796dc1ad5e265d5324b55de728707d611ff714",
-  "types.ts": "82866d077db1bc37facf475ef22a971c0cd49ca5057ed6d1eec172b1c57e37d1",
+  "types.ts": "8b7c28b7961d8b773cbe01919101c71c9b92f8528923c69165eaeb875562b233",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "c3334f66f037dadf480139b917006fefba09a53f5a2141ccfc9b2a30ff9f1ddd",
+  "session-service.ts": "f2d2e13d971d1a763b12e3779d00a2b64edac2210a29174209ec9a05301ee861",
   "session-transitions.ts": "832771b8d95a6722cf67fc05685f2fd5f03e7a60a923c7a438e1b5b3bc0dcbb0",
   "session-slots.ts": "cb766d6b58c70f34775a18edf6afa77312acdc766a017770b30102462535ed73",
   "task-status.ts": "98700844f71e5d5edfd628c92653ed3cfcde4ff6c213acd24b9751935034bea1",
@@ -105,6 +106,30 @@ describe("daemon MCP operation contracts", () => {
       ).toBe(fingerprint);
     },
   );
+
+  it("exposes optional state provenance through session detail and list contracts", async () => {
+    const types = await source("types.ts");
+    const parsed = ts.createSourceFile("types.ts", types, ts.ScriptTarget.Latest, true);
+    for (const dto of ["SessionView", "DashboardSessionView"]) {
+      const declaration = parsed.statements.find(
+        (node): node is ts.InterfaceDeclaration =>
+          ts.isInterfaceDeclaration(node) && node.name.text === dto,
+      );
+      const provenance = declaration?.members.find(
+        (member): member is ts.PropertySignature =>
+          ts.isPropertySignature(member) && member.name.getText(parsed) === "stateSource",
+      );
+      expect(provenance?.questionToken, dto).toBeDefined();
+      expect(provenance?.type?.getText(parsed), dto).toBe("StateSource");
+    }
+    expect(getDaemonOperation("get_session")?.responses[0]?.description).toBe("SessionView");
+    expect(getDaemonOperation("list_sessions")?.responses[0]?.description).toBe(
+      "SessionListView[]; x-spur-lifecycle-instance-id header",
+    );
+    expect(getDaemonOperation("list_sessions")?.query).toContainEqual(
+      expect.objectContaining({ name: "view", type: '"full"|"dashboard"', required: false }),
+    );
+  });
 
   it("detects route additions, DTO additions and parser behavior changes", async () => {
     const server = await source("server.ts");
