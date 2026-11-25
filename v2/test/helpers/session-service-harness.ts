@@ -257,16 +257,20 @@ const terminateAgentProcessesMock = vi.fn<
   (processes: readonly AgentProcessRef[]) => Promise<AgentTerminationOutcome>
 >(() => Promise.resolve({ status: "clear" }));
 const terminateDetachedSessionProcessesMock = vi.fn<
-  (input: {
-    sessionId: string;
-    sessionToolDir: string;
-    tmuxServerPid: number | null;
-  }) => Promise<DetachedSweepOutcome>
+  (
+    input: {
+      sessionId: string;
+      sessionToolDir: string;
+      tmuxServerPid: number | null;
+    },
+    options?: { signal?: AbortSignal },
+  ) => Promise<DetachedSweepOutcome>
 >(() => Promise.resolve({ status: "clear", matched: 0 }));
 const listDetachedSessionOwnersMock = vi.fn<
   (input: {
     toolDirFor: (sessionId: string) => string;
     tmuxServerPid: number | null;
+    signal?: AbortSignal;
   }) => Promise<{ status: "unavailable" } | { status: "ok"; sessionIds: string[] }>
 >(() => Promise.resolve({ status: "ok", sessionIds: [] }));
 const readTmuxServerPidMock = vi.fn<() => Promise<runtimeTmuxModule.TmuxServerPid>>(() =>

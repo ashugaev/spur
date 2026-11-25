@@ -2716,17 +2716,20 @@ export function Dashboard() {
     const dialog = openPrAction;
     setOpenPrActionBusy(dialog);
     try {
-      // Clear only on a real completion: a second failure re-opens a dialog,
-      // and dismissing it here would drop the user back to a bare row.
-      const done =
+      const pending =
         dialog.action === "kill"
-          ? await handleKillSession(dialog.session, { prAction })
-          : await handleCompleteSession(dialog.session, { prAction, retry: true });
+          ? handleKillSession(dialog.session, { prAction })
+          : handleCompleteSession(dialog.session, { prAction, retry: true });
+      if (prAction === "leave_open") {
+        setOpenPrAction((current) => (current === dialog ? null : current));
+        actionDialogs.closeRecover();
+      }
+      const done = await pending;
       if (done) {
         setOpenPrAction((current) => (current === dialog ? null : current));
       }
     } catch {
-      // handleCompleteSession already toasted; keep the dialog reachable.
+      // The lifecycle handler already toasted the error.
     } finally {
       setOpenPrActionBusy((current) => (current === dialog ? null : current));
     }

@@ -149,15 +149,20 @@ function collapseToShallowest(
 async function filterAliveRefs(
   refs: readonly AgentProcessRef[],
   readIdentity: ProcessIdentityReader,
+  signal?: AbortSignal,
 ): Promise<AgentProcessRef[]> {
+  signal?.throwIfAborted();
   const snapshot = await snapshotProcessLiveness();
+  signal?.throwIfAborted();
   const alive =
     snapshot.status === "unavailable"
       ? [...refs]
       : refs.filter((ref) => snapshot.alivePids.has(ref.pid));
   const kept: AgentProcessRef[] = [];
   for (const ref of alive) {
-    if (await isStillSameProcess(ref, readIdentity)) {
+    const same = await isStillSameProcess(ref, readIdentity);
+    signal?.throwIfAborted();
+    if (same) {
       kept.push(ref);
     }
   }
@@ -169,12 +174,13 @@ async function pollUntilDead(
   graceMs: number,
   pollMs: number,
   readIdentity: ProcessIdentityReader,
+  signal?: AbortSignal,
 ): Promise<AgentProcessRef[]> {
   const deadline = Date.now() + graceMs;
-  let alive = await filterAliveRefs(refs, readIdentity);
+  let alive = await filterAliveRefs(refs, readIdentity, signal);
   while (alive.length > 0 && Date.now() < deadline) {
-    await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
-    alive = await filterAliveRefs(alive, readIdentity);
+    await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())), undefined, { signal });
+    alive = await filterAliveRefs(alive, readIdentity, signal);
   }
   return alive;
 }
@@ -409,23 +415,34 @@ export async function terminateAgentProcesses(
     termGraceMs?: number;
     killGraceMs?: number;
     readIdentity?: ProcessIdentityReader;
+    signal?: AbortSignal;
   },
 ): Promise<AgentTerminationOutcome> {
   const hupGraceMs = options?.hupGraceMs ?? DEFAULT_GRACE_MS;
   const termGraceMs = options?.termGraceMs ?? DEFAULT_GRACE_MS;
   const killGraceMs = options?.killGraceMs ?? DEFAULT_GRACE_MS;
   const readIdentity = options?.readIdentity ?? readProcessIdentity;
+  const signal = options?.signal;
 
-  let survivors = await filterAliveRefs([...processes].reverse(), readIdentity);
+  let survivors = await filterAliveRefs([...processes].reverse(), readIdentity, signal);
+  signal?.throwIfAborted();
   if (survivors.length === 0) {
     return { status: "clear" };
   }
 
-  for (const signal of ["SIGHUP", "SIGTERM", "SIGKILL"] as const) {
+  for (const processSignal of ["SIGHUP", "SIGTERM", "SIGKILL"] as const) {
     const graceMs =
-      signal === "SIGHUP" ? hupGraceMs : signal === "SIGTERM" ? termGraceMs : killGraceMs;
-    for (const ref of survivors) signalPid(ref.pid, signal);
-    survivors = await pollUntilDead(survivors, graceMs, POLL_MS, readIdentity);
+      processSignal === "SIGHUP"
+        ? hupGraceMs
+        : processSignal === "SIGTERM"
+          ? termGraceMs
+          : killGraceMs;
+    for (const ref of survivors) {
+      signal?.throwIfAborted();
+      signalPid(ref.pid, processSignal);
+    }
+    survivors = await pollUntilDead(survivors, graceMs, POLL_MS, readIdentity, signal);
+    signal?.throwIfAborted();
     if (survivors.length === 0) {
       return { status: "clear" };
     }
@@ -449,13 +466,18 @@ export async function terminateDetachedSessionProcesses(
   input: { sessionId: string; sessionToolDir: string; tmuxServerPid: number | null },
   options?: Parameters<typeof terminateAgentProcesses>[1],
 ): Promise<DetachedSweepOutcome> {
+  const signal = options?.signal;
+  signal?.throwIfAborted();
   if (process.env.SPUR_SESSION === input.sessionId) {
     return { status: "unavailable" };
   }
-  if (!(await canReadProcessEnv())) {
+  const envReadable = await canReadProcessEnv();
+  signal?.throwIfAborted();
+  if (!envReadable) {
     return { status: "unavailable" };
   }
   const snapshot = await snapshotProcesses();
+  signal?.throwIfAborted();
   if (snapshot.status === "unavailable") {
     return { status: "unavailable" };
   }
@@ -469,13 +491,19 @@ export async function terminateDetachedSessionProcesses(
   for (const proc of snapshot.processes) {
     if (excluded.has(proc.pid)) continue;
     const before = await readProcessIdentity(proc.pid);
+    signal?.throwIfAborted();
     if (before === null) continue;
-    if (!markersMatch(await readSessionMarkers(proc.pid), expectation)) continue;
-    if ((await readProcessIdentity(proc.pid)) === before) {
+    const markers = await readSessionMarkers(proc.pid);
+    signal?.throwIfAborted();
+    if (!markersMatch(markers, expectation)) continue;
+    const after = await readProcessIdentity(proc.pid);
+    signal?.throwIfAborted();
+    if (after === before) {
       refs.push({ pid: proc.pid, identity: before });
     }
   }
   const outcome = await terminateAgentProcesses(refs, options);
+  signal?.throwIfAborted();
   return { ...outcome, matched: refs.length };
 }
 
@@ -509,15 +537,21 @@ function sweepExclusions(
 export async function listDetachedSessionOwners(input: {
   toolDirFor: (sessionId: string) => string;
   tmuxServerPid: number | null;
+  signal?: AbortSignal;
 }): Promise<{ status: "unavailable" } | { status: "ok"; sessionIds: string[] }> {
-  if (!(await canReadProcessEnv())) return { status: "unavailable" };
+  input.signal?.throwIfAborted();
+  const envReadable = await canReadProcessEnv();
+  input.signal?.throwIfAborted();
+  if (!envReadable) return { status: "unavailable" };
   const snapshot = await snapshotProcesses();
+  input.signal?.throwIfAborted();
   if (snapshot.status === "unavailable") return { status: "unavailable" };
   const excluded = sweepExclusions(snapshot.processes, input.tmuxServerPid);
   const sessionIds = new Set<string>();
   for (const proc of snapshot.processes) {
     if (excluded.has(proc.pid)) continue;
     const markers = await readSessionMarkers(proc.pid);
+    input.signal?.throwIfAborted();
     const id = markers.sessionEnv.status === "ok" ? markers.sessionEnv.value : undefined;
     if (!id) continue;
     const expectation: MarkerExpectation = {
