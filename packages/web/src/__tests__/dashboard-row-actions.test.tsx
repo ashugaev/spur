@@ -326,4 +326,60 @@ describe("Dashboard row actions", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(calls).toEqual(["restore", "kill"]);
   });
+
+  it.each(["success", "error"] as const)(
+    "dismisses both consumed recovery dialogs while leave-open kill awaits %s",
+    async (outcome) => {
+      const source: SpurSessionView = { ...running, workspaceExists: false };
+      let rows = [source];
+      const kills: unknown[] = [];
+      let release!: (response: Response) => void;
+      const pending = new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+      mount(async (url, init) => {
+        if (url === "/api/sessions") return list(rows);
+        if (url.endsWith("/kill")) {
+          kills.push(JSON.parse(String(init?.body)) as unknown);
+          if (kills.length === 1)
+            return json(
+              {
+                code: "open_pr_action_required",
+                sessionId: running.id,
+                pr: { number: 1, title: "PR", url: "https://github.com/test/repo/pull/1" },
+              },
+              409,
+            );
+          return pending;
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      await choose("Recover");
+      fireEvent.click(screen.getByRole("button", { name: "Force Kill" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Leave Pull Request Open" }));
+      expect(screen.queryByRole("dialog", { name: "Open Pull Request" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "Recover Session" })).not.toBeInTheDocument();
+      await waitFor(() => expect(kills).toHaveLength(2));
+      expect(kills).toEqual([{ force: true }, { force: true, prAction: "leave_open" }]);
+      expect(
+        screen.queryByRole("button", { name: `Actions for ${running.id}` }),
+      ).not.toBeInTheDocument();
+      await act(async () => {
+        if (outcome === "success") {
+          rows = [{ ...source, status: "killed", state: "killed", runtimeAlive: false }];
+          release(json({ ok: true }));
+        } else {
+          release(json({ error: "Recovery kill failed" }, 500));
+        }
+      });
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      if (outcome === "error") {
+        expect(await screen.findByText("Recovery kill failed")).toBeInTheDocument();
+        await choose("Recover");
+        expect(screen.getByRole("button", { name: "Force Kill" })).toBeEnabled();
+      } else {
+        expect(screen.queryByText("Row session")).not.toBeInTheDocument();
+      }
+    },
+  );
 });
