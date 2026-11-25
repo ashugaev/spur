@@ -6385,6 +6385,88 @@ describe("startConfiguredTriggers", () => {
       },
     );
 
+    it.each(["spawning", "running"] as const)(
+      "resolves its own accepted first birth at index zero after an uncertain response: %s",
+      async (status) => {
+        const { config, sessions } = fixture();
+        const records = useWorkItemLifecycleStore();
+        const { startConfiguredTriggers } = await loadTriggersModule();
+        const bus = new EventBus();
+        const initial = startConfiguredTriggers({
+          config: config as never,
+          bus,
+          sessionService: {} as never,
+          memoryHoldEngaged: () => true,
+          logger: { warn: vi.fn() },
+        });
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => expect(pendingSpawnWork.size).toBe(1));
+        await initial.stop();
+        const work = [...pendingSpawnWork.values()][0];
+        const birth = sessions[0];
+        if (!work || !birth) throw new Error("Missing accepted first-birth fixture");
+        expect(work.nextBlockIndex).toBe(0);
+        birth.status = status;
+        birth.triggerBirthKey = `${work.workId}:0`;
+        listSessionsMock.mockReturnValue([birth]);
+        records.set(workItemEvent().data.externalId, {
+          ...workItemEvent().data,
+          autoClose: false,
+          createdAt: work.createdAt,
+          state: "pending",
+          spawnWorkId: work.workId,
+        });
+        const retained = structuredClone(birth);
+        const spawn = vi
+          .fn()
+          .mockRejectedValueOnce(new Error("Original first-birth response was uncertain"))
+          .mockResolvedValueOnce({ id: "new-browser", status: "running" });
+        const getTriggerBirth = vi.fn((_project, key) =>
+          key === birth.triggerBirthKey ? birth : undefined,
+        );
+        const controller = startConfiguredTriggers({
+          config: config as never,
+          bus,
+          sessionService: {
+            spawn,
+            getTriggerBirth,
+            get: vi
+              .fn()
+              .mockResolvedValueOnce({ ...birth, state: "waiting", workspaceExists: true })
+              .mockResolvedValue({
+                ...birth,
+                status: "running",
+                state: "waiting",
+                workspaceExists: true,
+              }),
+          } as never,
+          logger: { warn: vi.fn() },
+        });
+        try {
+          await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+          expect(spawn.mock.calls[0]?.[1]).toEqual({ triggerBirthKey: birth.triggerBirthKey });
+          expect(getTriggerBirth).toHaveBeenCalledWith(
+            "api",
+            birth.triggerBirthKey,
+            spawn.mock.calls[0]?.[0],
+          );
+          expect(spawn.mock.calls[1]?.[0]).toMatchObject({ reuseWorkspaceSessionId: birth.id });
+          expect(records.get(workItemEvent().data.externalId)).toMatchObject({
+            state: "running",
+            sessionId: "new-browser",
+          });
+          expect(birth).toEqual(retained);
+          expect(
+            logSpurEventMock.mock.calls.some(
+              ([, entry]) => entry.event === "trigger.spawn.suppressed",
+            ),
+          ).toBe(false);
+        } finally {
+          await controller.stop();
+        }
+      },
+    );
+
     it.each(["project", "url", "model", "prompt", "terminal", "non-desk"])(
       "does not adopt an unrelated or terminal desk: %s",
       async (mismatch) => {

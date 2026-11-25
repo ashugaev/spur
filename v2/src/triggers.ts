@@ -233,8 +233,17 @@ function matchingWorkItemDesk(
   projectId: string,
   data: WorkItemEventData,
   blocks: TriggerSpawnBlockConfig[],
+  ownBirthKey?: string,
 ): { anchor: SessionRecord; members: SessionRecord[] } | undefined {
-  const sessions = listSessions(dataDir).filter((session) => session.project === projectId);
+  const allSessions = listSessions(dataDir);
+  // An accepted birth may precede the first saved progress checkpoint. Let the
+  // original same-key resolver validate/recover it, not manual-desk adoption.
+  if (
+    ownBirthKey !== undefined &&
+    allSessions.some((session) => session.triggerBirthKey === ownBirthKey)
+  )
+    return undefined;
+  const sessions = allSessions.filter((session) => session.project === projectId);
   const owned = (session: SessionRecord) =>
     session.status === "running" || session.status === "spawning" || isStaleParked(session);
   const matches = (session: SessionRecord, block: TriggerSpawnBlockConfig) =>
@@ -321,7 +330,15 @@ async function shouldClaimWorkItemSpawn(
     }
   }
 
-  const desk = deskBlocks && matchingWorkItemDesk(dataDir, projectId, workItemData, deskBlocks);
+  const desk =
+    deskBlocks &&
+    matchingWorkItemDesk(
+      dataDir,
+      projectId,
+      workItemData,
+      deskBlocks,
+      spawnWorkId === undefined ? undefined : `${spawnWorkId}:0`,
+    );
   if (desk) {
     if (desk.members.length !== deskBlocks.length)
       return { reason: "owner_not_replaceable", ownerSessionId: desk.anchor.id };
