@@ -37,7 +37,13 @@ afterEach(async () => {
 
 async function launcherFixture(
   context: TestContext,
-  options: { delay?: number; failDaemon?: boolean; failUi?: boolean; timeout?: boolean } = {},
+  options: {
+    delay?: number;
+    failDaemon?: boolean;
+    failUi?: boolean;
+    timeout?: boolean;
+    exitDaemonDescendant?: boolean;
+  } = {},
 ) {
   const deadline = performance.now() + context.task.timeout - CLEANUP_BUDGET_MS;
   const root = await mkdtemp(join(tmpdir(), "spur-combined-"));
@@ -76,14 +82,18 @@ import {readLiveProcessStarttime} from ${JSON.stringify(resolve("dist/sidecars/r
 const kind=process.argv[2];
 const record=value=>appendFileSync(${JSON.stringify(events)},value+'\\n');
 record(kind+' '+process.pid);
-const descendant=spawn(process.execPath,['-e','setInterval(()=>{},1000)']);
+const descendant=spawn(process.execPath,['-e',kind==='daemon'&&${options.exitDaemonDescendant === true}?'process.exit(0)':'setInterval(()=>{},1000)']);
+const descendantExited=new Promise(done=>descendant.once('exit',done));
+descendantExited.then(()=>record(kind+'-descendant-exited'));
 record(kind+'-descendant '+descendant.pid);
 let server;
 let timer;
-process.on('SIGTERM',()=>{clearTimeout(timer);descendant.once('exit',()=>{server?.close();if(kind==='daemon')rmSync(${JSON.stringify(runtime)},{force:true});record(kind+'-stopped');process.exit(0)});descendant.kill('SIGTERM')});
+process.once('SIGTERM',async()=>{clearTimeout(timer);descendant.kill('SIGTERM');await descendantExited;server?.close();if(kind==='daemon')rmSync(${JSON.stringify(runtime)},{force:true});record(kind+'-stopped');process.exit(0)});
+record(kind+'-ready');
+const failureStatus=kind==='daemon'?${options.failDaemon === true ? 7 : 0}:${options.failUi === true ? 9 : 0};
+if(failureStatus){descendant.kill();await descendantExited;process.exit(failureStatus);}
 if(kind==='daemon') {
-  if(${options.failDaemon === true}) {descendant.once('exit',()=>process.exit(7));descendant.kill();}
-  else timer=setTimeout(async()=>{
+  timer=setTimeout(async()=>{
     server=createServer((request,response)=>{response.setHeader('content-type','application/json');response.end(JSON.stringify({ok:true,apiVersion:3,pid:process.pid,host:'127.0.0.1',port:server.address().port,configPath:${JSON.stringify(config)},dataDir:${JSON.stringify(join(root, "data"))},tmuxSocketName:'fixture',lifecycleInstanceId:'fixture-generation'}))});
     server.listen(0,'127.0.0.1',async()=>{
       const port=server.address().port;
@@ -92,7 +102,7 @@ if(kind==='daemon') {
       writeFileSync(${JSON.stringify(runtime)},Object.entries(fields).map(([key,value])=>key+'='+JSON.stringify(value)).join('\\n')+'\\n');record('ready');
     });
   },${options.delay ?? 0});
-} else if(${options.failUi === true}) {descendant.once('exit',()=>process.exit(9));descendant.kill();}
+}
 `;
   await writeFile(join(root, "worker.mjs"), workerSource);
   for (const kind of ["daemon", "ui"]) {
@@ -183,10 +193,12 @@ describe("combined isolated sidecar", () => {
       await new Promise((done) => setTimeout(done, 30_100));
       expect(await contents(fixture.events)).not.toContain("ui ");
       await fixture.waitUntil("frontend launch", async () =>
-        (await contents(fixture.events)).includes("ui "),
+        (await contents(fixture.events)).includes("ui-ready"),
       );
-      expect((await contents(fixture.events)).indexOf("ready")).toBeLessThan(
-        (await contents(fixture.events)).indexOf("ui "),
+      const events = (await contents(fixture.events)).trim().split("\n");
+      expect(events).toContain("ready");
+      expect(events.indexOf("ready")).toBeLessThan(
+        events.findIndex((line) => line.startsWith("ui ")),
       );
       child.kill("SIGTERM");
       expect(await exited).toBe(143);
@@ -199,11 +211,18 @@ describe("combined isolated sidecar", () => {
     it(
       `stops owned groups on ${signal}`,
       async (context) => {
-        const fixture = await launcherFixture(context);
+        const fixture = await launcherFixture(context, {
+          exitDaemonDescendant: signal === "SIGHUP",
+        });
         const { child, exited } = fixture.launch();
-        await fixture.waitUntil("frontend descendant", async () =>
-          (await contents(fixture.events)).includes("ui-descendant "),
+        await fixture.waitUntil("frontend signal readiness", async () =>
+          (await contents(fixture.events)).includes("ui-ready"),
         );
+        if (signal === "SIGHUP") {
+          await fixture.waitUntil("early descendant exit", async () =>
+            (await contents(fixture.events)).includes("daemon-descendant-exited"),
+          );
+        }
         child.kill(signal);
         expect(await exited).toBe({ SIGTERM: 143, SIGINT: 130, SIGHUP: 129 }[signal]);
         await fixture.assertGone();

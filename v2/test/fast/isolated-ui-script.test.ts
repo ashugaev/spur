@@ -74,7 +74,8 @@ function stopChild(child: FixtureChild): Promise<void> {
     if (!child.finished) child.process.kill("SIGTERM");
     await exitedWithin(child, 500);
     if (!(await exists(`${child.ownerFile}.started`))) {
-      if (!child.finished) throw new Error("Fixture cleanup lacks web-start proof");
+      if (!(await exitedWithin(child, deadline - performance.now())))
+        throw new Error("Fixture cleanup lacks web-start proof");
       return;
     }
     const owner = await readWebOwner(child);
@@ -136,7 +137,7 @@ async function launcherFixture(
   );
   await writeFile(
     join(root, "path/pnpm"),
-    `#!/bin/sh\nexec '${process.execPath}' -e 'const fs=require("node:fs");fs.writeFileSync(process.env.SPUR_TEST_WEB_OWNER+".started","started");fs.writeFileSync(process.env.SPUR_TEST_WEB_OWNER+".webhost",process.env.WEB_HOST??"<unset>");(async()=>{const {readLiveProcessStarttime}=await import(${JSON.stringify(resolve("dist/sidecars/reap.js"))});const starttime=await readLiveProcessStarttime(process.pid);if(starttime===null)throw new Error("Missing fixture web identity");fs.writeFileSync(process.env.SPUR_TEST_WEB_OWNER,JSON.stringify({pid:process.pid,starttime}));fs.writeFileSync(process.env.SPUR_TEST_WEB_MARKER,process.env.SPUR_CONFIG);setInterval(()=>{},1000)})()'\n`,
+    `#!/bin/sh\nexec '${process.execPath}' -e 'const fs=require("node:fs");fs.writeFileSync(process.env.SPUR_TEST_WEB_OWNER+".webhost",process.env.WEB_HOST??"<unset>");(async()=>{const gate=process.env.SPUR_TEST_WEB_OWNER_GATE;if(gate){fs.writeFileSync(gate+".pending","pending");while(!fs.existsSync(gate))await new Promise(done=>setTimeout(done,10));}const {readLiveProcessStarttime}=await import(${JSON.stringify(resolve("dist/sidecars/reap.js"))});const starttime=await readLiveProcessStarttime(process.pid);if(starttime===null)throw new Error("Missing fixture web identity");fs.writeFileSync(process.env.SPUR_TEST_WEB_OWNER,JSON.stringify({pid:process.pid,starttime}));fs.writeFileSync(process.env.SPUR_TEST_WEB_OWNER+".started","started");fs.writeFileSync(process.env.SPUR_TEST_WEB_MARKER,process.env.SPUR_CONFIG);setInterval(()=>{},1000)})()'\n`,
     { mode: 0o755 },
   );
   await writeFile(join(root, "path/sleep"), "#!/bin/sh\nexec /bin/sleep 0.03\n", { mode: 0o755 });
@@ -339,7 +340,7 @@ describe("spur-isolated-ui.sh", () => {
     } finally {
       await stopChild(child);
     }
-  });
+  }, 45_000);
   it("fails named bounded wait with absent or legacy partial runtime", async (context) => {
     const fixture = await launcherFixture(context);
     // Partial metadata cannot inherit a previously supplied owner's fields.
@@ -386,6 +387,27 @@ describe("spur-isolated-ui.sh", () => {
   it("never binds the sidecar web server to all interfaces", () => {
     expect(script).not.toContain("0.0.0.0");
   });
+  it("publishes web-start proof after owned process identity", async (context) => {
+    const fixture = await launcherFixture(context);
+    await writeFile(fixture.runtimeFile, fixture.runtime(fixture.currentDir, "fixture-current"), {
+      mode: 0o600,
+    });
+    const gate = join(fixture.root, "owner-publication");
+    const child = fixture.launch({ SPUR_TEST_WEB_OWNER_GATE: gate });
+    try {
+      await fixture.waitUntil(child, "pending owner publication", () => exists(`${gate}.pending`));
+      expect(await exists(child.ownerFile)).toBe(false);
+      expect(await exists(`${child.ownerFile}.started`)).toBe(false);
+      await writeFile(gate, "publish");
+      await fixture.waitUntil(child, "owned web-start proof", () =>
+        exists(`${child.ownerFile}.started`),
+      );
+      const owner = await readWebOwner(child);
+      expect(await readLiveProcessStarttime(owner.pid)).toBe(owner.starttime);
+    } finally {
+      await stopChild(child);
+    }
+  }, 45_000);
   it("strips an ambient WEB_HOST before starting the web child", async (context) => {
     const fixture = await launcherFixture(context);
     await writeFile(fixture.runtimeFile, fixture.runtime(fixture.currentDir, "fixture-current"), {
@@ -398,7 +420,7 @@ describe("spur-isolated-ui.sh", () => {
     } finally {
       await stopChild(child);
     }
-  });
+  }, 45_000);
   it("reports an already-exited pre-web child without waiting for another exit", async (context) => {
     const fixture = await launcherFixture(context);
     const child = fixture.launch({ SPUR_SESSION_TOOL_DIR: "" });
@@ -438,6 +460,6 @@ describe("spur-isolated-ui.sh", () => {
       expect(await exists(join(fixture.currentDir, "ui-endpoint.json"))).toBe(false);
       // afterEach closes the server and removes this root only after owned stops settle.
       expect(await exists(fixture.runtimeFile)).toBe(true);
-    });
+    }, 45_000);
   }
 });
