@@ -41,6 +41,14 @@ ICONS
   New icon only where no repo icon exists; mark it proposed and get design approval before it ships.
 
 
+VOICE INPUT
+
+  Every free-text input carries the voice button (VoiceInput.tsx, useVoiceInput): composer, answers, notes, edits.
+  Strict inputs skip it: search, filters, ids, numbers, paths, tag pickers.
+  One control, same states everywhere: idle, starting, recording, transcribing, failed take (play, retry, discard), mic blocked.
+  Transcript lands in the input it belongs to; an edit dialog only where no input exists (terminal).
+
+
 STATES
 
   hover      text one step up; icon buttons and menu items add hover overlay

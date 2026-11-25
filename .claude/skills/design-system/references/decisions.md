@@ -13,3 +13,4 @@ Append-only log of user design feedback turned into rules. Newest last. Each ent
   2026-11-25  heavy follow-ups tracked, not dropped                follow-up work lives in GitHub issues under #1518                                      roadmap.md
   2026-11-25  design for phone and iPad mini too                  every design covers phone, iPad mini and desktop widths                               patterns.md TARGET SIZES, design SKILL.md
   2026-11-25  icons redrawn instead of reused                   reuse repo icon components exactly; new icons only as approved proposals              patterns.md ICONS
+  2026-11-25  voice input on every free-text input             free-text inputs carry the voice button with the full state set; strict inputs do not  patterns.md VOICE INPUT
