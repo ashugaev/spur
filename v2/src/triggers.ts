@@ -257,7 +257,7 @@ function matchingWorkItemDesk(
   for (const anchor of sessions) {
     if (
       workspaceIdOf(anchor) !== anchor.id ||
-      !anchor.slots?.links.some((link) => link.url === data.url) ||
+      !(anchor.pr?.url === data.url || anchor.slots?.links.some((link) => link.url === data.url)) ||
       !matches(anchor, first)
     )
       continue;

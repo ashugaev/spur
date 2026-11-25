@@ -6340,10 +6340,21 @@ describe("startConfiguredTriggers", () => {
       return { config, sessions };
     }
 
-    it.each(["complete", "anchor-only", "browser-only"])(
-      "does not duplicate a live manual desk: %s",
-      async (coverage) => {
+    it.each(
+      ["complete", "anchor-only", "browser-only"].flatMap((coverage) =>
+        ["slots", "native"].map((identity) => ({ coverage, identity })),
+      ),
+    )(
+      "does not duplicate a live manual desk: $coverage/$identity",
+      async ({ coverage, identity }) => {
         const { config, sessions } = fixture();
+        const anchor = sessions[0];
+        if (!anchor) throw new Error("Missing fixture anchor");
+        if (identity === "native") {
+          const { number, repo, url } = workItemEvent().data;
+          anchor.pr = { number, repo, url };
+          delete anchor.slots;
+        }
         const incomplete = coverage !== "complete";
         if (coverage === "browser-only" && sessions[0]) sessions[0].status = "completed";
         listSessionsMock.mockReturnValue(
@@ -6467,50 +6478,64 @@ describe("startConfiguredTriggers", () => {
       },
     );
 
-    it.each(["project", "url", "model", "prompt", "terminal", "non-desk"])(
-      "does not adopt an unrelated or terminal desk: %s",
-      async (mismatch) => {
-        const { config, sessions } = fixture();
-        const anchor = sessions[0];
-        if (!anchor) throw new Error("Missing fixture anchor");
-        if (mismatch === "project") anchor.project = "implementation";
-        if (mismatch === "url")
-          anchor.slots = { links: [{ label: "pr", url: "https://github.com/acme/api/pull/99" }] };
-        if (mismatch === "model") anchor.model = "other-model";
-        if (mismatch === "prompt") anchor.originalTaskPrompt = "unrelated task";
-        if (mismatch === "terminal") for (const session of sessions) session.status = "completed";
-        if (mismatch === "non-desk") config.projects.api.triggers["pick-up"].spawnDeskGroup = false;
-        listSessionsMock.mockReturnValue(sessions);
-        useWorkItemLifecycleStore();
-        const spawn = vi
-          .fn()
-          .mockResolvedValueOnce({ id: "new-anchor" })
-          .mockResolvedValueOnce({ id: "new-browser" });
-        const { startConfiguredTriggers } = await loadTriggersModule();
-        const bus = new EventBus();
-        const controller = startConfiguredTriggers({
-          config: config as never,
-          bus,
-          sessionService: {
-            spawn,
-            get: vi.fn().mockResolvedValue({ status: "running", workspaceExists: true }),
-          } as never,
-          logger: { warn: vi.fn() },
-        });
-        try {
-          bus.emit(workItemEvent());
-          await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
-          if (mismatch === "non-desk")
-            expect(spawn.mock.calls[1]?.[0]).not.toHaveProperty("reuseWorkspaceSessionId");
-          else
-            expect(spawn.mock.calls[1]?.[0]).toMatchObject({
-              reuseWorkspaceSessionId: "new-anchor",
-            });
-        } finally {
-          await controller.stop();
-        }
-      },
-    );
+    it.each([
+      "project",
+      "url",
+      "model",
+      "prompt",
+      "terminal",
+      "non-desk",
+      "native-url",
+      "native-model",
+    ])("does not adopt an unrelated or terminal desk: %s", async (mismatch) => {
+      const { config, sessions } = fixture();
+      const anchor = sessions[0];
+      if (!anchor) throw new Error("Missing fixture anchor");
+      if (mismatch === "project") anchor.project = "implementation";
+      if (mismatch === "url")
+        anchor.slots = { links: [{ label: "pr", url: "https://github.com/acme/api/pull/99" }] };
+      if (mismatch === "model") anchor.model = "other-model";
+      if (mismatch === "prompt") anchor.originalTaskPrompt = "unrelated task";
+      if (mismatch === "terminal") for (const session of sessions) session.status = "completed";
+      if (mismatch === "non-desk") config.projects.api.triggers["pick-up"].spawnDeskGroup = false;
+      if (mismatch === "native-url" || mismatch === "native-model") {
+        const { number, repo, url } = workItemEvent().data;
+        anchor.pr = { number, repo, url };
+        delete anchor.slots;
+        if (mismatch === "native-url")
+          anchor.pr = { number: 99, repo, url: "https://github.com/acme/api/pull/99" };
+        else anchor.model = "other-model";
+      }
+      listSessionsMock.mockReturnValue(sessions);
+      useWorkItemLifecycleStore();
+      const spawn = vi
+        .fn()
+        .mockResolvedValueOnce({ id: "new-anchor" })
+        .mockResolvedValueOnce({ id: "new-browser" });
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config as never,
+        bus,
+        sessionService: {
+          spawn,
+          get: vi.fn().mockResolvedValue({ status: "running", workspaceExists: true }),
+        } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+        if (mismatch === "non-desk")
+          expect(spawn.mock.calls[1]?.[0]).not.toHaveProperty("reuseWorkspaceSessionId");
+        else
+          expect(spawn.mock.calls[1]?.[0]).toMatchObject({
+            reuseWorkspaceSessionId: "new-anchor",
+          });
+      } finally {
+        await controller.stop();
+      }
+    });
   });
 
   it("suppresses active and completed work-item owners", async () => {
