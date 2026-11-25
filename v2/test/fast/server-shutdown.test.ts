@@ -22,7 +22,7 @@ import {
 } from "../../src/server.js";
 import { SessionService } from "../../src/session-service.js";
 import { readDaemonLogs } from "../../src/mcp-daemon-logs.js";
-import { findFreePort } from "../helpers/common.js";
+import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 const hangingSourcesStop = vi.hoisted(() => ({ enabled: false }));
 const hangingTriggersStop = vi.hoisted(() => ({ enabled: false }));
@@ -90,12 +90,15 @@ vi.mock("../../src/triggers.js", async (importOriginal) => {
   };
 });
 
-async function writeDaemonConfig(): Promise<{ configPath: string; dataDir: string }> {
+async function writeDaemonConfig(port?: number): Promise<{
+  configPath: string;
+  dataDir: string;
+}> {
   const root = await mkdtemp(join(tmpdir(), "spur-shutdown-test-"));
   const repoDir = join(root, "repo");
   const dataDir = join(root, "data");
   const worktreeDir = join(root, "worktrees");
-  const port = await findFreePort();
+  const selectedPort = port ?? (await findFreePort());
   await mkdir(repoDir, { recursive: true });
   const configPath = join(root, "spur.yaml");
   await writeFile(
@@ -103,7 +106,7 @@ async function writeDaemonConfig(): Promise<{ configPath: string; dataDir: strin
     [
       "server:",
       "  host: 127.0.0.1",
-      `  port: ${port}`,
+      `  port: ${selectedPort}`,
       `dataDir: ${dataDir}`,
       `worktreeDir: ${worktreeDir}`,
       "projects:",
@@ -269,19 +272,39 @@ describe("forceShutdownExit", () => {
 });
 
 describe("startServer source wiring", () => {
-  it("hands sources a by-id session lookup that returns null for a missing session", async () => {
-    const { configPath } = await writeDaemonConfig();
-    const { startServer } = await import("../../src/server.js");
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
-    });
-    try {
-      await expect(capturedSourceDeps.deps?.getSession("missing-1")).resolves.toBeNull();
-    } finally {
-      await server.stop();
-    }
-  });
+  it.each([false, true])(
+    "hands sources a by-id session lookup that returns null for a missing session (port collision %s)",
+    async (collision) => {
+      const listener = createServer();
+      let attempts = 0;
+      try {
+        const { server } = await startOnFreePort(
+          (_port, configPath) =>
+            startServer(configPath, { info: () => undefined, warn: () => undefined }),
+          async (port) => {
+            attempts += 1;
+            const { configPath } = await writeDaemonConfig(port);
+            if (collision && attempts === 1) {
+              await new Promise<void>((resolve, reject) => {
+                listener.once("error", reject);
+                listener.listen(port, "127.0.0.1", resolve);
+              });
+            }
+            return configPath;
+          },
+        );
+        try {
+          expect(attempts).toBeGreaterThanOrEqual(collision ? 2 : 1);
+          await expect(capturedSourceDeps.deps?.getSession("missing-1")).resolves.toBeNull();
+        } finally {
+          await server.stop();
+        }
+      } finally {
+        if (listener.listening)
+          await new Promise<void>((resolve) => listener.close(() => resolve()));
+      }
+    },
+  );
 });
 
 describe("startServer shutdown budget", () => {
