@@ -282,7 +282,8 @@ describe("nested artifact listing", () => {
       await writeFile(join(dir, `root-${String(index).padStart(4, "0")}.txt`), "x", "utf8");
     }
     const nestedDirs = 10;
-    const filesPerDir = 500; // 5,000 nested files total, well past both nested budgets
+    // Cross the global row cap across directories without overbuilding the fixture.
+    const filesPerDir = Math.floor(MAX_NESTED_ARTIFACT_ROWS / nestedDirs) + 1;
     for (let dirIndex = 0; dirIndex < nestedDirs; dirIndex++) {
       const nestedDir = join(dir, `nested-${dirIndex}`);
       await mkdir(nestedDir, { recursive: true });
