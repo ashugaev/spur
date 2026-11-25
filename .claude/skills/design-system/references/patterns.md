@@ -34,6 +34,13 @@ TARGET SIZES
   Same components at every size; only placement changes. A design missing one size is incomplete.
 
 
+ICONS
+
+  Reuse the repo icon component for any behavior that already has one: Dashboard lane icons, link-icons.tsx, components/icons/, DirectTerminal, VoiceInput.
+  Designs copy that exact SVG; never redraw or approximate it.
+  New icon only where no repo icon exists; mark it proposed and get design approval before it ships.
+
+
 STATES
 
   hover      text one step up; icon buttons and menu items add hover overlay
