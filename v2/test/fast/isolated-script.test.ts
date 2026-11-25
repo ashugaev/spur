@@ -2,20 +2,14 @@ import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, type TestContext } from "vitest";
 import { loadProjectConfig } from "../../src/config.js";
 import { buildIsolatedProjectConfig } from "../../src/isolated-project-config.js";
 
 const sourceRoot = resolve("..");
 const fixtures: { root: string; child?: ChildProcess; exited?: Promise<number | null> }[] = [];
-
-async function waitUntil(check: () => Promise<boolean>, timeout = 5000) {
-  const deadline = Date.now() + timeout;
-  while (!(await check())) {
-    if (Date.now() >= deadline) throw new Error("Fixture condition timed out");
-    await new Promise((done) => setTimeout(done, 20));
-  }
-}
+const CLEANUP_BUDGET_MS = 3000;
+const LAUNCHER_TIMEOUT_MS = 45_000;
 
 async function contents(path: string) {
   try {
@@ -32,7 +26,9 @@ afterEach(async () => {
       fixture.child.kill("SIGTERM");
       await Promise.race([
         fixture.exited,
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Cleanup timed out")), 3000)),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Cleanup timed out")), CLEANUP_BUDGET_MS),
+        ),
       ]);
     }
     await rm(fixture.root, { recursive: true, force: true });
@@ -40,8 +36,10 @@ afterEach(async () => {
 });
 
 async function launcherFixture(
+  context: TestContext,
   options: { delay?: number; failDaemon?: boolean; failUi?: boolean; timeout?: boolean } = {},
 ) {
+  const deadline = performance.now() + context.task.timeout - CLEANUP_BUDGET_MS;
   const root = await mkdtemp(join(tmpdir(), "spur-combined-"));
   const fixture: (typeof fixtures)[number] = { root };
   fixtures.push(fixture);
@@ -109,6 +107,19 @@ if(kind==='daemon') {
     events,
     runtime,
     output: () => stderr,
+    async waitUntil(label: string, check: () => Promise<boolean>) {
+      for (;;) {
+        const child = fixture.child;
+        const details = `exit=${child?.exitCode} signal=${child?.signalCode} stderr=${stderr}`;
+        if (context.signal.aborted) throw new Error(`${label}: fixture aborted; ${details}`);
+        if (child && (child.exitCode !== null || child.signalCode !== null))
+          throw new Error(`${label}: fixture child exited; ${details}`);
+        if (performance.now() >= deadline)
+          throw new Error(`${label}: fixture deadline exceeded; ${details}`);
+        if (await check()) return;
+        await new Promise((done) => setTimeout(done, 20));
+      }
+    },
     launch() {
       const child = spawn("bash", [join(root, "scripts/spur-isolated.sh")], {
         cwd: root,
@@ -161,50 +172,72 @@ describe("combined isolated sidecar", () => {
     expect(combined?.dependsOn).toBeUndefined();
   });
 
-  it("waits beyond standalone startup budget before launching frontend", async () => {
-    const fixture = await launcherFixture({ delay: 31_000 });
-    const { child, exited } = fixture.launch();
-    await waitUntil(async () => (await contents(fixture.events)).includes("daemon "));
-    await new Promise((done) => setTimeout(done, 30_100));
-    expect(await contents(fixture.events)).not.toContain("ui ");
-    await waitUntil(async () => (await contents(fixture.events)).includes("ui "), 10_000);
-    expect((await contents(fixture.events)).indexOf("ready")).toBeLessThan(
-      (await contents(fixture.events)).indexOf("ui "),
-    );
-    child.kill("SIGTERM");
-    expect(await exited).toBe(143);
-    await fixture.assertGone();
-  }, 45_000);
+  it(
+    "waits beyond standalone startup budget before launching frontend",
+    async (context) => {
+      const fixture = await launcherFixture(context, { delay: 31_000 });
+      const { child, exited } = fixture.launch();
+      await fixture.waitUntil("daemon launch", async () =>
+        (await contents(fixture.events)).includes("daemon "),
+      );
+      await new Promise((done) => setTimeout(done, 30_100));
+      expect(await contents(fixture.events)).not.toContain("ui ");
+      await fixture.waitUntil("frontend launch", async () =>
+        (await contents(fixture.events)).includes("ui "),
+      );
+      expect((await contents(fixture.events)).indexOf("ready")).toBeLessThan(
+        (await contents(fixture.events)).indexOf("ui "),
+      );
+      child.kill("SIGTERM");
+      expect(await exited).toBe(143);
+      await fixture.assertGone();
+    },
+    LAUNCHER_TIMEOUT_MS,
+  );
 
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
-    it(`stops owned groups on ${signal}`, async () => {
-      const fixture = await launcherFixture();
-      const { child, exited } = fixture.launch();
-      await waitUntil(async () => (await contents(fixture.events)).includes("ui-descendant "));
-      child.kill(signal);
-      expect(await exited).toBe({ SIGTERM: 143, SIGINT: 130, SIGHUP: 129 }[signal]);
-      await fixture.assertGone();
-      expect(await contents(fixture.events)).toContain("daemon-stopped");
-      expect(await contents(fixture.events)).toContain("ui-stopped");
-    }, 10_000);
+    it(
+      `stops owned groups on ${signal}`,
+      async (context) => {
+        const fixture = await launcherFixture(context);
+        const { child, exited } = fixture.launch();
+        await fixture.waitUntil("frontend descendant", async () =>
+          (await contents(fixture.events)).includes("ui-descendant "),
+        );
+        child.kill(signal);
+        expect(await exited).toBe({ SIGTERM: 143, SIGINT: 130, SIGHUP: 129 }[signal]);
+        await fixture.assertGone();
+        expect(await contents(fixture.events)).toContain("daemon-stopped");
+        expect(await contents(fixture.events)).toContain("ui-stopped");
+      },
+      LAUNCHER_TIMEOUT_MS,
+    );
   }
 
   for (const kind of ["daemon", "ui"] as const) {
-    it(`propagates ${kind} failure and cleans other owned processes`, async () => {
-      const fixture = await launcherFixture({
-        failDaemon: kind === "daemon",
-        failUi: kind === "ui",
-      });
-      const { exited } = fixture.launch();
-      expect(await exited).toBe(kind === "daemon" ? 7 : 9);
-      if (kind === "daemon") expect(await contents(fixture.events)).not.toContain("ui ");
-      else expect(await contents(fixture.events)).toContain("daemon-stopped");
-      await fixture.assertGone();
-    }, 10_000);
+    it(
+      `propagates ${kind} failure and cleans other owned processes`,
+      async (context) => {
+        const fixture = await launcherFixture(context, {
+          failDaemon: kind === "daemon",
+          failUi: kind === "ui",
+        });
+        const { exited } = fixture.launch();
+        expect(await exited).toBe(kind === "daemon" ? 7 : 9);
+        if (kind === "daemon") {
+          expect(await contents(fixture.events)).not.toContain("ui ");
+          await expect(fixture.waitUntil("frontend launch", async () => false)).rejects.toThrow(
+            "frontend launch: fixture child exited; exit=7",
+          );
+        } else expect(await contents(fixture.events)).toContain("daemon-stopped");
+        await fixture.assertGone();
+      },
+      LAUNCHER_TIMEOUT_MS,
+    );
   }
 
-  it("cleans daemon on readiness timeout", async () => {
-    const fixture = await launcherFixture({ delay: 60_000, timeout: true });
+  it("cleans daemon on readiness timeout", async (context) => {
+    const fixture = await launcherFixture(context, { delay: 60_000, timeout: true });
     const { exited } = fixture.launch();
     expect(await exited).toBe(1);
     expect(fixture.output()).toContain("Timed out waiting for current isolated daemon runtime");
@@ -215,8 +248,8 @@ describe("combined isolated sidecar", () => {
     );
   });
 
-  it("rejects pre-existing metadata without starting or touching another owner", async () => {
-    const fixture = await launcherFixture();
+  it("rejects pre-existing metadata without starting or touching another owner", async (context) => {
+    const fixture = await launcherFixture(context);
     const marker = `FOREIGN_PID=${process.pid}\n`;
     await writeFile(fixture.runtime, marker);
     const { exited } = fixture.launch();

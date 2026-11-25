@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -132,7 +132,7 @@ async function launcherFixture(
   await writeFile(join(root, "packages/web/tsconfig.json"), "{}\n");
   await writeFile(
     join(root, "v2/bin/isolated-web-endpoint.mjs"),
-    `if (process.argv[2] !== "--daemon-ready") await new Promise(done => setTimeout(done, ${options.publicationDelayMs ?? 0}));\nawait import(${JSON.stringify(resolve("bin/isolated-web-endpoint.mjs"))});\n`,
+    `if (process.argv[2] !== "--daemon-ready") await new Promise(done => setTimeout(done, ${options.publicationDelayMs ?? 0}));\nawait import(${JSON.stringify(resolve("bin/isolated-web-endpoint.mjs"))});\nif (process.argv[2] === "--daemon-ready") { const {appendFileSync}=await import("node:fs");appendFileSync(${JSON.stringify(join(root, "daemon-attempts"))},process.argv[3]+" "+(process.exitCode??0)+"\\n"); }\n`,
   );
   await writeFile(
     join(root, "path/pnpm"),
@@ -142,10 +142,8 @@ async function launcherFixture(
   await writeFile(join(root, "path/sleep"), "#!/bin/sh\nexec /bin/sleep 0.03\n", { mode: 0o755 });
   const oldDir = await mkdtemp(join(root, "old-"));
   const currentDir = await mkdtemp(join(root, "current-"));
-  let queried = false;
   let lifecycle = "current-generation";
   const server = createServer((_request, response) => {
-    queried = true;
     response.setHeader("Content-Type", "application/json");
     response.end(
       JSON.stringify({
@@ -203,7 +201,13 @@ async function launcherFixture(
         await new Promise((done) => setTimeout(done, 10));
       }
     },
-    queried: () => queried,
+    attempted: async (directory: string, status: number) => {
+      const attempts = join(root, "daemon-attempts");
+      return (
+        (await exists(attempts)) &&
+        (await readFile(attempts, "utf8")).includes(`${directory}/config.yaml ${status}\n`)
+      );
+    },
     changeGeneration: () => {
       lifecycle = "replacement-generation";
     },
@@ -358,16 +362,19 @@ describe("spur-isolated-ui.sh", () => {
     });
     const child = fixture.launch();
     try {
-      await fixture.waitUntil(
-        child,
-        "daemon query",
-        async () => fixture.queried() || (await exists(fixture.marker)),
+      await fixture.waitUntil(child, "old generation rejection", () =>
+        fixture.attempted(fixture.oldDir, 1),
       );
       expect(await exists(fixture.marker)).toBe(false);
       expect(await exists(join(fixture.oldDir, "ui-endpoint.json"))).toBe(false);
-      await writeFile(fixture.runtimeFile, fixture.runtime(fixture.currentDir, "fixture-current"), {
+      const temporary = `${fixture.runtimeFile}.tmp`;
+      await writeFile(temporary, fixture.runtime(fixture.currentDir, "fixture-current"), {
         mode: 0o600,
       });
+      await rename(temporary, fixture.runtimeFile);
+      await fixture.waitUntil(child, "current generation acceptance", () =>
+        fixture.attempted(fixture.currentDir, 0),
+      );
       await fixture.waitUntil(child, "current publication", () =>
         exists(join(fixture.currentDir, "ui-endpoint.json")),
       );
@@ -375,7 +382,7 @@ describe("spur-isolated-ui.sh", () => {
     } finally {
       await stopChild(child);
     }
-  }, 10_000);
+  }, 45_000);
   it("never binds the sidecar web server to all interfaces", () => {
     expect(script).not.toContain("0.0.0.0");
   });
