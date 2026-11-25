@@ -38,6 +38,7 @@ Capabilities loaded by description match. Source: .agents/skills/
   manager             .agents/skills/manager/SKILL.md             Mandatory orchestrator for every repo task
   spur                .agents/skills/spur/SKILL.md                Task touches Spur runtime, CLI, config, or interface
   frontend-codestyle  .agents/skills/frontend-codestyle/SKILL.md  Task touches packages/web
+  design-system       .agents/skills/design-system/SKILL.md       Add, change or review web tokens, components, patterns; DS versioning and migrations
   skill-writer        .agents/skills/skill-writer/SKILL.md        Edit SKILL.md, agent definitions, or orchestrator instructions
   context-audit       .agents/skills/context-audit/SKILL.md       Audit agent context surface: skills, rules, MCP config, tool budget
   design              .agents/skills/design/SKILL.md              Prepare proposed UI screenshots and approval handoff
