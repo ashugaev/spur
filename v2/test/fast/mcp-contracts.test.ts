@@ -127,7 +127,7 @@ describe("daemon MCP operation contracts", () => {
       "SessionListView[]; x-spur-lifecycle-instance-id header",
     );
     expect(getDaemonOperation("list_sessions")?.query).toContainEqual(
-      expect.objectContaining({ name: "view", type: '\"full\"|\"dashboard\"', required: false }),
+      expect.objectContaining({ name: "view", type: '"full"|"dashboard"', required: false }),
     );
   });
 
