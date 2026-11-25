@@ -2588,6 +2588,29 @@ describe("runtime-tmux", () => {
         }
       });
 
+      it("returns to the backoff cadence 3s after registration when the markers drift", async () => {
+        const dir = makeSessionsDir();
+        writeRegistration(dir);
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        const h = claudeHarness(() => "Claude Next\n> ", undefined, { realSleeps: true });
+        try {
+          const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+          await waitForTmuxReady("api-1", ["Claude Code", "❯"], 60_000, claudeOptions(dir));
+          const times = h.captureTimes();
+          const gaps = times.slice(1).map((t, i) => t - (times[i] ?? 0));
+          // 250ms captures through 3s, then 500ms + 228ms jitter backing off to 2s.
+          expect(times.filter((t) => t <= 3_000)).toEqual(
+            Array.from({ length: 13 }, (_, i) => i * 250),
+          );
+          expect(gaps.slice(12, 16)).toEqual([728, 728, 728, 1_228]);
+          expect(gaps.at(-1)).toBe(2_228);
+          expect(times.length).toBeLessThan(30);
+        } finally {
+          h.restore();
+          stderrSpy.mockRestore();
+        }
+      });
+
       it("proceeds past a dialog seen on one capture only", async () => {
         const dir = makeSessionsDir();
         writeRegistration(dir);

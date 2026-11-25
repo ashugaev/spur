@@ -420,9 +420,11 @@ const CLAUDE_MARKER_GRACE_MS = 30_000;
 // inside each capture wait: a local file read, no tmux load. Registration seen
 // cuts the wait short and the pane is captured at once.
 const CLAUDE_REGISTRATION_POLL_MS = 200;
-// Capture cadence once Claude has registered, until its markers show or the
-// marker grace lapses.
+// Capture cadence for the first CLAUDE_REGISTERED_FAST_WINDOW_MS after Claude
+// registers; markers normally follow within it. Past the window the normal
+// backoff resumes for the rest of the marker grace.
 const CLAUDE_REGISTERED_POLL_MS = 250;
+const CLAUDE_REGISTERED_FAST_WINDOW_MS = 3_000;
 const AGENT_READY_POLL_INITIAL_MS = 500;
 const AGENT_READY_POLL_MAX_MS = 2_000;
 const AGENT_READY_POLL_JITTER_MAX_MS = 250;
@@ -1856,6 +1858,7 @@ export async function waitForTmuxReady(
   let claudeRegistrationMissing = false;
   let claudePanePid: number | null = null;
   let claudeRegistered = false;
+  let claudeRegisteredAtMs: number | null = null;
   let claudeMarkerGraceSinceMs: number | null = null;
   let pollDelayMs = AGENT_READY_POLL_INITIAL_MS;
   const pollJitterMs = tmuxReadyPollJitterMs(sessionName);
@@ -1960,7 +1963,10 @@ export async function waitForTmuxReady(
         );
       }
       if (claudeRegistered) continue;
-    } else if (claudeRegistered) {
+    } else if (
+      claudeRegistered &&
+      Date.now() - (claudeRegisteredAtMs ??= Date.now()) < CLAUDE_REGISTERED_FAST_WINDOW_MS
+    ) {
       await wait(sleep(CLAUDE_REGISTERED_POLL_MS));
       continue;
     } else {
