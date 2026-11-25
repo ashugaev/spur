@@ -27,7 +27,7 @@ RESPONSIVE COLUMNS
 
 TARGET SIZES
 
-  Every screen and component is designed and checked at three widths:
+  Every screen and component is designed and checked at required widths:
   phone        390      no side panels; context as chips plus bottom sheet; 44px tap targets
   iPad mini    744 and 1133 landscape   side panel collapsed, opens as overlay; 40px tap targets
   desktop      1440     full layout, side panel inline
@@ -45,8 +45,9 @@ VOICE INPUT
 
   Every free-text input carries the voice button (VoiceInput.tsx, useVoiceInput): composer, answers, notes, edits.
   Strict inputs skip it: search, filters, ids, numbers, paths, tag pickers.
-  One control, same states everywhere: idle, starting, recording, transcribing, failed take (play, retry, discard), mic blocked.
-  Transcript lands in the input it belongs to; an edit dialog only where no input exists (terminal).
+  Control and state contract: VoiceInput.tsx and useVoiceInput.ts.
+  Transcript inserts into target input without confirmation. Terminal: confirm popup before typing into tmux.
+  Recording: error edge plus error tint on mic button. Transcribing: error spinner replaces mic glyph.
 
 
 STATES
@@ -73,9 +74,3 @@ COPY
   Visible labels use spaces: "Needs Input", never NEEDS_INPUT.
   Buttons, labels, headers uppercase via class; source sentence case.
   Placeholders sentence case: "Filter...".
-
-
-VOICE
-
-  Transcript inserts into the target textarea, no confirm. Terminal: confirm popup before typing into tmux.
-  Recording: error edge plus error tint on the mic button. Transcribing: error spinner replaces the mic glyph.
