@@ -253,13 +253,25 @@ export function fakeAgentScript(
         ? "OpenAI Codex"
         : "Cursor Agent";
   const prompt = agentName === "claude" ? "❯" : agentName === "codex" ? "›" : "Composer 2 Fast";
-  // Real claude writes sessions/<pid>.json once its REPL is up; Spur's launch
-  // readiness waits for it. Mirrors that contract, in the launch's config dir.
+  // Real claude writes sessions/<pid>.json once its REPL is up and keeps its
+  // status current (busy / idle / waiting + waitingFor); Spur's launch
+  // readiness waits for the file and the daemon's status reader ranks it above
+  // the JSONL. Mirrors that contract, in the launch's config dir.
+  // claude_set_status <status> [waitingFor] rewrites the file atomically.
   const registerSession =
     agentName === "claude"
       ? `claude_sessions_dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
+claude_session_file="$claude_sessions_dir/$$.json"
 mkdir -p "$claude_sessions_dir"
-printf '{"pid":%s,"sessionId":"%s","cwd":"%s","kind":"interactive","status":"idle"}\\n' "$$" "$session_uuid" "$PWD" > "$claude_sessions_dir/$$.json"`
+claude_set_status() {
+  local waiting_json=""
+  if [[ -n "\${2:-}" ]]; then
+    waiting_json=",\\"waitingFor\\":\\"$2\\""
+  fi
+  printf '{"pid":%s,"sessionId":"%s","cwd":"%s","kind":"interactive","status":"%s"%s,"statusUpdatedAt":%s}\\n' "$$" "$session_uuid" "$PWD" "$1" "$waiting_json" "$(( $(date +%s) * 1000 ))" > "$claude_session_file.tmp"
+  mv "$claude_session_file.tmp" "$claude_session_file"
+}
+claude_set_status idle`
       : "";
   const startup =
     agentName === "claude"
@@ -516,13 +528,15 @@ fi`;
   // plus structured rollout events for question/waiting metadata.
   const signalWaiting =
     agentName === "claude"
-      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'
+      claude_set_status idle`
       : agentName === "codex"
         ? `emit_hook_event "Stop"`
         : `jsonl_append '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'`;
   const signalNeedsInput =
     agentName === "claude"
-      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'`
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'
+      claude_set_status waiting "input needed"`
       : agentName === "codex"
         ? `emit_hook_needs_input
       emit_rollout_input_required`
@@ -543,7 +557,8 @@ fi`;
     encoded_text="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$full_msg")"
     timestamp="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
     printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":%s}]},"timestamp":"%s","sessionId":"%s"}\\n' "$encoded_text" "$timestamp" "$session_uuid" >> "$session_dir/$session_uuid.jsonl"
-  fi`;
+  fi
+  claude_set_status busy`;
   // Codex uses a buffering read loop that drains pasted lines before emitting
   // one event_msg entry at submit time, so scanCodexRolloutForMessage sees
   // the exact full restore/replay message even across interrupt-driven sends.

@@ -45087,6 +45087,9 @@ describe("SessionService", () => {
         launchCommand: `claude --session-id ${FRESH_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
       }),
     );
+    // Only the recovery-fresh site reaches readiness: the native resume attempt
+    // failed at tmux create.
+    expect(waitForTmuxReadyMock).toHaveBeenCalledTimes(1);
     expect(waitForTmuxReadyMock).toHaveBeenCalledWith(
       "api-1",
       ["Claude Code", "❯"],
@@ -45150,6 +45153,43 @@ describe("SessionService", () => {
         },
       }),
     );
+  });
+
+  it("forwards no claude registration to readiness when the recovery plan carries none", async () => {
+    buildAgentResumePlanMock.mockReturnValue({
+      launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      readyMarkers: ["❯"],
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      agentSessionId: PINNED_CLAUDE_SESSION_ID,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: `claude --session-id ${PINNED_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    let created = false;
+    tmuxSessionExistsMock.mockImplementation(async () => created);
+    createTmuxSessionMock.mockImplementation(async () => {
+      created = true;
+    });
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.send("api-1", { message: "resume work" });
+
+    expect(waitForTmuxReadyMock).toHaveBeenCalledTimes(1);
+    expect(waitForTmuxReadyMock.mock.calls[0]?.[3]).toMatchObject({ agent: "claude" });
+    expect(waitForTmuxReadyMock.mock.calls[0]?.[3]).not.toHaveProperty("claudeRegistration");
   });
 
   it("refuses the fresh-launch fallback when the failed resume generation leaves a non-active-pane survivor", async () => {
