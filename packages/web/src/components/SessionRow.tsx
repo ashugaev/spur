@@ -104,12 +104,12 @@ function WakeIndicator({
       </button>
       {open ? (
         <span
-          className="absolute left-0 top-6 z-30 w-[17rem] border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] px-2.5 py-2 text-[var(--color-text-secondary)] shadow-[0_8px_30px_var(--color-shadow-menu)]"
+          className="absolute left-0 top-6 z-30 w-[17rem] border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] px-2.5 py-2 text-[var(--color-text-secondary)] shadow-overlay"
           id={panelId}
           role="status"
         >
           <span className="flex items-center justify-between gap-3">
-            <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-status-attention)]">
+            <span className="text-label font-bold uppercase tracking-label text-[var(--color-status-attention)]">
               {summary.label}
             </span>
             <span className="font-mono text-[var(--color-text-primary)]">
@@ -117,12 +117,12 @@ function WakeIndicator({
             </span>
           </span>
           {summary.intervalMs ? (
-            <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+            <span className="mt-1 block font-mono text-label uppercase tracking-meta text-[var(--color-text-tertiary)]">
               every {formatIntervalDuration(summary.intervalMs)}
             </span>
           ) : null}
           {summary.dailyAt ? (
-            <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+            <span className="mt-1 block font-mono text-label uppercase tracking-meta text-[var(--color-text-tertiary)]">
               daily {summary.dailyAt.join(", ")}
             </span>
           ) : null}
@@ -188,7 +188,7 @@ function RunningSidecarIndicator({
           id={panelId}
           role="status"
         >
-          <span className="block text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-status-ready)]">
+          <span className="block text-label font-bold uppercase tracking-label text-[var(--color-status-ready)]">
             Running Sidecars
           </span>
           <span className="mt-1 flex min-w-0 flex-col gap-1 font-mono text-[var(--color-text-primary)]">
@@ -318,7 +318,7 @@ function RowActionsMenu({
       {menuOpen ? (
         <div
           aria-label="Session actions"
-          className="fixed z-30 w-44 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+          className="fixed z-30 w-44 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-overlay"
           ref={menuRef}
           role="menu"
           style={menuStyle}
@@ -433,7 +433,7 @@ export function SessionRow({
 
       {deskMemberCount !== undefined && deskMemberCount > 1 ? (
         <span
-          className="hidden shrink-0 items-center gap-0.5 rounded border border-[var(--color-border-subtle)] px-1 py-0.5 font-mono text-[10px] tabular-nums leading-none text-[var(--color-text-tertiary)] sm:inline-flex"
+          className="hidden shrink-0 items-center gap-0.5 border border-[var(--color-border-subtle)] px-1 py-0.5 font-mono text-label tabular-nums leading-none text-[var(--color-text-tertiary)] sm:inline-flex"
           title={`${deskMemberCount} agents on this checkout`}
         >
           <svg

@@ -104,7 +104,7 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
           <JiraIcon />
         ) : null}
         <span
-          className="text-[10px]"
+          className="text-label"
           style={labelStyle}
           title={
             isPr && checkRows.length > 0 ? statusTitle(prInfo, github, ciRunning, false) : undefined

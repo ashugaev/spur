@@ -1,0 +1,157 @@
+/*
+ * Spur design tokens. Only file with color literals besides design/colors.ts.
+ * First block = dark/default theme; second block = light overrides.
+ * Every --color-* token lives in both blocks and in design/registry.json;
+ * design-system.test.ts enforces sync, contrast and the version.
+ * Change procedure: .agents/skills/design-system/SKILL.md.
+ */
+
+@theme {
+  /* ── Surfaces ────────────────────────────────────────────────────── */
+  --color-bg-base: #0d0d0e;
+  --color-bg-surface: rgba(17, 17, 18, 0.8);
+  --color-bg-elevated: rgba(23, 23, 26, 0.9);
+  /* Terminal container — slightly bluer than body. */
+  --color-terminal-bg: #0a0a0f;
+
+  /* ── Borders: structural; field edges use --color-input-border ───── */
+  --color-border-subtle: rgba(35, 35, 38, 0.6);
+  --color-border-default: rgba(35, 35, 38, 1);
+  --color-border-strong: rgba(50, 50, 54, 1);
+
+  /* ── Text: 4.5:1 on every surface + hover overlay ────────────────── */
+  --color-text-primary: #e1e1e1;
+  --color-text-secondary: #a1a1a1;
+  --color-text-tertiary: #8b8b90;
+  --color-text-inverse: #0d0d0e;
+
+  /* ── Inputs: border 3:1, the field edge is its only cue ──────────── */
+  --color-input-bg: rgba(17, 17, 18, 0.8);
+  --color-input-border: #74747b;
+
+  /* ── Accent ──────────────────────────────────────────────────────── */
+  --color-accent: #ffffff;
+  --color-accent-hover: rgba(255, 255, 255, 0.8);
+  --color-accent-violet: #a371f7;
+
+  /* ── Overlays / hover / backdrops ────────────────────────────────── */
+  --color-hover-overlay: rgba(255, 255, 255, 0.05);
+  --color-modal-backdrop: rgba(0, 0, 0, 0.6);
+  --color-scrollbar-thumb: rgba(255, 255, 255, 0.08);
+  --color-scrollbar-thumb-hover: rgba(255, 255, 255, 0.15);
+  --color-scrollbar-thumb-active: rgba(255, 255, 255, 0.25);
+  --color-activity-pulse: rgba(255, 255, 255, 0.45);
+
+  /* ── Shadow colors ───────────────────────────────────────────────── */
+  --color-shadow-menu: rgba(0, 0, 0, 0.3);
+  --color-shadow-modal-sm: rgba(0, 0, 0, 0.5);
+  --color-shadow-modal-lg: rgba(0, 0, 0, 0.5);
+
+  /* ── Status tones: dot, icon, edge and status words ──────────────── */
+  --color-status-working: #58a6ff;
+  --color-status-ready: #3fb950;
+  --color-status-attention: #ffd700;
+  --color-status-error: #ff4d4d;
+  --color-status-inactive: #8b8b90;
+
+  /* Derived per tone, both themes: tint ground and chip edge. */
+  --color-status-working-bg: color-mix(in srgb, var(--color-status-working) 12%, transparent);
+  --color-status-ready-bg: color-mix(in srgb, var(--color-status-ready) 12%, transparent);
+  --color-status-attention-bg: color-mix(in srgb, var(--color-status-attention) 12%, transparent);
+  --color-status-error-bg: color-mix(in srgb, var(--color-status-error) 12%, transparent);
+  --color-status-inactive-bg: color-mix(in srgb, var(--color-status-inactive) 12%, transparent);
+  --color-status-working-border: color-mix(in srgb, var(--color-status-working) 30%, transparent);
+  --color-status-ready-border: color-mix(in srgb, var(--color-status-ready) 30%, transparent);
+  --color-status-attention-border: color-mix(
+    in srgb,
+    var(--color-status-attention) 30%,
+    transparent
+  );
+  --color-status-error-border: color-mix(in srgb, var(--color-status-error) 30%, transparent);
+  --color-status-inactive-border: color-mix(in srgb, var(--color-status-inactive) 30%, transparent);
+
+  /* ── Display safe-area insets ─────────────────────────────────────── */
+  /* Browser-computed per device and orientation; 0px where no cutout. */
+  --safe-top: env(safe-area-inset-top);
+  --safe-bottom: env(safe-area-inset-bottom);
+  --safe-left: env(safe-area-inset-left);
+  --safe-right: env(safe-area-inset-right);
+
+  /* ── Border radius: square everywhere ────────────────────────────── */
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+
+  /* Status dots: the one round shape (rounded-dot). */
+  --radius-dot: 9999px;
+
+  /* ── Typography: text-* and tracking-* utilities ─────────────────── */
+  --font-sans:
+    var(--font-jetbrains-mono), "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
+  --font-mono: var(--font-sans);
+  --text-label: 10px;
+  --text-meta: 11px;
+  --text-body: 12px;
+  --text-title: 14px;
+  --text-display: 22px;
+  --tracking-display: -0.02em;
+  --tracking-body: 0.02em;
+  --tracking-meta: 0.08em;
+  --tracking-label: 0.12em;
+  --tracking-caps: 0.14em;
+
+  /* ── Elevation: shadow-* utilities ───────────────────────────────── */
+  --shadow-raised: 0 4px 12px var(--color-shadow-modal-sm);
+  --shadow-overlay: 0 8px 30px var(--color-shadow-menu);
+  --shadow-modal: 0 20px 60px var(--color-shadow-modal-lg);
+}
+
+:root[data-theme="light"] {
+  /* Surfaces */
+  --color-bg-base: #ffffff;
+  --color-bg-surface: rgba(246, 248, 250, 0.85);
+  --color-bg-elevated: #ffffff;
+  --color-terminal-bg: #f6f8fa;
+
+  /* Borders */
+  --color-border-subtle: rgba(209, 217, 224, 0.6);
+  --color-border-default: #d1d9e0;
+  --color-border-strong: #b7c0c9;
+
+  /* Text */
+  --color-text-primary: #1f2328;
+  --color-text-secondary: #59636e;
+  --color-text-tertiary: #656d76;
+  --color-text-inverse: #ffffff;
+
+  /* Inputs */
+  --color-input-bg: #ffffff;
+  --color-input-border: #768390;
+
+  /* Accent */
+  --color-accent: #0860ca;
+  --color-accent-hover: #0550ae;
+  --color-accent-violet: #6639ba;
+
+  /* Overlays / hover / backdrops */
+  --color-hover-overlay: rgba(31, 35, 40, 0.05);
+  --color-modal-backdrop: rgba(31, 35, 40, 0.4);
+  --color-scrollbar-thumb: rgba(31, 35, 40, 0.12);
+  --color-scrollbar-thumb-hover: rgba(31, 35, 40, 0.22);
+  --color-scrollbar-thumb-active: rgba(31, 35, 40, 0.34);
+  --color-activity-pulse: rgba(9, 105, 218, 0.45);
+
+  /* Shadow colors */
+  --color-shadow-menu: rgba(31, 35, 40, 0.15);
+  --color-shadow-modal-sm: rgba(31, 35, 40, 0.12);
+  --color-shadow-modal-lg: rgba(31, 35, 40, 0.15);
+
+  /* Status tones; -bg and -border derive from these */
+  --color-status-working: #0860ca;
+  --color-status-ready: #116329;
+  --color-status-attention: #8a5a00;
+  --color-status-error: #cf222e;
+  --color-status-inactive: #656d76;
+}

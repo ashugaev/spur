@@ -95,17 +95,17 @@ function ToolEntryRow({ entry }: { entry: Extract<TranscriptEntry, { kind: "tool
   const inputSummary = entry.inputSummary?.trim();
   const output = entry.output?.trim();
   return (
-    <div className="min-w-0 max-w-[95%] border border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)]/60 px-2 py-1 font-mono text-[10px] text-[var(--color-text-tertiary)]">
-      <div className="uppercase tracking-[0.08em]">{entry.name}</div>
+    <div className="min-w-0 max-w-[95%] border border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)]/60 px-2 py-1 font-mono text-label text-[var(--color-text-tertiary)]">
+      <div className="uppercase tracking-meta">{entry.name}</div>
       {inputSummary ? (
         <div className={`mt-0.5 ${HARD_WRAP_TEXT_CLASS}`}>
-          <span className="text-[10px] font-bold text-[var(--color-text-tertiary)]">in:</span>{" "}
+          <span className="text-label font-bold text-[var(--color-text-tertiary)]">in:</span>{" "}
           {truncate(inputSummary, MAX_TOOL_CHARS)}
         </div>
       ) : null}
       {output ? (
         <div className={`mt-0.5 ${HARD_WRAP_TEXT_CLASS} opacity-80`}>
-          <span className="text-[10px] font-bold text-[var(--color-text-tertiary)]">out:</span>{" "}
+          <span className="text-label font-bold text-[var(--color-text-tertiary)]">out:</span>{" "}
           {truncate(output, MAX_TOOL_CHARS)}
         </div>
       ) : null}
@@ -160,7 +160,7 @@ function QuestionEntryRow({
       className="min-w-0 border border-[var(--color-status-attention)] bg-[var(--color-status-attention)]/10 px-3 py-2"
       role="alert"
     >
-      <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-status-attention)]">
+      <div className="text-label font-bold uppercase tracking-label text-[var(--color-status-attention)]">
         {entry.header}
       </div>
       <div className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-primary)]`}>
@@ -195,7 +195,7 @@ function QuestionEntryRow({
       ) : null}
       {canAnswerInline ? (
         <div
-          className={`mt-2 text-[10px] uppercase tracking-[0.08em] ${
+          className={`mt-2 text-label uppercase tracking-meta ${
             isAnswered
               ? "text-[var(--color-status-ready)]"
               : isError
@@ -216,7 +216,7 @@ function QuestionEntryRow({
           )}
         </div>
       ) : (
-        <div className="mt-2 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+        <div className="mt-2 text-label uppercase tracking-meta text-[var(--color-text-tertiary)]">
           Reply from the message box below to answer
         </div>
       )}
@@ -354,7 +354,7 @@ export function ConversationView({
 
   return (
     <section>
-      <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+      <h2 className="flex items-center gap-2 py-2 text-label font-bold uppercase tracking-caps text-[var(--color-text-tertiary)]">
         Dialog
         <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
         {durationMs > 0 ? (
@@ -393,7 +393,7 @@ export function ConversationView({
             aria-label="Assistant is responding"
             className="mr-auto min-w-0 max-w-[85%] border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] px-3 py-2 text-[var(--color-text-tertiary)]"
           >
-            <div className={`${HARD_WRAP_TEXT_CLASS} animate-pulse tracking-[0.3em]`}>...</div>
+            <div className={`${HARD_WRAP_TEXT_CLASS} animate-pulse tracking-caps`}>...</div>
           </div>
         ) : null}
       </div>

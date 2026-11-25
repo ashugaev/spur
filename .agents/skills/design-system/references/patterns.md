@@ -17,7 +17,8 @@ STATUS
   Zone order follows tone order. Empty zone: not rendered.
   Unknown state falls to inactive, never error.
   Tone never alone: dot plus label, chip text, or zone header.
-  Graphic role uses --color-status-<tone>; words use the -text role. Until P3: chip-* and status text per ActivityDot.
+  Dot, icon, edge and word: --color-status-<tone>. Tint: -bg. Chip edge: -border. TS: design/tone.ts.
+  Map in code: ActivityDot (activity -> tone), ATTENTION_LANE_META in lib/types.ts (lane -> tone).
 
 
 SESSION LIST

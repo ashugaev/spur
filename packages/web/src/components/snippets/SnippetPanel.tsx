@@ -141,11 +141,11 @@ function randomNonce(): string {
 
 const FOCUS_RING =
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]";
-const SECONDARY_BUTTON = `border border-[var(--color-border-strong)] px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] ${FOCUS_RING}`;
+const SECONDARY_BUTTON = `border border-[var(--color-border-strong)] px-3 py-1.5 text-label font-bold uppercase tracking-label text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] ${FOCUS_RING}`;
 const ICON_BUTTON = `inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] ${FOCUS_RING}`;
 
 const CHIP_ERROR =
-  "border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-chip-error-text)]";
+  "border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2 py-0.5 text-label font-bold uppercase tracking-label text-[var(--color-status-error)]";
 
 function PanelHeader({
   titleId,
@@ -162,12 +162,12 @@ function PanelHeader({
     <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] px-3 py-2">
       <div className="min-w-0">
         <div
-          className="truncate font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+          className="truncate font-bold uppercase tracking-label text-[var(--color-text-primary)]"
           id={titleId}
         >
           {title}
         </div>
-        <div className="truncate text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+        <div className="truncate text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
           {meta}
         </div>
       </div>
@@ -255,11 +255,11 @@ function ConfirmStrip({
       role="group"
     >
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+        <span className="font-bold uppercase tracking-label text-[var(--color-text-primary)]">
           {confirm.kind === "invoke" ? confirm.label : "Message to agent"}
         </span>
         {confirm.kind === "invoke" ? (
-          <span className="text-[10px] text-[var(--color-text-tertiary)]">{confirm.actionId}</span>
+          <span className="text-label text-[var(--color-text-tertiary)]">{confirm.actionId}</span>
         ) : null}
         <span className="text-[var(--color-status-attention)]">
           {SNIPPET_CONFIRM_REASON_TEXT[confirm.reason]}
@@ -270,7 +270,7 @@ function ConfirmStrip({
           <dl className="mt-2 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1">
             {Object.entries(confirm.payload).map(([key, value]) => (
               <div className="contents" key={key}>
-                <dt className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                <dt className="text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
                   {key}
                 </dt>
                 <dd className="truncate text-[var(--color-text-secondary)]">
@@ -281,17 +281,17 @@ function ConfirmStrip({
           </dl>
           <details className="mt-2">
             <summary
-              className={`cursor-pointer text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] ${FOCUS_RING}`}
+              className={`cursor-pointer text-label uppercase tracking-label text-[var(--color-text-tertiary)] ${FOCUS_RING}`}
             >
               Full payload
             </summary>
-            <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
+            <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-meta text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
               {JSON.stringify(confirm.payload, null, 2)}
             </pre>
           </details>
         </>
       ) : (
-        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-meta text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
           {confirm.message}
         </pre>
       )}
@@ -304,7 +304,7 @@ function ConfirmStrip({
           Discard
         </button>
         <button
-          className={`inline-flex items-center justify-center gap-1.5 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-inverse)] transition hover:opacity-90 ${FOCUS_RING}`}
+          className={`inline-flex items-center justify-center gap-1.5 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-label font-bold uppercase tracking-label text-[var(--color-text-inverse)] transition hover:opacity-90 ${FOCUS_RING}`}
           onClick={(event) => onSend(event.nativeEvent.isTrusted)}
           type="button"
         >
@@ -346,7 +346,7 @@ function StatusLine({
         <LoadingBar className="absolute inset-x-0 top-0" label="Action in progress" />
       ) : null}
       <span
-        className={`inline-flex items-center gap-1.5 font-bold uppercase tracking-[0.1em] ${tone}`}
+        className={`inline-flex items-center gap-1.5 font-bold uppercase tracking-label ${tone}`}
       >
         {working ? <Spinner className="h-3 w-3" /> : null}
         {action.status === "completed" ? (
@@ -620,10 +620,10 @@ export function SnippetPanel({
       />
       {state.conflict ? (
         <div
-          className="flex flex-wrap items-center gap-2 border-b border-[var(--color-chip-warn-border)] px-3 py-2"
+          className="flex flex-wrap items-center gap-2 border-b border-[var(--color-status-attention-border)] px-3 py-2"
           role="alert"
         >
-          <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-chip-warn-text)]">
+          <span className="border border-[var(--color-status-attention-border)] px-2 py-0.5 text-label font-bold uppercase tracking-label text-[var(--color-status-attention)]">
             Revision conflict
           </span>
           <span className="text-[var(--color-text-secondary)]">
@@ -651,10 +651,10 @@ export function SnippetPanel({
           >
             <CloseIcon className="h-3 w-3" />
           </button>
-          <span className="min-w-0 truncate font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+          <span className="min-w-0 truncate font-bold uppercase tracking-label text-[var(--color-text-primary)]">
             {state.manifest.title}
           </span>
-          <span className="hidden truncate text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] sm:inline">
+          <span className="hidden truncate text-label uppercase tracking-label text-[var(--color-text-tertiary)] sm:inline">
             {state.manifest.snippetId} · r{state.manifest.revision} · Esc to exit
           </span>
         </div>

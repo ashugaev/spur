@@ -1,0 +1,252 @@
+{
+  "version": "2.0.0",
+  "surfaces": ["--color-bg-base", "--color-bg-surface", "--color-bg-elevated"],
+  "overlays": ["--color-hover-overlay"],
+  "tokens": {
+    "--color-bg-base": {
+      "group": "color.surface",
+      "since": "1.0.0"
+    },
+    "--color-bg-surface": {
+      "group": "color.surface",
+      "since": "1.0.0"
+    },
+    "--color-bg-elevated": {
+      "group": "color.surface",
+      "since": "1.0.0"
+    },
+    "--color-terminal-bg": {
+      "group": "color.surface",
+      "since": "1.0.0"
+    },
+    "--color-border-subtle": {
+      "group": "color.border",
+      "since": "1.0.0"
+    },
+    "--color-border-default": {
+      "group": "color.border",
+      "since": "1.0.0"
+    },
+    "--color-border-strong": {
+      "group": "color.border",
+      "since": "1.0.0"
+    },
+    "--color-text-primary": {
+      "group": "color.text",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-text-secondary": {
+      "group": "color.text",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-text-tertiary": {
+      "group": "color.text",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-text-inverse": {
+      "group": "color.text",
+      "since": "1.0.0"
+    },
+    "--color-input-bg": {
+      "group": "color.input",
+      "since": "1.0.0"
+    },
+    "--color-input-border": {
+      "group": "color.input",
+      "since": "1.0.0",
+      "contrast": 3
+    },
+    "--color-accent": {
+      "group": "color.accent",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-accent-hover": {
+      "group": "color.accent",
+      "since": "1.0.0"
+    },
+    "--color-accent-violet": {
+      "group": "color.accent",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-hover-overlay": {
+      "group": "color.overlay",
+      "since": "1.0.0"
+    },
+    "--color-modal-backdrop": {
+      "group": "color.overlay",
+      "since": "1.0.0"
+    },
+    "--color-scrollbar-thumb": {
+      "group": "color.overlay",
+      "since": "1.0.0"
+    },
+    "--color-scrollbar-thumb-hover": {
+      "group": "color.overlay",
+      "since": "1.0.0"
+    },
+    "--color-scrollbar-thumb-active": {
+      "group": "color.overlay",
+      "since": "1.0.0"
+    },
+    "--color-activity-pulse": {
+      "group": "color.overlay",
+      "since": "1.0.0"
+    },
+    "--color-shadow-menu": {
+      "group": "color.shadow",
+      "since": "1.0.0"
+    },
+    "--color-shadow-modal-sm": {
+      "group": "color.shadow",
+      "since": "1.0.0"
+    },
+    "--color-shadow-modal-lg": {
+      "group": "color.shadow",
+      "since": "1.0.0"
+    },
+    "--color-status-working": {
+      "group": "color.status",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-status-ready": {
+      "group": "color.status",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-status-attention": {
+      "group": "color.status",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-status-error": {
+      "group": "color.status",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-status-inactive": {
+      "group": "color.status",
+      "since": "2.0.0",
+      "contrast": 4.5
+    },
+    "--color-status-working-bg": {
+      "group": "color.status",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-ready-bg": {
+      "group": "color.status",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-attention-bg": {
+      "group": "color.status",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-error-bg": {
+      "group": "color.status",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-inactive-bg": {
+      "group": "color.status",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-working-border": {
+      "group": "color.status",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-ready-border": {
+      "group": "color.status",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-attention-border": {
+      "group": "color.status",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-error-border": {
+      "group": "color.status",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-inactive-border": {
+      "group": "color.status",
+      "since": "2.0.0",
+      "derived": true
+    }
+  },
+  "recipes": {
+    "INPUT_CLASS": {
+      "since": "1.0.0"
+    },
+    "FOCUS_RING_CLASS": {
+      "since": "1.1.0"
+    },
+    "ICON_BUTTON_CLASS": {
+      "since": "1.1.0"
+    },
+    "SECONDARY_BUTTON_CLASS": {
+      "since": "1.0.0"
+    },
+    "PRIMARY_BUTTON_CLASS": {
+      "since": "1.0.0"
+    },
+    "DANGER_BUTTON_CLASS": {
+      "since": "1.0.0"
+    },
+    "ATTENTION_BUTTON_CLASS": {
+      "since": "1.0.0"
+    },
+    "CHECKBOX_CLASS": {
+      "since": "1.0.0"
+    },
+    "HARD_WRAP_TEXT_CLASS": {
+      "since": "1.0.0"
+    },
+    "STATUS_CARD_CLASS": {
+      "since": "1.0.0"
+    }
+  },
+  "banned": [
+    {
+      "pattern": "\\btext-\\[\\d+px\\]",
+      "use": "text-label | text-meta | text-body | text-title | text-display"
+    },
+    {
+      "pattern": "\\btext-(?:xs|sm|base|lg|xl|[2-9]xl)\\b",
+      "use": "text-label | text-meta | text-body | text-title | text-display"
+    },
+    {
+      "pattern": "\\btracking-\\[",
+      "use": "tracking-display | tracking-body | tracking-meta | tracking-label | tracking-caps"
+    },
+    {
+      "pattern": "\\bshadow-\\[",
+      "use": "shadow-raised | shadow-overlay | shadow-modal"
+    },
+    {
+      "pattern": "\\brounded(?:-(?!dot\\b|none\\b)[\\w\\[\\]./-]+)?(?=[\\s\"'`])",
+      "use": "square corners; rounded-dot for status dots"
+    }
+  ],
+  "literalAllow": [
+    {
+      "file": "components/SessionDetail.tsx",
+      "reason": "artifact preview iframe paints a white page canvas; favicon fallback color"
+    },
+    {
+      "file": "lib/file-attachments.ts",
+      "reason": "canvas fill when flattening an image attachment"
+    }
+  ]
+}

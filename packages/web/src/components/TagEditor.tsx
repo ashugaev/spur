@@ -75,7 +75,7 @@ export function TagEditor({ session, variant }: TagEditorProps) {
   const popover = open ? (
     <div
       aria-label="Tag options"
-      className="fixed z-30 w-56 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+      className="fixed z-30 w-56 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-overlay"
       ref={menuRef}
       role="menu"
       style={menuStyle}
@@ -111,16 +111,16 @@ export function TagEditor({ session, variant }: TagEditorProps) {
             role="menuitem"
             type="button"
           >
-            <span className="text-[9px] uppercase tracking-[0.06em]" style={{ color: tag.color }}>
+            <span className="text-label uppercase tracking-meta" style={{ color: tag.color }}>
               {tag.name}
             </span>
-            <span className="mt-0.5 block text-[10px] leading-snug text-[var(--color-text-tertiary)]">
+            <span className="mt-0.5 block text-label leading-snug text-[var(--color-text-tertiary)]">
               {tag.description}
             </span>
           </button>
         ))
       ) : applied.length === 0 ? (
-        <div className="px-2 py-1.5 text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
+        <div className="px-2 py-1.5 text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
           No tags
         </div>
       ) : null}
@@ -139,7 +139,7 @@ export function TagEditor({ session, variant }: TagEditorProps) {
           aria-expanded={open}
           aria-haspopup="menu"
           aria-label="Manage tags"
-          className="inline-flex h-5 items-center gap-1 border border-[var(--color-border-subtle)] px-1.5 text-[9px] uppercase tracking-[0.06em] text-[var(--color-text-tertiary)] transition hover:border-[var(--color-border-default)] hover:text-[var(--color-text-secondary)]"
+          className="inline-flex h-5 items-center gap-1 border border-[var(--color-border-subtle)] px-1.5 text-label uppercase tracking-meta text-[var(--color-text-tertiary)] transition hover:border-[var(--color-border-default)] hover:text-[var(--color-text-secondary)]"
           disabled={busy}
           onClick={() => setOpen((value) => !value)}
           ref={buttonRef}
@@ -176,7 +176,7 @@ export function TagEditor({ session, variant }: TagEditorProps) {
           <span className="inline-flex items-center">
             {visibleDots.map((name, index) => (
               <span
-                className={`inline-block h-2.5 w-2.5 rounded-full border border-[var(--color-border-default)] ${
+                className={`inline-block h-2.5 w-2.5 rounded-dot border border-[var(--color-border-default)] ${
                   index === 0 ? "" : "-ml-1"
                 }`}
                 key={name}
@@ -186,7 +186,7 @@ export function TagEditor({ session, variant }: TagEditorProps) {
             ))}
             {overflow > 0 ? (
               <span
-                className="-ml-1 inline-flex h-2.5 items-center justify-center rounded-full border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-1 text-[8px] leading-none text-[var(--color-text-tertiary)]"
+                className="-ml-1 inline-flex h-2.5 items-center justify-center rounded-dot border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-1 text-label leading-none text-[var(--color-text-tertiary)]"
                 title={applied.slice(MAX_DOTS).join(", ")}
               >
                 +{overflow}

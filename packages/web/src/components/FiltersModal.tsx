@@ -18,7 +18,7 @@ function optionClass(selected: boolean): string {
 
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
-    <span className="text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
+    <span className="text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
       {children}
     </span>
   );
@@ -237,7 +237,7 @@ export function FiltersModal({
       <div className="flex max-h-[80vh] w-[min(560px,100%)] flex-col border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)]">
         <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-border-default)] px-[13px] py-2">
           <h2
-            className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+            className="font-bold uppercase tracking-label text-[var(--color-text-primary)]"
             id="filters-modal-title"
           >
             Filters

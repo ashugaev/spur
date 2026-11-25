@@ -159,7 +159,7 @@ function StepsSection({ steps }: { steps: StepsControl }) {
         ))}
       </div>
       <button
-        className="mt-2 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-xs font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+        className="mt-2 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
         onClick={steps.onAdd}
         type="button"
       >
@@ -239,7 +239,7 @@ function ModeFields({
           ) : null}
         </div>
         {mode.project.options.length === 0 ? (
-          <p className="text-xs text-[var(--color-text-tertiary)]">No projects configured yet.</p>
+          <p className="text-[var(--color-text-tertiary)]">No projects configured yet.</p>
         ) : null}
         <div className="flex flex-wrap gap-2">
           <input
@@ -267,9 +267,7 @@ function ModeFields({
               onChange={(event) => mode.planMode.onChange(event.target.checked)}
               type="checkbox"
             />
-            <span className="text-xs font-bold uppercase text-[var(--color-text-primary)]">
-              Plan
-            </span>
+            <span className="font-bold uppercase text-[var(--color-text-primary)]">Plan</span>
           </label>
           <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
             <input
@@ -403,7 +401,7 @@ export function SpawnModal({
       }}
     >
       <div
-        className="flex h-[100dvh] max-h-[100dvh] w-screen flex-col overflow-hidden bg-[var(--color-bg-base)] pb-[max(1rem,var(--safe-bottom))] pl-[max(1rem,var(--safe-left))] pr-[max(1rem,var(--safe-right))] pt-[max(1rem,var(--safe-top))] shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:h-[calc(100dvh-2rem)] sm:max-h-[44rem] sm:w-full sm:max-w-lg sm:border sm:border-[var(--color-border-default)] sm:p-5"
+        className="flex h-[100dvh] max-h-[100dvh] w-screen flex-col overflow-hidden bg-[var(--color-bg-base)] pb-[max(1rem,var(--safe-bottom))] pl-[max(1rem,var(--safe-left))] pr-[max(1rem,var(--safe-right))] pt-[max(1rem,var(--safe-top))] shadow-modal sm:h-[calc(100dvh-2rem)] sm:max-h-[44rem] sm:w-full sm:max-w-lg sm:border sm:border-[var(--color-border-default)] sm:p-5"
         onKeyDown={(event) => {
           if (isVoiceToggleHotkey(event)) {
             event.preventDefault();
@@ -418,7 +416,7 @@ export function SpawnModal({
       >
         <div className="mb-4 flex shrink-0 items-center justify-between">
           <h2
-            className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+            className="text-title font-bold uppercase tracking-label text-[var(--color-text-primary)]"
             id="spawn-modal-title"
           >
             {title}
@@ -459,7 +457,7 @@ export function SpawnModal({
             data-spawn-modal-extras
           >
             {voice.voiceError ? (
-              <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+              <div className="border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2.5 py-1.5 text-[var(--color-status-error)]">
                 {voice.voiceError}
               </div>
             ) : null}
@@ -468,7 +466,7 @@ export function SpawnModal({
         </div>
         {error ? (
           <div
-            className="mt-3 flex shrink-0 items-center gap-2 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]"
+            className="mt-3 flex shrink-0 items-center gap-2 border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2.5 py-1.5 text-[var(--color-status-error)]"
             role="alert"
           >
             <span className="min-w-0 flex-1 break-words">{error.message}</span>
@@ -476,7 +474,7 @@ export function SpawnModal({
           </div>
         ) : null}
         <div className="mt-3 flex shrink-0 items-center justify-between">
-          <span className="text-[10px] text-[var(--color-text-tertiary)]">
+          <span className="text-label text-[var(--color-text-tertiary)]">
             <VoiceStatusHint voice={voice} />
           </span>
           <div className="flex items-center gap-2">
@@ -509,7 +507,7 @@ export function SpawnModal({
                 <span>{submitLabel}</span>
                 <span
                   aria-hidden="true"
-                  className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                  className="whitespace-nowrap font-mono text-label font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                 >
                   {PRIMARY_SUBMIT_HINT}
                 </span>
