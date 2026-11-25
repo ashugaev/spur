@@ -1,14 +1,12 @@
 ROADMAP
 
-Tracking issue: #1518. Update STATUS when a phase merges.
+Tracking issue: #1518. Update STATUS on implementation and merge.
 
 
 STATUS
 
-  1.0.0  done   tokens.css, registry.json, guard
-  1.1.0  done   AA token values, ICON_BUTTON_CLASS, FOCUS_RING_CLASS
-  2.0.0  done   text, tracking, elevation scales; rounded-dot; tone set; chip-*, dot-bg-*, input-text, input-placeholder, row-hover removed
-  2.1.0  done   registry roles for every token; opacity and weight bans
+  Implemented in open PR #1508; merge pending. Version source: design/registry.json.
+  Release history: packages/web/src/design/migrations/.
 
 
 NEXT, in order

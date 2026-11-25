@@ -7,34 +7,22 @@ STATUS
 
   One map from domain state to tone, in code. Components take the tone.
 
-  tone       order  states                                           dot
-  error      1      needs_input, error, budget_limited               static
-  attention  2      waiting, rate_limited, wake scheduled            static
-  working    3      working, starting                                pulse
-  ready      4      completed, CI passing, review approved           static
-  inactive   5      closed, stopped, killed, unknown                 static
-
-  Zone order follows tone order. Empty zone: not rendered.
+  State maps and lane order: ActivityDot.tsx and ATTENTION_LANE_META in lib/types.ts.
+  Empty zone: not rendered.
   Unknown state falls to inactive, never error.
   Tone never alone: dot plus label, chip text, or zone header.
-  Dot, icon, edge and word: --color-status-<tone>. Tint: -bg. Chip edge: -border. TS: design/tone.ts.
-  Map in code: ActivityDot (activity -> tone), ATTENTION_LANE_META in lib/types.ts (lane -> tone).
+  Tone access: design/tone.ts. Never map colors inside consumers.
 
 
 SESSION LIST
 
-  Zone header: 8px tone dot, caps label, rule in tone at 25%, count tertiary.
-  Row: DATA_ROW_CLASS, primary branch bold, project secondary, meta tertiary, actions right.
+  Compose Zone.tsx and DataRow.tsx; preserve branch/project/metadata hierarchy.
 
 
 RESPONSIVE COLUMNS
 
-  below sm   header stacks, project and agent columns hidden, stats wrap, status word hidden
-  sm-md      project column, tracker and PR links show
-  md-lg      agent column shows
-  lg+        branch column, full layout
-
-  Classes: hidden sm:inline, hidden md:inline, hidden lg:inline.
+  Column visibility: SessionRow.tsx and Dashboard.tsx.
+  Preserve primary session identity and actions on narrow screens.
 
 
 STATES

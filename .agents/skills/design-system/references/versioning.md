@@ -15,7 +15,7 @@ SEMVER
 
 LIFECYCLE
 
-  1  add         token in both blocks plus registry entry; minor
+  1  add         token per references/tokens.md placement plus registry entry; minor
   2  deprecate   old name aliases new: --old: var(--new); registry entry gains deprecated, replacement, removeIn
   3  migrate     callsites by hand, one file at a time; never sed or codemods
   4  remove      next major deletes alias and entry; guard fails on leftovers once version >= removeIn
@@ -36,19 +36,10 @@ MIGRATION FILE
   CHANGES names tokens and intent; values stay in tokens.css and git history.
 
 
-GUARD, design-system.test.ts
+GUARD
 
-  sync        registry tokens equal first-block tokens; light block equals color tokens minus derived; registry recipes equal classes.ts exports
-  role        every registry token states a role
-  alias       deprecated token value is var(replacement), with removeIn
-  version     registry version equals newest migration file
-  literals    no color literal outside tokens.css, colors.ts, literalAllow
-  refs        every var(--color-*) in src names a registry token
-  removed     token past removeIn used nowhere in src
-  contrast    every registry contrast rule, both themes, worst surface plus overlay
-  mirror      colors.ts constants equal their tokens
-  banned      registry banned patterns: arbitrary and named text sizes, arbitrary tracking and shadows, rounded-* except rounded-dot
-  tone        design/tone.ts resolves to registry tokens
+  Enforced checks: packages/web/src/__tests__/design-system.test.ts.
+  Bans and exceptions: packages/web/src/design/registry.json.
 
 
 CANVAS

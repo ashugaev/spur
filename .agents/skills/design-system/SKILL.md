@@ -28,12 +28,12 @@ RULES
 
   - Color: var(--color-*) only. Literals (hex, rgb, hsl, Tailwind palette, white/N, black/N) live in tokens.css and colors.ts. Exceptions: registry.json literalAllow, with reason.
   - TS without CSS vars (metadata, xterm): import from @/design/colors. New color: token in tokens.css first, then export.
-  - New color token: both blocks, registry entry, contrast rule when text or field edge, one commit.
+  - New color token: follow references/tokens.md placement; registry entry and text/field contrast rule in same commit.
   - Scales only: text-*, tracking-*, shadow-*, rounded-dot. Names: references/tokens.md. Arbitrary values fail the guard.
   - Square corners. rounded-dot for status dots only.
   - One family via --font-sans. Body size and tracking inherit from body in globals.css; never restate.
   - Labels, headers, buttons, stats: uppercase class. Source copy stays sentence case.
-  - Status: component props take a StatusTone (design/tone.ts), never a color. Map: references/patterns.md.
+  - Status: component props take a StatusTone (design/tone.ts), never a color. State maps: ActivityDot.tsx and lib/types.ts.
   - Recipes: compose classes.ts constants with layout utilities. Never copy a recipe string. New variant extends the recipe.
   - Icon-only button: ICON_BUTTON_CLASS plus size and idle text color.
   - Focus: FOCUS_RING_CLASS on every control without a recipe carrying it.
@@ -45,7 +45,7 @@ CHANGE
 
   1  Classify bump: references/versioning.md SEMVER.
   2  Visible change: run `design` approval before implementation.
-  3  Edit tokens.css both blocks, classes.ts, or the primitive.
+  3  Edit owning source; token placement: references/tokens.md.
   4  registry.json: add, deprecate or remove entry; bump version.
   5  Write migrations/<version>.md: names and intent, never values.
   6  Rename: alias old to new and deprecate. Remove only in next major.
@@ -81,5 +81,5 @@ REFERENCES
   references/contrast.md    guidelines C1-C9
   references/errors.md      typical design errors, guard or review
   references/decisions.md   user feedback log, newest last
-  references/versioning.md  semver, lifecycle, migration format, guard checks
+  references/versioning.md  semver, lifecycle, migration format
   references/roadmap.md     version status, follow-up issues
