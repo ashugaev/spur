@@ -126,7 +126,7 @@ async function launcherFixture(
   );
   await writeFile(
     join(root, "scripts/spur-sidecar-common.sh"),
-    `ensure_node_ready() { :; }\nensure_workspace_deps() { :; }\nresolve_sidecar_port() { printf "%s\\n" "$SPUR_RESERVED_PORT_UI"; }\nwait_for_http() { while [[ ! -f "$SPUR_TEST_WEB_MARKER" ]]; do /bin/sleep 0.01; done; if [[ -n "\${SPUR_TEST_WEB_GATE:-}" ]]; then touch "$SPUR_TEST_WEB_GATE.ready"; while [[ ! -f "$SPUR_TEST_WEB_GATE" ]]; do /bin/sleep 0.01; done; fi; }\n`,
+    `source ${JSON.stringify(resolve("../scripts/spur-sidecar-common.sh"))}\nSIDECAR_REPO_ROOT="$PWD"\nensure_node_ready() { :; }\nensure_workspace_deps() { :; }\nresolve_sidecar_port() { printf "%s\\n" "$SPUR_RESERVED_PORT_UI"; }\nwait_for_http() { while [[ ! -f "$SPUR_TEST_WEB_MARKER" ]]; do /bin/sleep 0.01; done; if [[ -n "\${SPUR_TEST_WEB_GATE:-}" ]]; then touch "$SPUR_TEST_WEB_GATE.ready"; while [[ ! -f "$SPUR_TEST_WEB_GATE" ]]; do /bin/sleep 0.01; done; fi; }\n`,
   );
   await writeFile(join(root, "packages/web/next-env.d.ts"), "// fixture\n");
   await writeFile(join(root, "packages/web/tsconfig.json"), "{}\n");
@@ -347,7 +347,9 @@ describe("spur-isolated-ui.sh", () => {
     expect(child.process.exitCode).toBe(1);
     expect(child.stderr).toContain("Timed out waiting for current isolated daemon runtime");
     expect(await exists(fixture.marker)).toBe(false);
-    expect(script).toContain("RUNTIME_DEADLINE=$((SECONDS + 30))");
+    expect(readFileSync(resolve("../scripts/spur-sidecar-common.sh"), "utf8")).toContain(
+      'local attempts="${1:-30}"',
+    );
   }, 45_000);
   it("rejects retained valid old generation until delayed current publication", async (context) => {
     const fixture = await launcherFixture(context);
@@ -373,7 +375,7 @@ describe("spur-isolated-ui.sh", () => {
     } finally {
       await stopChild(child);
     }
-  });
+  }, 10_000);
   it("never binds the sidecar web server to all interfaces", () => {
     expect(script).not.toContain("0.0.0.0");
   });

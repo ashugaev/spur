@@ -20,7 +20,7 @@ For a throwaway verification daemon instead of pointing `--config` at an ad hoc 
 
 First start of either sidecar in a fresh worktree pays a full cold `pnpm install --frozen-lockfile`: it replaces the worktree's symlinked `node_modules` trees with a real install.
 
-Start `isolated-ui` for the voice-capable dev stand; its dependency starts the daemon. Seed dedicated TEST credentials once per repository through the private [Sidecars](docs/commands.md#sidecars) fixture; later starts attach without cloning or connecting another project. Voice needs a configured provider. Restart owned stand: stop UI, stop daemon, start UI; [current-generation readiness](docs/commands.md#session-tools-and-environment).
+Start `isolated` for the voice-capable dev stand; stop existing standalone UI/daemon first. Restart through combined stop/start; standalone entries remain available in [Sidecars](docs/commands.md#sidecars). Seed dedicated TEST credentials once per repository through its private fixture; later starts attach without cloning or connecting another project. Voice needs a configured provider; [current-generation readiness](docs/commands.md#session-tools-and-environment).
 
 `packages/web` Playwright runs start Next themselves, in CI and locally alike, through the `webServer` block in `packages/web/playwright.config.ts`. It targets an isolated daemon URL, config, tmux socket, and UI port allocated by `packages/web/tests/harness/daemon-target.ts` — free loopback ports, nothing listening on the daemon one. `src/lib/spur-daemon.ts` carries no daemon-URL default: an `SPUR_DAEMON_URL` the harness failed to apply throws instead of resolving `127.0.0.1:4310`. Run needs `pnpm --dir packages/web build` first: `next start` serves the built app.
 
