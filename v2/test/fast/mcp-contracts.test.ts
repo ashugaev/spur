@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import type * as FsPromises from "node:fs/promises";
 import { join } from "node:path";
+import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DAEMON_OPERATIONS,
@@ -105,6 +106,30 @@ describe("daemon MCP operation contracts", () => {
       ).toBe(fingerprint);
     },
   );
+
+  it("exposes optional state provenance through session detail and list contracts", async () => {
+    const types = await source("types.ts");
+    const parsed = ts.createSourceFile("types.ts", types, ts.ScriptTarget.Latest, true);
+    for (const dto of ["SessionView", "DashboardSessionView"]) {
+      const declaration = parsed.statements.find(
+        (node): node is ts.InterfaceDeclaration =>
+          ts.isInterfaceDeclaration(node) && node.name.text === dto,
+      );
+      const provenance = declaration?.members.find(
+        (member): member is ts.PropertySignature =>
+          ts.isPropertySignature(member) && member.name.getText(parsed) === "stateSource",
+      );
+      expect(provenance?.questionToken, dto).toBeDefined();
+      expect(provenance?.type?.getText(parsed), dto).toBe("StateSource");
+    }
+    expect(getDaemonOperation("get_session")?.responses[0]?.description).toBe("SessionView");
+    expect(getDaemonOperation("list_sessions")?.responses[0]?.description).toBe(
+      "SessionListView[]; x-spur-lifecycle-instance-id header",
+    );
+    expect(getDaemonOperation("list_sessions")?.query).toContainEqual(
+      expect.objectContaining({ name: "view", type: '"full"|"dashboard"', required: false }),
+    );
+  });
 
   it("detects route additions, DTO additions and parser behavior changes", async () => {
     const server = await source("server.ts");
