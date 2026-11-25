@@ -412,8 +412,9 @@ const AGENT_READY_TIMEOUT_MS = 120_000;
 const CLAUDE_DIALOG_SETTLE_MS = 10_000;
 // Claude registered with no dialog on screen but the ready markers missing this
 // long: its terminal output drifted. Registration normally leads the markers by
-// well under a second, and startup dialogs never write it.
-const CLAUDE_MARKER_GRACE_MS = 10_000;
+// well under a second, and startup dialogs never write it. 30s leaves room for a
+// slow first render on a loaded host before proceeding on registration alone.
+const CLAUDE_MARKER_GRACE_MS = 30_000;
 const AGENT_READY_POLL_INITIAL_MS = 500;
 const AGENT_READY_POLL_MAX_MS = 2_000;
 const AGENT_READY_POLL_JITTER_MAX_MS = 250;

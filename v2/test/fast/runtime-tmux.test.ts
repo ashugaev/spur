@@ -2376,8 +2376,8 @@ describe("runtime-tmux", () => {
             agent: "claude",
             claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
           });
-          expect(h.elapsed()).toBeGreaterThanOrEqual(10_000);
-          expect(h.elapsed()).toBeLessThan(15_000);
+          expect(h.elapsed()).toBeGreaterThanOrEqual(30_000);
+          expect(h.elapsed()).toBeLessThan(35_000);
           expect(markerWarning(stderrSpy)).toBe(true);
           expect(inputCalls()).toBe(0);
         } finally {
@@ -2391,7 +2391,7 @@ describe("runtime-tmux", () => {
         writeRegistration(dir);
         const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
         // Dialog shows mid-grace: the grace would lapse before the dialog settles.
-        const h = claudeHarness((n) => (n <= 5 ? DRIFTED : paneFixture("bypass-warning.txt")));
+        const h = claudeHarness((n) => (n <= 25 ? DRIFTED : paneFixture("bypass-warning.txt")));
         try {
           const { waitForTmuxReady, ClaudeStartupDialogError } =
             await import("../../src/runtime-tmux.js");
@@ -2422,8 +2422,8 @@ describe("runtime-tmux", () => {
             agent: "claude",
             claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
           });
-          // Grace restarts at capture 9, so it lapses at capture 19.
-          expect(h.captures()).toBe(19);
+          // Grace restarts at capture 9, so it lapses at capture 39.
+          expect(h.captures()).toBe(39);
           expect(markerWarning(stderrSpy)).toBe(true);
         } finally {
           h.restore();
