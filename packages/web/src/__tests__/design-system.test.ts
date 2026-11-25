@@ -102,7 +102,9 @@ function readColor(token: string, values: ReadonlyMap<string, string>): Rgba {
   const alias = /^var\((--color-[a-z0-9-]+)\)$/.exec(value);
   if (alias) return readColor(alias[1], values);
   const mix =
-    /^color-mix\(\s*in srgb,\s*var\((--color-[a-z0-9-]+)\)\s+(\d+(?:\.\d+)?)%,\s*transparent\s*\)$/.exec(value);
+    /^color-mix\(\s*in srgb,\s*var\((--color-[a-z0-9-]+)\)\s+(\d+(?:\.\d+)?)%,\s*transparent\s*\)$/.exec(
+      value,
+    );
   if (mix) {
     const weight = Number(mix[2]) / 100;
     if (weight > 1) throw new Error(`invalid color-mix percentage: ${value}`);
@@ -266,7 +268,9 @@ describe("design system: contrast", () => {
       "color-mix(in oklab, var(--color-bg-base) 12%, transparent)",
       "color-mix(in srgb, var(--color-bg-base) 101%, transparent)",
     ]) {
-      expect(() => readColor("--color-test", new Map([...dark, ["--color-test", value]]))).toThrow();
+      expect(() =>
+        readColor("--color-test", new Map([...dark, ["--color-test", value]])),
+      ).toThrow();
     }
   });
 
@@ -319,30 +323,24 @@ describe("design system: contrast", () => {
   });
   it.each(
     themes.flatMap((theme) => solidPairs.map(([label, fill]) => [theme, label, fill] as const)),
-  )(
-    "%s recipe label %s meets 4.5:1 on %s",
-    (theme, label, fill) => {
-      const values = valuesFor(theme);
-      const worst = Math.min(
-        ...groundsFor(values).map((ground) => {
-          const background = over(readColor(fill, values), ground);
-          return ratio(over(readColor(label, values), background), background);
-        }),
-      );
-      expect(worst).toBeGreaterThanOrEqual(4.5);
-    },
-  );
+  )("%s recipe label %s meets 4.5:1 on %s", (theme, label, fill) => {
+    const values = valuesFor(theme);
+    const worst = Math.min(
+      ...groundsFor(values).map((ground) => {
+        const background = over(readColor(fill, values), ground);
+        return ratio(over(readColor(label, values), background), background);
+      }),
+    );
+    expect(worst).toBeGreaterThanOrEqual(4.5);
+  });
 });
 
 describe("design system: tone set", () => {
-  it.each(tones)(
-    "%s resolves to registry tokens",
-    (tone) => {
-      for (const ref of [toneColor(tone), toneBg(tone), toneBorder(tone)]) {
-        expect(ref.slice(4, -1) in registry.tokens).toBe(true);
-      }
-    },
-  );
+  it.each(tones)("%s resolves to registry tokens", (tone) => {
+    for (const ref of [toneColor(tone), toneBg(tone), toneBorder(tone)]) {
+      expect(ref.slice(4, -1) in registry.tokens).toBe(true);
+    }
+  });
 });
 
 describe("design system: colors.ts mirror", () => {

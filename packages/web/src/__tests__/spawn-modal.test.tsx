@@ -306,9 +306,7 @@ describe("SpawnModal", () => {
       element && element !== submit;
       element = element.parentElement
     ) {
-      expect(element.className).not.toMatch(
-        /(?:^|\s)(?:[a-z-]+:)*text-\[(?:color:)?var\(--color-/,
-      );
+      expect(element.className).not.toMatch(/(?:^|\s)(?:[a-z-]+:)*text-\[(?:color:)?var\(--color-/);
       expect(element.style.color).toBe("");
     }
   });
