@@ -39,20 +39,33 @@ afterEach(async () => {
   }
 });
 
-async function launcherFixture(options: { delay?: number; failDaemon?: boolean; failUi?: boolean; timeout?: boolean } = {}) {
+async function launcherFixture(
+  options: { delay?: number; failDaemon?: boolean; failUi?: boolean; timeout?: boolean } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "spur-combined-"));
   const fixture: (typeof fixtures)[number] = { root };
   fixtures.push(fixture);
   for (const directory of ["scripts", "tool", "v2/bin", "path"])
     await mkdir(join(root, directory), { recursive: true });
-  await copyFile(join(sourceRoot, "scripts/spur-isolated.sh"), join(root, "scripts/spur-isolated.sh"));
-  await writeFile(join(root, "scripts/spur-sidecar-common.sh"),
-    `source ${JSON.stringify(join(sourceRoot, "scripts/spur-sidecar-common.sh"))}\nSIDECAR_REPO_ROOT="$PWD"\nensure_node_ready() { :; }\n`);
-  await writeFile(join(root, "v2/bin/isolated-web-endpoint.mjs"),
-    `await import(${JSON.stringify(join(sourceRoot, "v2/bin/isolated-web-endpoint.mjs"))});\n`);
+  await copyFile(
+    join(sourceRoot, "scripts/spur-isolated.sh"),
+    join(root, "scripts/spur-isolated.sh"),
+  );
+  await writeFile(
+    join(root, "scripts/spur-sidecar-common.sh"),
+    `source ${JSON.stringify(join(sourceRoot, "scripts/spur-sidecar-common.sh"))}\nSIDECAR_REPO_ROOT="$PWD"\nensure_node_ready() { :; }\n`,
+  );
+  await writeFile(
+    join(root, "v2/bin/isolated-web-endpoint.mjs"),
+    `await import(${JSON.stringify(join(sourceRoot, "v2/bin/isolated-web-endpoint.mjs"))});\n`,
+  );
   if (options.timeout) {
     // Shorten attempts, while executing the production wait and cleanup paths.
-    await writeFile(join(root, "path/seq"), '#!/bin/sh\nif [ "$2" = 180 ]; then echo 1; else exec /usr/bin/seq "$@"; fi\n', { mode: 0o755 });
+    await writeFile(
+      join(root, "path/seq"),
+      '#!/bin/sh\nif [ "$2" = 180 ]; then echo 1; else exec /usr/bin/seq "$@"; fi\n',
+      { mode: 0o755 },
+    );
   }
   const events = join(root, "events");
   const runtime = join(root, "tool/isolated-env.sh");
@@ -85,17 +98,25 @@ if(kind==='daemon') {
 `;
   await writeFile(join(root, "worker.mjs"), workerSource);
   for (const kind of ["daemon", "ui"]) {
-    await writeFile(join(root, `scripts/spur-isolated-${kind}.sh`),
-      `#!/bin/bash\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(join(root, "worker.mjs"))} ${kind}\n`);
+    await writeFile(
+      join(root, `scripts/spur-isolated-${kind}.sh`),
+      `#!/bin/bash\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(join(root, "worker.mjs"))} ${kind}\n`,
+    );
   }
   let stderr = "";
   return {
-    root, events, runtime,
+    root,
+    events,
+    runtime,
     output: () => stderr,
     launch() {
       const child = spawn("bash", [join(root, "scripts/spur-isolated.sh")], {
         cwd: root,
-        env: { ...process.env, SPUR_SESSION_TOOL_DIR: join(root, "tool"), PATH: `${join(root, "path")}:${process.env["PATH"]}` },
+        env: {
+          ...process.env,
+          SPUR_SESSION_TOOL_DIR: join(root, "tool"),
+          PATH: `${join(root, "path")}:${process.env["PATH"]}`,
+        },
         stdio: ["ignore", "pipe", "pipe"],
       });
       fixture.child = child;
@@ -104,7 +125,9 @@ if(kind==='daemon') {
         child.once("error", reject);
       });
       child.stdout?.resume();
-      child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
       return { child, exited: fixture.exited };
     },
     async assertGone() {
@@ -122,12 +145,18 @@ describe("combined isolated sidecar", () => {
     fixtures.push({ root });
     execFileSync("git", ["init", "-q"], { cwd: root });
     const configPath = join(root, "spur.yaml");
-    await writeFile(configPath, buildIsolatedProjectConfig(await readFile(join(sourceRoot, "spur.yaml"), "utf8"), root));
+    await writeFile(
+      configPath,
+      buildIsolatedProjectConfig(await readFile(join(sourceRoot, "spur.yaml"), "utf8"), root),
+    );
     const project = loadProjectConfig(configPath).projects["sp"];
     if (!project) throw new Error("Missing project");
     const combined = project.sidecars["isolated"];
     expect(combined?.command).toBe("./scripts/spur-isolated.sh");
-    expect(combined?.ports).toEqual({ ...project.sidecars["isolated-daemon"]?.ports, ...project.sidecars["isolated-ui"]?.ports });
+    expect(combined?.ports).toEqual({
+      ...project.sidecars["isolated-daemon"]?.ports,
+      ...project.sidecars["isolated-ui"]?.ports,
+    });
     expect(combined?.env).toEqual(project.sidecars["isolated-ui"]?.env);
     expect(combined?.dependsOn).toBeUndefined();
   });
@@ -139,7 +168,9 @@ describe("combined isolated sidecar", () => {
     await new Promise((done) => setTimeout(done, 30_100));
     expect(await contents(fixture.events)).not.toContain("ui ");
     await waitUntil(async () => (await contents(fixture.events)).includes("ui "), 10_000);
-    expect((await contents(fixture.events)).indexOf("ready")).toBeLessThan((await contents(fixture.events)).indexOf("ui "));
+    expect((await contents(fixture.events)).indexOf("ready")).toBeLessThan(
+      (await contents(fixture.events)).indexOf("ui "),
+    );
     child.kill("SIGTERM");
     expect(await exited).toBe(143);
     await fixture.assertGone();
@@ -160,7 +191,10 @@ describe("combined isolated sidecar", () => {
 
   for (const kind of ["daemon", "ui"] as const) {
     it(`propagates ${kind} failure and cleans other owned processes`, async () => {
-      const fixture = await launcherFixture({ failDaemon: kind === "daemon", failUi: kind === "ui" });
+      const fixture = await launcherFixture({
+        failDaemon: kind === "daemon",
+        failUi: kind === "ui",
+      });
       const { exited } = fixture.launch();
       expect(await exited).toBe(kind === "daemon" ? 7 : 9);
       if (kind === "daemon") expect(await contents(fixture.events)).not.toContain("ui ");
@@ -176,7 +210,9 @@ describe("combined isolated sidecar", () => {
     expect(fixture.output()).toContain("Timed out waiting for current isolated daemon runtime");
     expect(await contents(fixture.events)).not.toContain("ui ");
     await fixture.assertGone();
-    expect(await readFile(join(sourceRoot, "scripts/spur-isolated.sh"), "utf8")).toContain('wait_for_isolated_daemon 180 "$DAEMON_PID"');
+    expect(await readFile(join(sourceRoot, "scripts/spur-isolated.sh"), "utf8")).toContain(
+      'wait_for_isolated_daemon 180 "$DAEMON_PID"',
+    );
   });
 
   it("rejects pre-existing metadata without starting or touching another owner", async () => {
