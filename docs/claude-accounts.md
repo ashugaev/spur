@@ -39,7 +39,9 @@ Omission with no ready account launches with host authorization.
 
 Managed Claude/Codex sessions change account for the next request through
 [switch-auth](daemon-api.md#session-routes); current requests retain their account.
-Direct sessions enter managed routing on explicit restore/respawn.
+Direct Claude sessions enter managed routing on explicit restore/respawn.
+Managed Codex resumes require a saved `spur_managed` provider; incompatible or unverifiable native identity refuses restore without replacing the session.
+Recover direct Codex histories with [`spur handoff <sessionId> --agent codex`](commands.md#list).
 Handoff to the same provider keeps a pinned profile; another provider, Auto, or a removed profile gives Auto.
 
 Managed routing preserves native session context and process identity during account changes.
