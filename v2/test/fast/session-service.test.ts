@@ -661,49 +661,91 @@ describe("SessionService", () => {
       },
     );
 
-    it("declares completed across views without stopping runtime or removing artifacts", async () => {
-      const { sessions, service } = await setup();
-      try {
-        const before = sessions.get("api-1");
-        expect(await service.readTaskStatus("api-1")).toEqual({ revision: 0 });
-        expect((await service.get("api-1")).state).toBe("waiting");
-        expect(
+    it.each(["completed", "needs_input"] as const)(
+      "declares %s across views without stopping runtime or removing artifacts",
+      async (state) => {
+        const { sessions, service } = await setup();
+        try {
+          const before = sessions.get("api-1");
+          expect(await service.readTaskStatus("api-1")).toEqual({ revision: 0 });
+          expect(await service.get("api-1")).toMatchObject({
+            state: "waiting",
+            stateSource: "jsonl",
+          });
+          expect(
+            await service.writeTaskStatus("api-1", {
+              state,
+              revision: 0,
+              agentLaunchId: "launch-a",
+            }),
+          ).toEqual({ revision: 0, state });
+          const detail = await service.get("api-1");
+          expect(detail).toMatchObject({
+            status: "running",
+            state,
+            stateSource: "task_status",
+            runtimeAlive: true,
+            workspaceExists: true,
+          });
+          expect(detail).not.toHaveProperty("taskStatus");
+          expect(detail).not.toHaveProperty("taskStatusRevision");
+          expect((await service.list({ view: "dashboard" }))[0]).toMatchObject({
+            state,
+            stateSource: "task_status",
+          });
+          expect((await service.list())[0]).toMatchObject({ state, stateSource: "task_status" });
+          expect(sessions.get("api-1")).toMatchObject({
+            status: before?.status,
+            worktreePath: before?.worktreePath,
+            agentLaunchId: "launch-a",
+          });
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+          expect(removeWorktreeMock).not.toHaveBeenCalled();
+          expect(
+            logSpurEventMock.mock.calls.some(
+              ([, event]) =>
+                event.event === "session.state.transition" &&
+                event.details?.toState === state &&
+                event.details?.source === "task_status",
+            ),
+          ).toBe(true);
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it.each(["working", "needs_input"] as const)(
+      "preserves native %s provenance with an active needs_input declaration",
+      async (state) => {
+        const { sessions, service } = await setup();
+        try {
           await service.writeTaskStatus("api-1", {
-            state: "completed",
+            state: "needs_input",
             revision: 0,
             agentLaunchId: "launch-a",
-          }),
-        ).toEqual({ revision: 0, state: "completed" });
-        const detail = await service.get("api-1");
-        expect(detail).toMatchObject({
-          status: "running",
-          state: "completed",
-          runtimeAlive: true,
-          workspaceExists: true,
-        });
-        expect(detail).not.toHaveProperty("taskStatus");
-        expect(detail).not.toHaveProperty("taskStatusRevision");
-        expect((await service.list({ view: "dashboard" }))[0]?.state).toBe("completed");
-        expect((await service.list())[0]?.state).toBe("completed");
-        expect(sessions.get("api-1")).toMatchObject({
-          status: before?.status,
-          worktreePath: before?.worktreePath,
-          agentLaunchId: "launch-a",
-        });
-        expect(killTmuxSessionMock).not.toHaveBeenCalled();
-        expect(removeWorktreeMock).not.toHaveBeenCalled();
-        expect(
-          logSpurEventMock.mock.calls.some(
-            ([, event]) =>
-              event.event === "session.state.transition" &&
-              event.details?.toState === "completed" &&
-              event.details?.source === "task_status",
-          ),
-        ).toBe(true);
-      } finally {
-        service.dispose();
-      }
-    });
+          });
+          mockClaudeJsonlState(state);
+          expect(await service.get("api-1")).toMatchObject({ state, stateSource: "jsonl" });
+          expect((await service.list())[0]).toMatchObject({ state, stateSource: "jsonl" });
+          await (
+            service as unknown as {
+              refreshDashboardCacheEntry(record: SessionRecord): Promise<void>;
+            }
+          ).refreshDashboardCacheEntry(sessions.get("api-1")!);
+          expect((await service.list({ view: "dashboard" }))[0]).toMatchObject({
+            state,
+            stateSource: "jsonl",
+          });
+          expect(await service.readTaskStatus("api-1")).toEqual({
+            revision: 0,
+            state: "needs_input",
+          });
+        } finally {
+          service.dispose();
+        }
+      },
+    );
 
     it("hides completed during raw working inside the waiting hold and restores it after the helper tail", async () => {
       const { service } = await setup();

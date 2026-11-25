@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readEventLog } from "../../src/event-log.js";
 import { startServer, type StartedServer } from "../../src/server.js";
 import { SessionService } from "../../src/session-service.js";
 import { SessionTransitionsCursorError } from "../../src/session-transitions.js";
@@ -14,7 +15,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function setup(): Promise<{ server: StartedServer; base: string }> {
+async function setup(): Promise<{ server: StartedServer; base: string; dataDir: string }> {
   const root = await mkdtemp(join(tmpdir(), "spur-transitions-server-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const port = await findFreePort();
@@ -25,7 +26,7 @@ async function setup(): Promise<{ server: StartedServer; base: string }> {
   );
   const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
   cleanups.push(() => server.stop());
-  return { server, base: `http://127.0.0.1:${port}` };
+  return { server, base: `http://127.0.0.1:${port}`, dataDir: join(root, "data") };
 }
 
 describe("GET /sessions/transitions", () => {
@@ -92,6 +93,57 @@ describe("GET /sessions/transitions", () => {
       floorCursor: "opaque.10",
       latestCursor: "opaque.20",
     });
+  });
+
+  it("writes one http.request.slow event for a request above the threshold", async () => {
+    const realNow = performance.now.bind(performance);
+    const clock = vi.spyOn(performance, "now");
+    vi.spyOn(SessionService.prototype, "listSessionTransitions").mockImplementation(async () => {
+      clock.mockImplementation(() => realNow() + 5_000);
+      return { entries: [], nextCursor: "opaque.1", hasMore: false };
+    });
+    const { base, dataDir } = await setup();
+    const slowEvents = () => readEventLog(dataDir).filter((e) => e.event === "http.request.slow");
+    expect((await fetch(`${base}/sessions/transitions?since=opaque.1`)).status).toBe(200);
+    expect((await fetch(`${base}/info`)).status).toBe(200);
+    expect(slowEvents()).toEqual([
+      expect.objectContaining({
+        level: "warn",
+        method: "GET",
+        path: "/sessions/transitions",
+        details: { durationMs: expect.any(Number), statusCode: 200 },
+      }),
+    ]);
+    expect(slowEvents()[0]?.details?.durationMs).toBeGreaterThanOrEqual(5_000);
+  });
+
+  it("omits the status code from http.request.slow when the client left before a response", async () => {
+    const realNow = performance.now.bind(performance);
+    const clock = vi.spyOn(performance, "now");
+    let entered: (() => void) | undefined;
+    const listing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    vi.spyOn(SessionService.prototype, "list").mockImplementation(async (options) => {
+      clock.mockImplementation(() => realNow() + 5_000);
+      entered?.();
+      await new Promise((resolve) => options?.signal?.addEventListener("abort", resolve));
+      return [];
+    });
+    const { base, dataDir } = await setup();
+    const client = new AbortController();
+    const request = fetch(`${base}/sessions`, { signal: client.signal }).catch(() => undefined);
+    await listing;
+    client.abort();
+    await request;
+    await vi.waitFor(() =>
+      expect(readEventLog(dataDir).filter((e) => e.event === "http.request.slow")).toEqual([
+        expect.objectContaining({
+          path: "/sessions",
+          details: { durationMs: expect.any(Number) },
+        }),
+      ]),
+    );
   });
 
   it("fails the request on refresh or journal errors", async () => {
