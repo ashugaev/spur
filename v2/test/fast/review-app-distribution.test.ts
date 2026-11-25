@@ -814,9 +814,12 @@ test.each(["external-fs", "prefixed-external"])(
     import filesystem from "node:fs/promises";
     import {writeFileSync} from "node:fs";
     import {syncBuiltinESMExports} from "node:module";
-    const original = filesystem.lstat;
-    filesystem.lstat = async (...args) => {
-      if (String(args[0]) === ${JSON.stringify(join(root, "v2/dist"))}) {
+    // The first store lookup has its own sanitized catch; the module-map lookup does not.
+    // Fault there so this CLI error-boundary test does not initialize TypeScript first.
+    const original = filesystem.realpath;
+    let storeLookups = 0;
+    filesystem.realpath = async (...args) => {
+      if (String(args[0]) === ${JSON.stringify(join(root, "node_modules/.pnpm"))} && ++storeLookups === 2) {
         writeFileSync(${JSON.stringify(marker)}, ${JSON.stringify(message)});
         throw Object.assign(new Error(${JSON.stringify(message)}), {code: "EACCES", path: ${JSON.stringify(privatePath)}});
       }
@@ -847,6 +850,8 @@ test.each(["external-fs", "prefixed-external"])(
     ).catch((error: unknown) => error);
     expect(failure).toMatchObject({
       code: 1,
+      signal: null,
+      killed: false,
       stdout: "",
       stderr: "review-app-package: verification failed\n",
     });
