@@ -46,6 +46,7 @@ import {
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
 import { workspaceIdOf } from "./session-desk.js";
+import { resolveWorkspaceState } from "./workspace-store.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
@@ -255,10 +256,13 @@ function matchingWorkItemDesk(
   const first = blocks[0];
   if (!first) return undefined;
   for (const anchor of sessions) {
+    if (workspaceIdOf(anchor) !== anchor.id || !matches(anchor, first)) continue;
+    const workspace = resolveWorkspaceState(dataDir, anchor);
     if (
-      workspaceIdOf(anchor) !== anchor.id ||
-      !(anchor.pr?.url === data.url || anchor.slots?.links.some((link) => link.url === data.url)) ||
-      !matches(anchor, first)
+      !(
+        workspace.pr?.url === data.url ||
+        workspace.slots?.links.some((link) => link.url === data.url)
+      )
     )
       continue;
     const members = owned(anchor) ? [anchor] : [];

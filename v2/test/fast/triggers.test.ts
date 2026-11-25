@@ -6396,6 +6396,72 @@ describe("startConfiguredTriggers", () => {
       },
     );
 
+    it.each(["before-freeze", "after-freeze", "workspace-moved-away"])(
+      "uses canonical workspace ownership with a frozen terminal anchor: %s",
+      async (timing) => {
+        const { config, sessions } = fixture();
+        const anchor = sessions[0];
+        if (!anchor) throw new Error("Missing fixture anchor");
+        const { number, repo, url } = workItemEvent().data;
+        anchor.status = "completed";
+        anchor.terminalSlotsCaptured = true;
+        delete anchor.slots;
+        if (timing !== "after-freeze") anchor.pr = { number, repo, url };
+        const frozen = structuredClone(anchor);
+        const dataDir = mkdtempSync(join(tmpdir(), "spur-frozen-review-desk-"));
+        config.dataDir = dataDir;
+        const { writeWorkspaceState, resolveWorkspaceState } =
+          await import("../../src/workspace-store.js");
+        writeWorkspaceState(dataDir, anchor.id, {
+          pr:
+            timing === "workspace-moved-away"
+              ? { number: 99, repo, url: "https://github.com/acme/api/pull/99" }
+              : { number, repo, url },
+        });
+        expect(resolveWorkspaceState(dataDir, anchor).pr?.url).toBe(
+          timing === "workspace-moved-away" ? "https://github.com/acme/api/pull/99" : url,
+        );
+        listSessionsMock.mockReturnValue(sessions);
+        useWorkItemLifecycleStore();
+        const spawn = vi
+          .fn()
+          .mockResolvedValueOnce({ id: "new-anchor" })
+          .mockResolvedValueOnce({ id: "new-browser" });
+        const { startConfiguredTriggers } = await loadTriggersModule();
+        const bus = new EventBus();
+        const controller = startConfiguredTriggers({
+          config: config as never,
+          bus,
+          sessionService: {
+            spawn,
+            get: vi.fn().mockResolvedValue({ status: "running", workspaceExists: true }),
+          } as never,
+          logger: { warn: vi.fn() },
+        });
+        try {
+          bus.emit(workItemEvent());
+          if (timing === "workspace-moved-away") {
+            await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+          } else {
+            await vi.waitFor(() =>
+              expect(logSpurEventMock).toHaveBeenCalledWith(
+                dataDir,
+                expect.objectContaining({
+                  event: "trigger.spawn.suppressed",
+                  details: expect.objectContaining({ reason: "owner_not_replaceable" }),
+                }),
+              ),
+            );
+            expect(spawn).not.toHaveBeenCalled();
+          }
+          expect(anchor).toEqual(frozen);
+        } finally {
+          await controller.stop();
+          rmSync(dataDir, { recursive: true, force: true });
+        }
+      },
+    );
+
     it.each(["spawning", "running"] as const)(
       "resolves its own accepted first birth at index zero after an uncertain response: %s",
       async (status) => {
