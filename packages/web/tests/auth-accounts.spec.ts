@@ -161,6 +161,102 @@ test.describe("Agent accounts menu", () => {
     await expect.poll(() => poolBody).toEqual({ defaultAccountId: "claude-home" });
   });
 
+  test("keeps the default dialog after leaving an unpinned hover menu", async ({ page }) => {
+    await mockSessions(page, [
+      makeWorkingSession({
+        id: "auth-default-hover",
+        auth: {
+          sessionId: "auth-default-hover",
+          provider: "claude",
+          mode: "auto",
+          accountId: null,
+          effectiveAccountId: "claude-work",
+          generation: 1,
+        },
+      }),
+    ]);
+    await mockAccounts(page);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Manage agent accounts" }).hover();
+    await page.getByRole("button", { name: "Switch Claude to home@x.com" }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Set Claude default" });
+    await dialog.getByRole("radio", { name: /Also switch active sessions/ }).hover();
+    await expect(page.getByTestId("auth-accounts-popover")).toBeHidden();
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("radio", { name: /Also switch active sessions/ }).check();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toBeHidden();
+  });
+
+  test.describe("touch default confirmation", () => {
+    test.use({ hasTouch: true });
+
+    test("keeps scope and pending confirmation after the footer dismisses", async ({ page }) => {
+      await page.addInitScript(() => {
+        const matchMedia = window.matchMedia.bind(window);
+        window.matchMedia = (query) => {
+          const result = matchMedia(query);
+          if (query === "(hover: none) and (pointer: coarse)") {
+            Object.defineProperty(result, "matches", { value: true });
+          }
+          return result;
+        };
+      });
+      await mockSessions(page, [
+        makeWorkingSession({
+          id: "auth-default-touch",
+          auth: {
+            sessionId: "auth-default-touch",
+            provider: "claude",
+            mode: "auto",
+            accountId: null,
+            effectiveAccountId: "claude-work",
+            generation: 1,
+          },
+        }),
+      ]);
+      await mockAccounts(page);
+      const updates: unknown[] = [];
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route("/api/auth-pools/claude", async (route) => {
+        updates.push(route.request().postDataJSON());
+        await gate;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ pool: {}, moved: 1 }),
+        });
+      });
+      try {
+        await page.goto("/");
+        await page.getByRole("button", { name: "Manage agent accounts" }).tap();
+        await page.getByRole("button", { name: "Switch Claude to home@x.com" }).tap();
+        const dialog = page.getByRole("dialog", { name: "Set Claude default" });
+        const active = dialog.getByRole("radio", { name: /Also switch active sessions/ });
+        await active.tap();
+        await expect(active).toBeChecked();
+        await expect(page.getByTestId("auth-accounts-popover")).toBeHidden();
+        await dialog.getByRole("button", { name: "Set default", exact: true }).tap();
+
+        await expect.poll(() => updates).toEqual([
+          { defaultAccountId: "claude-home", applyToActive: true },
+        ]);
+        await expect(dialog.getByRole("button", { name: "Setting default" })).toBeDisabled();
+        await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeVisible();
+        release();
+        await expect(dialog).toBeHidden();
+      } finally {
+        release();
+      }
+    });
+  });
+
   test("adding an account and closing its dialog deletes the new account", async ({ page }) => {
     await mockSessions(page, []);
     await mockAccounts(page);

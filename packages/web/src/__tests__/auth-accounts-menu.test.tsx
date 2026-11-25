@@ -507,6 +507,89 @@ describe("AuthAccountsMenu", () => {
       );
     });
 
+    it("keeps the touch dialog and pending update after the popover dismisses", async () => {
+      vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+      const dialog = await openDialog();
+      const active = dialog.getByRole("radio", { name: /Also switch active sessions/ });
+      fireEvent.pointerDown(active, { pointerType: "touch" });
+
+      expect(screen.queryByTestId("auth-accounts-popover")).toBeNull();
+      expect(screen.getByRole("dialog", { name: "Set Claude default" })).toBeTruthy();
+      fireEvent.click(active);
+      expect((active as HTMLInputElement).checked).toBe(true);
+
+      let release: () => void = () => undefined;
+      gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      try {
+        const confirm = dialog.getByRole("button", { name: "Set default" });
+        fireEvent.pointerDown(confirm, { pointerType: "touch" });
+        fireEvent.click(confirm);
+        await waitFor(() =>
+          expect(patches()).toEqual([
+            {
+              url: "/api/auth-pools/claude",
+              method: "PATCH",
+              body: { defaultAccountId: "claude-home", applyToActive: true },
+            },
+          ]),
+        );
+        const pending = await dialog.findByRole("button", { name: "Setting default" });
+        expect((pending as HTMLButtonElement).disabled).toBe(true);
+        expect((dialog.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(
+          true,
+        );
+        fireEvent.click(pending);
+        fireEvent.click(dialog.getByRole("button", { name: "Cancel" }));
+        fireEvent.keyDown(window, { key: "Escape" });
+        expect(screen.getByRole("dialog", { name: "Set Claude default" })).toBeTruthy();
+        expect(patches()).toHaveLength(1);
+      } finally {
+        release();
+      }
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    });
+
+    it("shows the update error after touch dismissed the popover and permits retry", async () => {
+      vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+      routes["PATCH /api/auth-pools/claude"] = () => ({
+        status: 409,
+        payload: { error: "Account is no longer ready" },
+      });
+      const dialog = await openDialog();
+      const confirm = dialog.getByRole("button", { name: "Set default" });
+      fireEvent.pointerDown(confirm, { pointerType: "touch" });
+      fireEvent.click(confirm);
+
+      expect(await screen.findByRole("alert")).toHaveProperty(
+        "textContent",
+        "Account is no longer ready",
+      );
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      fireEvent.click(screen.getByRole("button", { name: "Switch Claude to home@x.com" }));
+      expect(await screen.findByRole("dialog", { name: "Set Claude default" })).toBeTruthy();
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("retains the dialog after leaving an unpinned hover menu", async () => {
+      render(<AuthAccountsMenu />);
+      cacheSessions(sessions);
+      const trigger = screen.getByRole("button", { name: "Manage agent accounts" });
+      fireEvent.mouseEnter(trigger);
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Switch Claude to home@x.com" }),
+      );
+      const dialog = within(await screen.findByRole("dialog", { name: "Set Claude default" }));
+      fireEvent.mouseLeave(trigger.parentElement!);
+
+      expect(screen.queryByTestId("auth-accounts-popover")).toBeNull();
+      expect(screen.getByRole("dialog", { name: "Set Claude default" })).toBeTruthy();
+      fireEvent.click(dialog.getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(patches()).toEqual([]);
+    });
+
     it("sends nothing when cancelled", async () => {
       const dialog = await openDialog();
       fireEvent.click(dialog.getByRole("button", { name: "Cancel" }));
