@@ -2343,7 +2343,7 @@ describe("runtime-tmux", () => {
       }
     });
 
-    it("names the dialog when the timeout is shorter than the settle", async () => {
+    it("names the dialog when the timeout is shorter than the refusal delay", async () => {
       const h = claudeHarness(() => paneFixture("workspace-trust.txt"));
       try {
         const { waitForTmuxReady, ClaudeStartupDialogError } =
@@ -2357,7 +2357,7 @@ describe("runtime-tmux", () => {
       }
     });
 
-    it("resolves when a dialog is answered inside the settle window", async () => {
+    it("resolves when a dialog is answered before the refusal delay", async () => {
       const dir = makeSessionsDir();
       writeRegistration(dir);
       // Two dialog captures 1s apart stay under the 1.5s refusal.
@@ -2608,6 +2608,34 @@ describe("runtime-tmux", () => {
         } finally {
           h.restore();
           stderrSpy.mockRestore();
+        }
+      });
+
+      it("refuses a dialog about 1.5s after first sight even once captures backed off", async () => {
+        let firstDialogAt: number | null = null;
+        const h = claudeHarness(
+          (_n, now) => {
+            if (now < 6_000) return "Starting Claude Code...";
+            firstDialogAt ??= now;
+            return paneFixture("workspace-trust.txt");
+          },
+          undefined,
+          { realSleeps: true },
+        );
+        try {
+          const { waitForTmuxReady, ClaudeStartupDialogError } =
+            await import("../../src/runtime-tmux.js");
+          await expect(
+            waitForTmuxReady("api-1", ["Claude Code", "❯"], 120_000, { agent: "claude" }),
+          ).rejects.toBeInstanceOf(ClaudeStartupDialogError);
+          // First sight at 6324, past the 5s backoff point (next gap would be 2228).
+          expect(firstDialogAt).toBe(6_324);
+          const refusedAfterMs = (h.captureTimes().at(-1) ?? 0) - 6_324;
+          expect(refusedAfterMs).toBeGreaterThanOrEqual(1_500);
+          expect(refusedAfterMs).toBeLessThanOrEqual(1_750);
+          expect(inputCalls()).toBe(0);
+        } finally {
+          h.restore();
         }
       });
 

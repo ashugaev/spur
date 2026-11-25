@@ -411,6 +411,9 @@ const AGENT_READY_TIMEOUT_MS = 120_000;
 // readiness: nobody is answering it, and typing into it would pick its default
 // option. The span check needs at least two captures, so one sighting never fails.
 const CLAUDE_DIALOG_REFUSE_AFTER_MS = 1_500;
+// While a dialog is up, the next capture lands when the refusal is due, never
+// sooner than this and never later than the normal cadence.
+const CLAUDE_DIALOG_POLL_FLOOR_MS = 250;
 // Claude registered with no dialog on screen but the ready markers missing this
 // long: its terminal output drifted. Registration normally leads the markers by
 // well under a second, and startup dialogs never write it. 30s leaves room for a
@@ -1970,7 +1973,15 @@ export async function waitForTmuxReady(
       await wait(sleep(CLAUDE_REGISTERED_POLL_MS));
       continue;
     } else {
-      await wait(sleep(pollDelayMs + pollJitterMs));
+      const captureDelayMs = pollDelayMs + pollJitterMs;
+      const dialogRefuseInMs = CLAUDE_DIALOG_REFUSE_AFTER_MS - (Date.now() - claudeDialogSinceMs);
+      await wait(
+        sleep(
+          claudeDialog === null
+            ? captureDelayMs
+            : Math.min(captureDelayMs, Math.max(dialogRefuseInMs, CLAUDE_DIALOG_POLL_FLOOR_MS)),
+        ),
+      );
     }
     if (Date.now() - startedAt >= AGENT_READY_POLL_BACKOFF_AFTER_MS) {
       pollDelayMs = Math.min(pollDelayMs * 2, AGENT_READY_POLL_MAX_MS);
