@@ -1,4 +1,4 @@
-import { jsonResponse } from "@/lib/json-response";
+import { NextResponse } from "next/server";
 import { SpurDaemonError, spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { readLifecycleSnapshot } from "@/lib/session-lifecycle";
@@ -10,7 +10,7 @@ import type {
   SpurSessionsResponse,
 } from "@/lib/types";
 
-export async function GET(request: Request) {
+export async function GET(_request: Request) {
   try {
     const [response, projects, backlog] = await Promise.all([
       spurRequest("/sessions?includeCompleted=1&view=dashboard"),
@@ -39,7 +39,7 @@ export async function GET(request: Request) {
       throw new Error("Invalid session lifecycle identity");
     }
     const sessions = payload as SpurSessionView[];
-    return await jsonResponse(request, {
+    return NextResponse.json({
       lifecycleInstanceId,
       sessions,
       projects,

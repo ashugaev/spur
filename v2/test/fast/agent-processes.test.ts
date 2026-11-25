@@ -133,6 +133,7 @@ const {
   capturePaneAgentProcesses,
   checkAgentProcessOwnership,
   findForeignAgentProcessesForSession,
+  listDetachedSessionOwners,
   scanUnownedAgentProcesses,
   terminateAgentProcesses,
   terminateDetachedSessionProcesses,
@@ -555,6 +556,77 @@ describe("capturePaneAgentProcesses", () => {
 });
 
 describe("terminateAgentProcesses", () => {
+  it.each(["liveness", "identity"] as const)(
+    "cancellation during %s validation prevents signalling",
+    async (boundary) => {
+      const controller = new AbortController();
+      let release!: () => void;
+      let started!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const reached = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      if (boundary === "liveness") {
+        snapshotProcessLivenessMock.mockImplementationOnce(async () => {
+          started();
+          await held;
+          return { status: "ok", alivePids: new Set([7]) };
+        });
+      }
+      const pass = terminateAgentProcesses([{ pid: 7, identity: "start-7" }], {
+        signal: controller.signal,
+        readIdentity: async () => {
+          started();
+          await held;
+          return "start-7";
+        },
+      });
+      const rejected = expect(pass).rejects.toMatchObject({ name: "AbortError" });
+      try {
+        await reached;
+        controller.abort();
+        release();
+        await rejected;
+        expect(signalPidMock).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await rejected;
+      }
+    },
+  );
+
+  it("cancellation interrupts grace and prevents later escalation", async () => {
+    forceAllAlive = true;
+    const controller = new AbortController();
+    let sleeping!: () => void;
+    const graceStarted = new Promise<void>((resolve) => {
+      sleeping = resolve;
+    });
+    const onTimer = vi
+      .spyOn(controller.signal, "addEventListener")
+      .mockImplementation((...args) => {
+        EventTarget.prototype.addEventListener.call(controller.signal, ...args);
+        if (args[0] === "abort") sleeping();
+      });
+    const pass = terminateAgentProcesses([{ pid: 7, identity: null }], {
+      hupGraceMs: 60_000,
+      signal: controller.signal,
+    });
+    const rejected = expect(pass).rejects.toMatchObject({ name: "AbortError" });
+    try {
+      await graceStarted;
+      controller.abort();
+      await rejected;
+      expect(signalPidMock.mock.calls).toEqual([[7, "SIGHUP"]]);
+    } finally {
+      controller.abort();
+      await rejected;
+      onTimer.mockRestore();
+    }
+  });
+
   it("returns clear when nothing is alive", async () => {
     deadPids.add(5);
     const outcome = await terminateAgentProcesses([{ pid: 5, identity: null }]);
@@ -1417,13 +1489,59 @@ describe("terminateDetachedSessionProcesses", () => {
     );
   const signalled = () => signalPidMock.mock.calls.map(([pid]) => pid).sort((a, b) => a - b);
 
+  it.each(["identity-before", "markers", "identity-after"] as const)(
+    "cancellation after held %s prevents detached termination",
+    async (boundary) => {
+      setTable([proc(5001, 1201, markers("L1"))]);
+      const controller = new AbortController();
+      let release!: () => void;
+      let started!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const reached = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      if (boundary === "markers") {
+        readProcessEnvValuesMock.mockImplementationOnce(async () => {
+          started();
+          await held;
+          return { status: "ok", values: markers("L1") };
+        });
+      } else {
+        if (boundary === "identity-after")
+          readProcessIdentityMock.mockResolvedValueOnce("start-5001");
+        readProcessIdentityMock.mockImplementationOnce(async () => {
+          started();
+          await held;
+          return "start-5001";
+        });
+      }
+      const pass = terminateDetachedSessionProcesses(
+        { sessionId: "api-1", sessionToolDir: TOOL_DIR, tmuxServerPid: null },
+        { signal: controller.signal },
+      );
+      const rejected = expect(pass).rejects.toMatchObject({ name: "AbortError" });
+      try {
+        await reached;
+        controller.abort();
+        release();
+        await rejected;
+        expect(signalPidMock).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await rejected;
+      }
+    },
+  );
+
   it("signals a subreaper-adopted daemon and its child, any launch generation", async () => {
     setTable([
       proc(5001, 1201, markers("L1")),
       proc(5002, 5001, markers("L1")),
       proc(5003, 1201, markers("L0")),
     ]);
-    expect(await sweep()).toEqual({ status: "clear" });
+    expect(await sweep()).toEqual({ status: "clear", matched: 3 });
     expect(signalled()).toEqual([5001, 5002, 5003]);
   });
 
@@ -1518,5 +1636,95 @@ describe("terminateDetachedSessionProcesses", () => {
     await sweep();
     expect(readProcessEnvValuesMock.mock.calls.map(([pid]) => pid)).toEqual([5001, 5002, 5003]);
     expect(readProcessEnvValueMock).not.toHaveBeenCalled();
+  });
+
+  it("reports how many pids it matched", async () => {
+    setTable([proc(5001, 1201, markers("L1")), proc(5002, 1201, markers("L1"))]);
+    expect(await sweep()).toEqual({ status: "clear", matched: 2 });
+    setTable([proc(5001, 1201, markers(""))]);
+    expect(await sweep()).toEqual({ status: "clear", matched: 0 });
+  });
+});
+
+describe("listDetachedSessionOwners", () => {
+  const rows = (...specs: [number, number, Record<string, string>][]): FakeProc[] =>
+    specs.map(([pid, ppid, env]) => ({
+      pid,
+      ppid,
+      rssKb: 1,
+      elapsedSeconds: 1,
+      args: `detached-${pid}`,
+      env,
+      sid: pid,
+    }));
+  const owned = (id: string, launch = "L1") => ({
+    SPUR_SESSION: id,
+    SPUR_SESSION_TOOL_DIR: `/data/session-tools/${id}`,
+    SPUR_AGENT_LAUNCH_ID: launch,
+  });
+  const list = (tmuxServerPid: number | null = null) =>
+    listDetachedSessionOwners({
+      toolDirFor: (id) => `/data/session-tools/${id}`,
+      tmuxServerPid,
+    });
+
+  it("cancellation after a held marker read stops serial discovery", async () => {
+    fakeTable = rows([5001, 1201, owned("a")], [5002, 1201, owned("b")]);
+    const controller = new AbortController();
+    let release!: () => void;
+    let started!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reached = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    readProcessEnvValuesMock.mockImplementationOnce(async () => {
+      started();
+      await held;
+      return { status: "ok", values: owned("a") };
+    });
+    const pass = listDetachedSessionOwners({
+      toolDirFor: (id) => `/data/session-tools/${id}`,
+      tmuxServerPid: null,
+      signal: controller.signal,
+    });
+    const rejected = expect(pass).rejects.toMatchObject({ name: "AbortError" });
+    try {
+      await reached;
+      controller.abort();
+      release();
+      await rejected;
+      expect(readProcessEnvValuesMock.mock.calls.map(([pid]) => pid)).toEqual([5001]);
+    } finally {
+      release();
+      await rejected;
+    }
+  });
+
+  it("lists owners under this tool dir root once, excluding controls", async () => {
+    fakeTable = rows(
+      [5001, 1201, owned("a")],
+      [5002, 5001, owned("a")],
+      [5003, 1201, owned("b", "")],
+      [5004, 1201, { ...owned("c"), SPUR_SESSION_TOOL_DIR: "/other/session-tools/c" }],
+      [5005, 1201, { SPUR_AGENT_LAUNCH_ID: "L1" }],
+      [5006, 1201, {}],
+    );
+    expect(await list()).toEqual({ status: "ok", sessionIds: ["a"] });
+  });
+
+  it("does not list an owner whose only marked pid is an ancestor or the tmux server", async () => {
+    fakeTable = rows([7001, 1, owned("anc")], [process.pid, 7001, {}], [4844, 1201, owned("tmux")]);
+    expect(await list(4844)).toEqual({ status: "ok", sessionIds: [] });
+  });
+
+  it("is unavailable when env or the process table is unreadable", async () => {
+    fakeTable = rows([5001, 1201, owned("a")]);
+    envReadable = false;
+    expect(await list()).toEqual({ status: "unavailable" });
+    envReadable = true;
+    processSnapshotUnavailable = true;
+    expect(await list()).toEqual({ status: "unavailable" });
   });
 });
