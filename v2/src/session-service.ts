@@ -15292,12 +15292,12 @@ export class SessionService {
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchOptions = {
         ...planOptions,
-        ...managedAuthLaunch(
+        ...(await managedAuthLaunch(
           authRegistration,
           sessionToolDir,
           planOptions.codexArgs,
           workspacePath,
-        ),
+        )),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -15351,7 +15351,7 @@ export class SessionService {
         agentLaunchId,
         extraEnv: {
           ...sessionAgentConfig.env,
-          ...managedAuthLaunch(authRegistration, sessionToolDir).env,
+          ...(await managedAuthLaunch(authRegistration, sessionToolDir)).env,
         },
       });
       const launchAgent = agent;
@@ -17089,7 +17089,7 @@ export class SessionService {
           : requestedAuthAccount(request, agent),
         prepared.placeholder.auth !== undefined,
       );
-      const managedLaunch = managedAuthLaunch(
+      const managedLaunch = await managedAuthLaunch(
         authRegistration,
         sessionToolDir,
         project.codexArgs,
@@ -24242,7 +24242,7 @@ export class SessionService {
           true,
         )
       : undefined;
-    const managedLaunch = managedAuthLaunch(
+    const managedLaunch = await managedAuthLaunch(
       authRegistration,
       sessionToolDir,
       project.codexArgs,
@@ -25102,7 +25102,7 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
-      const managedLaunch = managedAuthLaunch(
+      const managedLaunch = await managedAuthLaunch(
         authRegistration,
         sessionToolDir,
         restoreProjectConfig.codexArgs,
