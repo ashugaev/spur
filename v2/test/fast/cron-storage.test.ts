@@ -1,7 +1,7 @@
-import { existsSync, readdirSync, readFileSync, utimesSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync, utimesSync } from "node:fs";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CronStorageRootError,
   assertCronStorageRoot,
@@ -14,7 +14,13 @@ import {
   readCronStorageFile,
   writeCronStorageNote,
 } from "../../src/cron-storage.js";
+import * as sessionArtifacts from "../../src/session-artifacts.js";
 import { createTempDir } from "../helpers/common.js";
+
+vi.mock("../../src/session-artifacts.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/session-artifacts.js")>();
+  return { ...actual, readArtifactInDir: vi.fn(actual.readArtifactInDir) };
+});
 
 const tempDirs: string[] = [];
 
@@ -101,6 +107,24 @@ describe("cron storage view", () => {
     const view = readCronStorage(dataDir, "api", "review");
     expect(view.note).toBe("");
     expect(view.noteUpdatedAt).toBeNull();
+  });
+
+  it("reads a note.md that vanished after its stat as empty", async () => {
+    const dataDir = await newDir();
+    const root = ensureCronStorageDir(dataDir, "api", "review");
+    await writeFile(join(root, "note.md"), "gone soon");
+    const { readArtifactInDir } = await vi.importActual<typeof sessionArtifacts>(
+      "../../src/session-artifacts.js",
+    );
+    vi.mocked(sessionArtifacts.readArtifactInDir).mockImplementationOnce((dir, id) => {
+      const file = readArtifactInDir(dir, id);
+      if (file) unlinkSync(file.path);
+      return file;
+    });
+    const view = readCronStorage(dataDir, "api", "review");
+    expect(view.note).toBe("");
+    expect(view.noteUpdatedAt).toBeNull();
+    expect(view.updatedAt).toBeNull();
   });
 });
 

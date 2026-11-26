@@ -128,6 +128,18 @@ function emptyView(): CronStorageView {
   };
 }
 
+/** null when note.md vanished between the stat and the read. */
+function readNote(path: string): string | null {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export function readCronStorage(
   dataDir: string,
   projectId: string,
@@ -142,14 +154,14 @@ export function readCronStorage(
     (artifact) => artifact.id !== CRON_STORAGE_NOTE && !NOTE_TEMP_RE.test(artifact.id),
   );
   const noteFile = readArtifactInDir(root, CRON_STORAGE_NOTE);
-  const note = noteFile ? readFileSync(noteFile.path, "utf-8") : "";
-  const noteUpdatedAt = noteFile?.updatedAt ?? null;
+  const note = noteFile ? readNote(noteFile.path) : null;
+  const noteUpdatedAt = note === null ? null : (noteFile?.updatedAt ?? null);
   const stamps = [
     ...files.map((file) => file.updatedAt),
     ...(noteUpdatedAt ? [noteUpdatedAt] : []),
   ];
   return {
-    note,
+    note: note ?? "",
     noteUpdatedAt,
     files,
     totalBytes: files.reduce((sum, file) => sum + file.size, 0),
