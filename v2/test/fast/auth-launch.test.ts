@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -5,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -54,7 +56,7 @@ describe("managed native authorization launch", () => {
       rmSync(directory, { recursive: true, force: true });
   });
 
-  it("shares host Claude user config and user MCP servers without credentials", () => {
+  it("shares host Claude user config and user MCP servers without credentials", async () => {
     mkdirSync(join(home, ".claude", "skills"), { recursive: true });
     writeFileSync(join(home, ".claude", "CLAUDE.md"), "rules\n");
     writeFileSync(join(home, ".claude", "settings.json"), "{}\n");
@@ -69,7 +71,7 @@ describe("managed native authorization launch", () => {
     );
     const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
     directories.push(directory);
-    const { claudeConfigDir } = managedAuthLaunch(registration, directory);
+    const { claudeConfigDir } = await managedAuthLaunch(registration, directory);
     for (const name of ["CLAUDE.md", "settings.json", "skills"]) {
       expect(lstatSync(join(claudeConfigDir!, name)).isSymbolicLink()).toBe(true);
       expect(readlinkSync(join(claudeConfigDir!, name))).toBe(join(home, ".claude", name));
@@ -81,18 +83,18 @@ describe("managed native authorization launch", () => {
       hasCompletedOnboarding: true,
       mcpServers: { docs: { command: "docs-mcp" } },
     });
-    managedAuthLaunch(registration, directory);
+    await managedAuthLaunch(registration, directory);
     expect(JSON.parse(readFileSync(join(claudeConfigDir!, ".claude.json"), "utf8"))).toEqual(
       JSON.parse(onboarding),
     );
     rmSync(join(home, ".claude.json"));
-    managedAuthLaunch(registration, directory);
+    await managedAuthLaunch(registration, directory);
     expect(JSON.parse(readFileSync(join(claudeConfigDir!, ".claude.json"), "utf8"))).toEqual({
       hasCompletedOnboarding: true,
     });
   });
 
-  it("replaces host settings that steer authorization with a sanitized private copy", () => {
+  it("replaces host settings that steer authorization with a sanitized private copy", async () => {
     mkdirSync(join(home, ".claude"), { recursive: true });
     const settingsPath = join(home, ".claude", "settings.json");
     writeFileSync(
@@ -114,7 +116,7 @@ describe("managed native authorization launch", () => {
     );
     const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
     directories.push(directory);
-    const { claudeConfigDir } = managedAuthLaunch(registration, directory);
+    const { claudeConfigDir } = await managedAuthLaunch(registration, directory);
     const managed = join(claudeConfigDir!, "settings.json");
     expect(lstatSync(managed).isSymbolicLink()).toBe(false);
     expect(lstatSync(managed).mode & 0o777).toBe(0o600);
@@ -123,12 +125,12 @@ describe("managed native authorization launch", () => {
       env: { ANTHROPIC_MODEL: "opus", DISABLE_TELEMETRY: "1" },
     });
     writeFileSync(settingsPath, JSON.stringify({ model: "sonnet" }));
-    managedAuthLaunch(registration, directory);
+    await managedAuthLaunch(registration, directory);
     expect(lstatSync(managed).isSymbolicLink()).toBe(true);
     expect(readlinkSync(managed)).toBe(settingsPath);
   });
 
-  it("scrubs host copies from a torn-down managed home and restores them on relaunch", () => {
+  it("scrubs host copies from a torn-down managed home and restores them on relaunch", async () => {
     mkdirSync(join(home, ".claude"), { recursive: true });
     writeFileSync(
       join(home, ".claude", "settings.json"),
@@ -137,21 +139,21 @@ describe("managed native authorization launch", () => {
     writeFileSync(join(home, ".claude.json"), JSON.stringify({ mcpServers: { docs: {} } }));
     const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
     directories.push(directory);
-    const { claudeConfigDir } = managedAuthLaunch(registration, directory);
+    const { claudeConfigDir } = await managedAuthLaunch(registration, directory);
     scrubManagedClaudeHome(directory);
     expect(JSON.parse(readFileSync(join(claudeConfigDir!, ".claude.json"), "utf8"))).toEqual({
       hasCompletedOnboarding: true,
     });
     expect(existsSync(join(claudeConfigDir!, "settings.json"))).toBe(false);
     scrubManagedClaudeHome(join(directory, "never-launched"));
-    managedAuthLaunch(registration, directory);
+    await managedAuthLaunch(registration, directory);
     expect(JSON.parse(readFileSync(join(claudeConfigDir!, ".claude.json"), "utf8"))).toEqual({
       hasCompletedOnboarding: true,
       mcpServers: { docs: {} },
     });
   });
 
-  it("always trusts the session cwd and nothing else, and scrubs it on teardown", () => {
+  it("always trusts the session cwd and nothing else, and scrubs it on teardown", async () => {
     writeFileSync(
       join(home, ".claude.json"),
       JSON.stringify({
@@ -168,7 +170,7 @@ describe("managed native authorization launch", () => {
     const stateOf = (dir: string) =>
       JSON.parse(readFileSync(join(dir, ".claude.json"), "utf8")) as Record<string, unknown>;
 
-    const { claudeConfigDir } = managedAuthLaunch(registration, directory, [], "/wt/feature");
+    const { claudeConfigDir } = await managedAuthLaunch(registration, directory, [], "/wt/feature");
     expect(stateOf(claudeConfigDir!)).toEqual({
       hasCompletedOnboarding: true,
       projects: { "/wt/feature": { hasTrustDialogAccepted: true } },
@@ -187,27 +189,81 @@ describe("managed native authorization launch", () => {
     expect(statSync(join(claudeConfigDir!, ".claude.json")).mode & 0o777).toBe(0o600);
 
     // Relaunch in the same home trusts again.
-    managedAuthLaunch(registration, directory, [], "/wt/feature");
+    await managedAuthLaunch(registration, directory, [], "/wt/feature");
     expect(stateOf(claudeConfigDir!)["projects"]).toEqual({
       "/wt/feature": { hasTrustDialogAccepted: true },
     });
   });
 
-  it("repoints stale links at the current host home", () => {
+  describe("main repo root trust of a worktree session", () => {
+    let root: string;
+    let worktree: string;
+    let directory: string;
+    const stateOf = (dir: string) =>
+      JSON.parse(readFileSync(join(dir, ".claude.json"), "utf8")) as Record<string, unknown>;
+    const hostProjects = (projects: Record<string, unknown>) =>
+      writeFileSync(join(home, ".claude.json"), JSON.stringify({ projects }));
+
+    beforeEach(() => {
+      const base = realpathSync(mkdtempSync(join(tmpdir(), "spur-auth-launch-repo-")));
+      directories.push(base);
+      root = join(base, "repo");
+      worktree = join(base, "wt");
+      mkdirSync(root);
+      const git = (...args: string[]) =>
+        execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], {
+          cwd: root,
+          stdio: "ignore",
+        });
+      git("init", "-q", "-b", "main");
+      git("commit", "-q", "--allow-empty", "-m", "init");
+      git("worktree", "add", "-q", "-b", "feature", worktree);
+      directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
+      directories.push(directory);
+    });
+
+    it("seeds the root only when the host already trusts it, and scrubs it on teardown", async () => {
+      hostProjects({
+        [root]: { hasTrustDialogAccepted: true, allowedTools: ["host-only"] },
+        [worktree]: { history: ["host-secret"] },
+      });
+      const { claudeConfigDir } = await managedAuthLaunch(registration, directory, [], worktree);
+      expect(stateOf(claudeConfigDir!)["projects"]).toEqual({
+        [worktree]: { hasTrustDialogAccepted: true },
+        [root]: { hasTrustDialogAccepted: true },
+      });
+      scrubManagedClaudeHome(directory);
+      expect(stateOf(claudeConfigDir!)["projects"]).toEqual({ [worktree]: {}, [root]: {} });
+    });
+
+    it.each([
+      ["absent", {}],
+      ["false", { hasTrustDialogAccepted: false }],
+      ["truthy non-boolean", { hasTrustDialogAccepted: "yes" }],
+    ])("never grants root trust the host has %s", async (_label, rootEntry) => {
+      hostProjects({ [root]: rootEntry, [worktree]: { hasTrustDialogAccepted: true } });
+      const { claudeConfigDir } = await managedAuthLaunch(registration, directory, [], worktree);
+      expect(stateOf(claudeConfigDir!)["projects"]).toEqual({
+        [worktree]: { hasTrustDialogAccepted: true },
+      });
+    });
+  });
+
+  it("repoints stale links at the current host home", async () => {
     mkdirSync(join(home, ".claude", "skills"), { recursive: true });
     const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
     directories.push(directory);
     const claudeConfigDir = join(directory, "managed-claude-home");
     mkdirSync(claudeConfigDir, { recursive: true });
     symlinkSync(join(directory, "old-home-skills"), join(claudeConfigDir, "skills"));
-    managedAuthLaunch(registration, directory);
+    await managedAuthLaunch(registration, directory);
     expect(readlinkSync(join(claudeConfigDir, "skills"))).toBe(join(home, ".claude", "skills"));
   });
 
-  it("isolates Claude home and masks inherited provider credentials", () => {
+  it("isolates Claude home and masks inherited provider credentials", async () => {
     const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
     directories.push(directory);
-    const launch = managedAuthLaunch(registration, directory);
+    const launch = await managedAuthLaunch(registration, directory);
     expect(launch.env).toEqual({
       ANTHROPIC_BASE_URL: registration.endpoint,
       ANTHROPIC_AUTH_TOKEN: registration.token,
@@ -222,7 +278,7 @@ describe("managed native authorization launch", () => {
     expect(publicAuthSession(registration)).not.toHaveProperty("endpoint");
   });
 
-  it("blanks inherited provider selectors and credentials in the final pane env", () => {
+  it("blanks inherited provider selectors and credentials in the final pane env", async () => {
     const inherited = {
       CLAUDE_CODE_USE_BEDROCK: "1",
       CLAUDE_CODE_USE_VERTEX: "1",
@@ -238,7 +294,7 @@ describe("managed native authorization launch", () => {
     const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
     directories.push(directory);
 
-    const claude = buildPaneEnv(managedAuthLaunch(registration, directory).env);
+    const claude = buildPaneEnv((await managedAuthLaunch(registration, directory)).env);
     expect(claude).toMatchObject({
       CLAUDE_CODE_USE_BEDROCK: "",
       CLAUDE_CODE_USE_VERTEX: "",
@@ -251,7 +307,7 @@ describe("managed native authorization launch", () => {
     });
 
     const codex = buildPaneEnv(
-      managedAuthLaunch({ ...registration, provider: "codex" }, directory).env,
+      (await managedAuthLaunch({ ...registration, provider: "codex" }, directory)).env,
     );
     expect(codex).toMatchObject({
       OPENAI_BASE_URL: "",
@@ -261,8 +317,8 @@ describe("managed native authorization launch", () => {
     });
   });
 
-  it("uses Codex Responses SSE and keeps routing credentials out of launch commands", () => {
-    const launch = managedAuthLaunch({ ...registration, provider: "codex" }, "/fixture", [
+  it("uses Codex Responses SSE and keeps routing credentials out of launch commands", async () => {
+    const launch = await managedAuthLaunch({ ...registration, provider: "codex" }, "/fixture", [
       "--no-alt-screen",
     ]);
     const plan = buildCodexPlan("task", {
