@@ -10288,6 +10288,50 @@ describe("SessionService", () => {
       expect(sessions.get(successor.id)?.cronOrigin).toEqual(cronOrigin);
       expect(lastLaunchEnv()?.SPUR_CRON_STORAGE_DIR).toBe(storageDir());
     });
+
+    it("keeps cronOrigin on the errored record of a failed cron launch", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      reserveNextSessionIdMock.mockResolvedValue("api-1");
+      createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const service = await createDisposedSessionService();
+
+      await expect(
+        service.spawn({ project: "api", prompt: "tick" }, { cronOrigin }),
+      ).rejects.toThrow("tmux boom");
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        error: "tmux boom",
+        cronOrigin,
+      });
+    });
+
+    it("keeps cronOrigin on the errored record of a failed queued cron spawn", async () => {
+      mockClaudeJsonlState("waiting");
+      const config = baseConfig();
+      config.admission.maxLiveSessions = 1;
+      loadConfigMock.mockReturnValue(config);
+      const sessions = createSessionStore();
+      const live = sessionRecord({ id: "api-1", worktree: true });
+      sessions.set(live.id, live);
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      const service = await createDisposedSessionService();
+      vi.spyOn(
+        service as unknown as { logUserInput(...args: unknown[]): void },
+        "logUserInput",
+      ).mockImplementationOnce(() => {
+        throw new Error("log boom");
+      });
+
+      await expect(
+        service.spawn({ project: "api", prompt: "tick" }, { cronOrigin, acceptQueued: true }),
+      ).rejects.toThrow("log boom");
+
+      expect(sessions.get("api-2")).toMatchObject({ status: "errored", cronOrigin });
+    });
   });
 
   it("emits the project default mode line in the launch prompt", async () => {
