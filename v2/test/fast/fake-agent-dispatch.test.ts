@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { cursorDeliveryInput, isCursorDeliveryId } from "../../src/agents/cursor-submit-ack.js";
 import { toCursorProjectPath } from "../../src/cursor-jsonl-state.js";
 import { FAKE_CODEX_PREFLIGHT_LOG, fakeAgentScript } from "../helpers/runtime.js";
@@ -150,7 +150,9 @@ async function withFakeAgent(
     output: () => string;
     waitForOutput: (predicate: (text: string) => boolean) => Promise<void>;
     transcript: () => Promise<FixtureRecord[]>;
+    tempDir: string;
   }) => Promise<void>,
+  args: string[] = [],
 ) {
   const tempDir = await mkdtemp(join(tmpdir(), "fake-agent-dispatch-"));
   let child: ChildProcessWithoutNullStreams | undefined;
@@ -186,7 +188,7 @@ async function withFakeAgent(
     const scriptPath = join(tempDir, agent);
     await writeFile(scriptPath, fakeAgentScript(agent), "utf8");
     await chmod(scriptPath, 0o755);
-    child = spawn(scriptPath, [], {
+    child = spawn(scriptPath, args, {
       cwd: tempDir,
       env: {
         ...process.env,
@@ -236,6 +238,7 @@ async function withFakeAgent(
         child: owned,
         closed,
         output: () => stdout,
+        tempDir,
         waitForOutput,
         transcript: async () => {
           const chatId = "chat-fake-agent-dispatch-test";
@@ -278,6 +281,31 @@ async function withFakeAgent(
 }
 
 describe("fakeAgentScript claude dispatch", () => {
+  it("registers an interactive session under its temp HOME with the pinned id", async ({
+    signal,
+  }) => {
+    await withFakeAgent(
+      "claude",
+      signal,
+      async ({ child, closed, waitForOutput, tempDir }) => {
+        await waitForOutput((text) => text.includes("❯"));
+        const sessionsDir = join(tempDir, ".claude", "sessions");
+        const registrationPath = join(sessionsDir, `${child.pid}.json`);
+        await vi.waitFor(async () => {
+          expect(JSON.parse(await readFile(registrationPath, "utf8"))).toMatchObject({
+            pid: child.pid,
+            sessionId: "pinned-id-1",
+            kind: "interactive",
+            status: "idle",
+          });
+        });
+        child.stdin.end();
+        await closed;
+      },
+      ["--session-id", "pinned-id-1"],
+    );
+  });
+
   it("exits on exit-now even when the whole burst lands inside one drain window", async ({
     signal,
   }) => {

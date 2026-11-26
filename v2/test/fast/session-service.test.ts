@@ -3474,6 +3474,10 @@ describe("SessionService", () => {
     );
     expect(waitForTmuxReadyMock).toHaveBeenCalledWith("api-1", ["Claude Code", "❯"], undefined, {
       agent: "claude",
+      claudeRegistration: {
+        sessionsDir: "/home/test/.claude/sessions",
+        sessionId: PINNED_CLAUDE_SESSION_ID,
+      },
     });
     expect(writeSessionMock.mock.calls.map(([, record]) => record.status)).toEqual([
       "spawning",
@@ -8878,6 +8882,10 @@ describe("SessionService", () => {
     });
     expect(waitForTmuxReadyMock).toHaveBeenCalledWith("api-1", ["Claude Code", "❯"], 120_000, {
       agent: "claude",
+      claudeRegistration: {
+        sessionsDir: "/home/test/.claude/sessions",
+        sessionId: expect.any(String),
+      },
     });
 
     expect(createWorktreeMock).toHaveBeenCalledWith({
@@ -10501,12 +10509,55 @@ describe("SessionService", () => {
       "api-1",
       ["Claude Code", "❯"],
       120_000,
-      { agent: "claude" },
+      {
+        agent: "claude",
+        claudeRegistration: {
+          sessionsDir: "/home/test/.claude/sessions",
+          sessionId: expect.any(String),
+        },
+      },
     ]);
     expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
     expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(removeWorktreeMock).not.toHaveBeenCalled();
     expect(deleteAgentHookStateMock).not.toHaveBeenCalled();
+  });
+
+  it("holds a background spawn on a Claude startup dialog without retry or prompt delivery", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    const runtime = await import("../../src/runtime-tmux.js");
+    waitForTmuxReadyMock.mockRejectedValue(
+      new runtime.ClaudeStartupDialogError({
+        sessionName: "api-1",
+        screen: "workspace trust dialog",
+        capture: "",
+      }),
+    );
+    createTmuxSessionMock.mockImplementation(async () => {
+      probeTmuxProcessMatchMock.mockResolvedValue({
+        alive: true,
+        matchedByName: true,
+        unresponsive: false,
+      });
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawnInBackground({ project: "api", prompt: "hello" });
+    await service.settleBackgroundSpawns();
+
+    expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+    expect(sessions.get("api-1")?.error).toContain("workspace trust dialog");
+    expect(sessions.get("api-1")?.spawnIntent).toMatchObject({ phase: "launching" });
+    expect(
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.spawn.recovery_held",
+      ),
+    ).toHaveLength(1);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    service.dispose();
   });
 
   it("rejects an explicit branch conflict during background spawn", async () => {
@@ -45418,6 +45469,14 @@ describe("SessionService", () => {
           : "claude --dangerously-skip-permissions",
         initialMessage,
         readyMarkers: ["Claude Code", "❯"],
+        ...(options?.agentSessionId
+          ? {
+              claudeRegistration: {
+                sessionsDir: "/home/test/.claude/sessions",
+                sessionId: options.agentSessionId,
+              },
+            }
+          : {}),
       }),
     );
     readSessionMock.mockReturnValue({
@@ -45469,6 +45528,20 @@ describe("SessionService", () => {
         launchCommand: `claude --session-id ${FRESH_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
       }),
     );
+    // Only the recovery-fresh site reaches readiness: the native resume attempt
+    // failed at tmux create.
+    expect(waitForTmuxReadyMock).toHaveBeenCalledTimes(1);
+    expect(waitForTmuxReadyMock).toHaveBeenCalledWith(
+      "api-1",
+      ["Claude Code", "❯"],
+      undefined,
+      expect.objectContaining({
+        claudeRegistration: {
+          sessionsDir: "/home/test/.claude/sessions",
+          sessionId: FRESH_CLAUDE_SESSION_ID,
+        },
+      }),
+    );
     expect(
       logSpurEventMock.mock.calls.some(
         ([, entry]) => entry.event === "session.recover.resume_failed",
@@ -45480,6 +45553,84 @@ describe("SessionService", () => {
     );
     expect(recoverWrite?.[1].agentSessionId).toBe(FRESH_CLAUDE_SESSION_ID);
     expect(recoverWrite?.[1].agentSessionId).not.toBe(PINNED_CLAUDE_SESSION_ID);
+  });
+
+  it("forwards the resume plan's claude registration to readiness during send recovery", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      agentSessionId: PINNED_CLAUDE_SESSION_ID,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: `claude --session-id ${PINNED_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    let created = false;
+    tmuxSessionExistsMock.mockImplementation(async () => created);
+    createTmuxSessionMock.mockImplementation(async () => {
+      created = true;
+    });
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.send("api-1", { message: "resume work" });
+
+    expect(waitForTmuxReadyMock).toHaveBeenCalledWith(
+      "api-1",
+      ["❯"],
+      undefined,
+      expect.objectContaining({
+        claudeRegistration: {
+          sessionsDir: "/home/test/.claude/sessions",
+          sessionId: PINNED_CLAUDE_SESSION_ID,
+        },
+      }),
+    );
+  });
+
+  it("forwards no claude registration to readiness when the recovery plan carries none", async () => {
+    buildAgentResumePlanMock.mockReturnValue({
+      launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      readyMarkers: ["❯"],
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      agentSessionId: PINNED_CLAUDE_SESSION_ID,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: `claude --session-id ${PINNED_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    let created = false;
+    tmuxSessionExistsMock.mockImplementation(async () => created);
+    createTmuxSessionMock.mockImplementation(async () => {
+      created = true;
+    });
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.send("api-1", { message: "resume work" });
+
+    expect(waitForTmuxReadyMock).toHaveBeenCalledTimes(1);
+    expect(waitForTmuxReadyMock.mock.calls[0]?.[3]).toMatchObject({ agent: "claude" });
+    expect(waitForTmuxReadyMock.mock.calls[0]?.[3]).not.toHaveProperty("claudeRegistration");
   });
 
   it("refuses the fresh-launch fallback when the failed resume generation leaves a non-active-pane survivor", async () => {
@@ -54468,6 +54619,54 @@ describe("SessionService", () => {
       }),
     );
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+  });
+
+  it("fails restore on a Claude startup dialog even when the agent process is live, without typing into it", async () => {
+    createSessionStore({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    let restoredTmuxCreated = false;
+    createTmuxSessionMock.mockImplementation(async () => {
+      restoredTmuxCreated = true;
+    });
+    tmuxSessionExistsMock.mockImplementation(async () => restoredTmuxCreated);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    const { ClaudeStartupDialogError } = await import("../../src/runtime-tmux.js");
+    waitForTmuxReadyMock.mockRejectedValueOnce(
+      new ClaudeStartupDialogError({
+        sessionName: "api-1",
+        screen: "resume summary prompt",
+        capture: "",
+      }),
+    );
+
+    const service = await createDisposedSessionService();
+
+    await expect(service.restore("api-1")).rejects.toThrow("resume summary prompt");
+    expect(waitForTmuxReadyMock).toHaveBeenCalledWith(
+      "api-1",
+      ["❯"],
+      undefined,
+      expect.objectContaining({
+        agent: "claude",
+        claudeRegistration: expect.objectContaining({
+          sessionsDir: "/home/test/.claude/sessions",
+        }),
+      }),
+    );
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
 
   it("startSidecar rejects when project has no matching sidecar configured", async () => {
