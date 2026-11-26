@@ -76,4 +76,5 @@ COPY
 
   Visible labels use spaces: "Needs Input", never NEEDS_INPUT.
   Buttons, labels, headers uppercase via class; source sentence case.
-  Placeholders sentence case: "Filter...".
+  Placeholders sentence case: "Filter".
+  No trailing ellipsis ("..." or "…") on any visible text: placeholders, labels, menu items, statuses. Truncation ellipsis from CSS or truncateMiddle is fine.

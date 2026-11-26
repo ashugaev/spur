@@ -19,6 +19,7 @@ NEXT, in order
   #1513  layer tokens for z-index
   #1514  icon registry
   #1516  page palette
+  trailing ellipsis cleanup: about 20 callsites in components/ (Filter..., Message..., Retrying…, Opening terminal…); add a guard to design-system.test.ts
 
 
 OUT OF SCOPE
