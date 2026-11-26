@@ -19,4 +19,6 @@ ADDING A PRIMITIVE
   3  Registry recipe entry when classes.ts gains an export; minor bump; migration file.
   4  Migrate existing duplicates in the same change or list them in roadmap.md.
 
+  New UI design: every new reusable control goes to the DS canvas board 04b as proposed (base) or 05 (composite), marked new or naming the recipe it extends. Approved, it follows steps 1-4.
+
   Consolidation targets: references/roadmap.md NEXT.
