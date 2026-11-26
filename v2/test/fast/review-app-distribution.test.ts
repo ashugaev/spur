@@ -800,6 +800,106 @@ test("fake child timeout terminates and returns failure; no budget widening", as
   await expect(verifier.executeFrozenClosure(tree, files, edges)).rejects.toThrow("child failed");
   expect(faults.children).toBe(1);
 });
+async function sanitizerStage(artifact: string): Promise<string> {
+  const stage = await readFile(artifact, "utf8").catch(() => undefined);
+  return stage === "preload" || stage === "lookup" || stage === "fault" ? stage : "unavailable";
+}
+
+function sanitizerPreload(artifact: string, marker: string, message: string, privatePath: string) {
+  return `
+    import filesystem from "node:fs/promises";
+    import {writeFileSync} from "node:fs";
+    import {syncBuiltinESMExports} from "node:module";
+    writeFileSync(${JSON.stringify(artifact)}, "preload");
+    // The first store lookup has its own sanitized catch; the module-map lookup does not.
+    // Fault there so this CLI error-boundary test does not initialize TypeScript first.
+    const original = filesystem.realpath;
+    let storeLookups = 0;
+    filesystem.realpath = async (...args) => {
+      if (String(args[0]) === ${JSON.stringify(join(root, "node_modules/.pnpm"))}) {
+        writeFileSync(${JSON.stringify(artifact)}, ++storeLookups === 2 ? "fault" : "lookup");
+        if (storeLookups === 2) {
+          writeFileSync(${JSON.stringify(marker)}, ${JSON.stringify(message)});
+          throw Object.assign(new Error(${JSON.stringify(message)}), {code: "EACCES", path: ${JSON.stringify(privatePath)}});
+        }
+      }
+      return original(...args);
+    };
+    syncBuiltinESMExports();
+  `;
+}
+
+test("sanitizer stage diagnostics distinguish a held lookup from an injected fault without exposing paths", async () => {
+  const tree = await directory();
+  const artifact = join(tree, "sanitizer-stage");
+  const marker = join(tree, "injected-error");
+  const privatePath = join(tree, "synthetic-private-path", "archive.tgz");
+  expect(await sanitizerStage(artifact)).toBe("unavailable");
+  await writeFile(artifact, privatePath);
+  expect(await sanitizerStage(artifact)).toBe("unavailable");
+  const preload = join(tree, "filesystem-fault.mjs");
+  await writeFile(
+    preload,
+    sanitizerPreload(artifact, marker, `EACCES: ${privatePath}`, privatePath),
+  );
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  faults.allowChildren = true;
+  const execution = promisify(execFile)(
+    process.execPath,
+    [
+      "--import",
+      pathToFileURL(preload).href,
+      "--input-type=module",
+      "-e",
+      `import filesystem from 'node:fs/promises';
+       const wait = () => new Promise(resolve => process.stdin.once('data', resolve));
+       process.stdout.write('preload\\n');
+       await wait();
+       await filesystem.realpath(${JSON.stringify(join(root, "node_modules/.pnpm"))});
+       process.stdout.write('lookup\\n');
+       await wait();
+       process.stdin.destroy();
+       try { await filesystem.realpath(${JSON.stringify(join(root, "node_modules/.pnpm"))}); }
+       catch { process.stderr.write('fixture fault\\n'); process.exitCode = 1; }`,
+    ],
+    {
+      cwd: tree,
+      env: { HOME: tree, TMPDIR: tree, PATH: tree, LANG: "C", LC_ALL: "C" },
+      timeout: 5_000,
+      killSignal: "SIGKILL",
+      maxBuffer: 64 * 1024,
+    },
+  );
+  const outcome = execution.catch((error: unknown) => error);
+  try {
+    const { stdout, stdin } = execution.child;
+    if (!stdout || !stdin) throw new Error("Missing fixture pipes");
+    const nextOutput = () => new Promise<void>((resolve) => stdout.once("data", () => resolve()));
+    const exited = outcome.then(() => {
+      throw new Error("Stage fixture exited before its gate");
+    });
+    await Promise.race([nextOutput(), exited]);
+    expect(await sanitizerStage(artifact)).toBe("preload");
+    const lookup = nextOutput();
+    stdin.write("continue\n");
+    await Promise.race([lookup, exited]);
+    expect(await sanitizerStage(artifact)).toBe("lookup");
+    await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    stdin.end("continue\n");
+    expect(await outcome).toMatchObject({ code: 1, signal: null, killed: false });
+    expect(await sanitizerStage(artifact)).toBe("fault");
+    expect(await readFile(artifact, "utf8")).not.toContain(privatePath);
+    expect(faults.children).toBe(1);
+  } finally {
+    if (execution.child.exitCode === null && execution.child.signalCode === null)
+      execution.child.kill("SIGKILL");
+    await outcome;
+    await rm(tree, { recursive: true, force: true });
+  }
+  expect(await sanitizerStage(artifact)).toBe("unavailable");
+});
+
 test.each(["external-fs", "prefixed-external"])(
   "production CLI sanitizes a synthetic private-path sentinel from %s failure",
   async (mode) => {
@@ -807,27 +907,9 @@ test.each(["external-fs", "prefixed-external"])(
     const privatePath = join(tree, "synthetic-private-path", "archive.tgz");
     const message = `${mode === "prefixed-external" ? "review-app-package: " : ""}EACCES: ${privatePath}`;
     const marker = join(tree, "injected-error");
+    const artifact = join(tree, "sanitizer-stage");
     const preload = join(tree, "filesystem-fault.mjs");
-    await writeFile(
-      preload,
-      `
-    import filesystem from "node:fs/promises";
-    import {writeFileSync} from "node:fs";
-    import {syncBuiltinESMExports} from "node:module";
-    // The first store lookup has its own sanitized catch; the module-map lookup does not.
-    // Fault there so this CLI error-boundary test does not initialize TypeScript first.
-    const original = filesystem.realpath;
-    let storeLookups = 0;
-    filesystem.realpath = async (...args) => {
-      if (String(args[0]) === ${JSON.stringify(join(root, "node_modules/.pnpm"))} && ++storeLookups === 2) {
-        writeFileSync(${JSON.stringify(marker)}, ${JSON.stringify(message)});
-        throw Object.assign(new Error(${JSON.stringify(message)}), {code: "EACCES", path: ${JSON.stringify(privatePath)}});
-      }
-      return original(...args);
-    };
-    syncBuiltinESMExports();
-  `,
-    );
+    await writeFile(preload, sanitizerPreload(artifact, marker, message, privatePath));
     const { execFile } = await import("node:child_process");
     const { promisify } = await import("node:util");
     faults.allowChildren = true;
@@ -848,7 +930,7 @@ test.each(["external-fs", "prefixed-external"])(
         maxBuffer: 64 * 1024,
       },
     ).catch((error: unknown) => error);
-    expect(failure).toMatchObject({
+    expect(failure, `Sanitizer CLI stage: ${await sanitizerStage(artifact)}`).toMatchObject({
       code: 1,
       signal: null,
       killed: false,
