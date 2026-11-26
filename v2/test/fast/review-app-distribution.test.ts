@@ -802,7 +802,12 @@ test("fake child timeout terminates and returns failure; no budget widening", as
 });
 async function sanitizerStage(artifact: string): Promise<string> {
   const stage = await readFile(artifact, "utf8").catch(() => undefined);
-  return stage === "preload" || stage === "lookup" || stage === "fault" ? stage : "unavailable";
+  return stage === "preload" ||
+    stage === "lookup" ||
+    stage === "lookup-complete" ||
+    stage === "fault"
+    ? stage
+    : "unavailable";
 }
 
 function sanitizerPreload(artifact: string, marker: string, message: string, privatePath: string) {
@@ -822,6 +827,9 @@ function sanitizerPreload(artifact: string, marker: string, message: string, pri
           writeFileSync(${JSON.stringify(marker)}, ${JSON.stringify(message)});
           throw Object.assign(new Error(${JSON.stringify(message)}), {code: "EACCES", path: ${JSON.stringify(privatePath)}});
         }
+        const result = await original(...args);
+        writeFileSync(${JSON.stringify(artifact)}, "lookup-complete");
+        return result;
       }
       return original(...args);
     };
@@ -829,13 +837,15 @@ function sanitizerPreload(artifact: string, marker: string, message: string, pri
   `;
 }
 
-test("sanitizer stage diagnostics distinguish a held lookup from an injected fault without exposing paths", async () => {
+test("sanitizer stage diagnostics distinguish a completed lookup from an injected fault without exposing paths", async () => {
   const tree = await directory();
   const artifact = join(tree, "sanitizer-stage");
   const marker = join(tree, "injected-error");
   const privatePath = join(tree, "synthetic-private-path", "archive.tgz");
   expect(await sanitizerStage(artifact)).toBe("unavailable");
   await writeFile(artifact, privatePath);
+  expect(await sanitizerStage(artifact)).toBe("unavailable");
+  await writeFile(artifact, `lookup-complete: ${privatePath}`);
   expect(await sanitizerStage(artifact)).toBe("unavailable");
   const preload = join(tree, "filesystem-fault.mjs");
   await writeFile(
@@ -884,7 +894,8 @@ test("sanitizer stage diagnostics distinguish a held lookup from an injected fau
     const lookup = nextOutput();
     stdin.write("continue\n");
     await Promise.race([lookup, exited]);
-    expect(await sanitizerStage(artifact)).toBe("lookup");
+    expect(await sanitizerStage(artifact)).toBe("lookup-complete");
+    expect(await readFile(artifact, "utf8")).not.toContain(privatePath);
     await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     stdin.end("continue\n");
     expect(await outcome).toMatchObject({ code: 1, signal: null, killed: false });
