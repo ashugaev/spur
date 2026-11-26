@@ -10,7 +10,6 @@ SEMVER
   patch   invisible value fix (deltaE under 2), recipe bug fix, registry metadata
 
   Visible change at any bump: `design` approval first.
-  Public page palette (spur-page-theme.vN.css) rename or removal: new vN+1 file, old file stays served, commit `feat(web)!:`.
 
 
 LIFECYCLE

@@ -17,7 +17,7 @@ SOURCE
   packages/web/src/design/migrations/<semver>.md     one file per DS version
   packages/web/src/__tests__/design-system.test.ts   guard
   packages/web/src/app/globals.css                   imports tokens.css; base element styles, keyframes
-  packages/web/public/spur/spur-page-theme.v2.css    public page palette, versioned by file name
+  packages/web/public/spur/spur-page-theme.css       public page palette
 
 STATE
 

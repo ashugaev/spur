@@ -18,7 +18,7 @@ NEXT, in order
   #1515  Chip and Banner on the tone set
   #1513  layer tokens for z-index
   #1514  icon registry
-  #1516  page palette v3
+  #1516  page palette
 
 
 OUT OF SCOPE
