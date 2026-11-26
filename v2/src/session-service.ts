@@ -15405,6 +15405,9 @@ export class SessionService {
         stage = "tmux.ready";
         await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers, undefined, {
           agent: launchAgent,
+          ...(launchPlan.claudeRegistration
+            ? { claudeRegistration: launchPlan.claudeRegistration }
+            : {}),
         });
         this.assertSpawnNotKilled(launchSessionId);
         this.logEvent("session.spawn.ready", {
@@ -17256,7 +17259,12 @@ export class SessionService {
           launchSessionId,
           launchPlan.readyMarkers,
           attempt === 1 ? BACKGROUND_SPAWN_READY_TIMEOUT_MS : undefined,
-          { agent: launchAgent },
+          {
+            agent: launchAgent,
+            ...(launchPlan.claudeRegistration
+              ? { claudeRegistration: launchPlan.claudeRegistration }
+              : {}),
+          },
         );
         this.logEvent("session.spawn.ready", {
           level: "info",
@@ -24505,7 +24513,13 @@ export class SessionService {
           session.tmuxSession,
           recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
           undefined,
-          { agent: session.agent, ...(operation ? { operation } : {}) },
+          {
+            agent: session.agent,
+            ...(operation ? { operation } : {}),
+            ...((recoveryPlan ?? baseLaunchPlan).claudeRegistration
+              ? { claudeRegistration: (recoveryPlan ?? baseLaunchPlan).claudeRegistration }
+              : {}),
+          },
         );
         assertActive();
         if (
@@ -24609,6 +24623,9 @@ export class SessionService {
           await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
             agent: session.agent,
             ...(operation ? { operation } : {}),
+            ...(freshPlan.claudeRegistration
+              ? { claudeRegistration: freshPlan.claudeRegistration }
+              : {}),
           });
           assertActive();
           if (
@@ -25210,6 +25227,7 @@ export class SessionService {
       });
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
+      let restoreClaudeRegistration = effectivePlan.claudeRegistration;
       const pinnedClaudeId =
         current.agent === "claude" && current.agentSessionId ? current.agentSessionId : undefined;
       const pinnedOpenCodeId =
@@ -25261,6 +25279,7 @@ export class SessionService {
         );
         restoreLaunchCommand = resumePlan.launchCommand;
         restoreReadyMarkers = resumePlan.readyMarkers;
+        restoreClaudeRegistration = resumePlan.claudeRegistration;
       }
       restoredLaunchCommand = restoreLaunchCommand;
       operation?.assertActive();
@@ -25326,6 +25345,7 @@ export class SessionService {
           waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
             agent: current.agent,
             ...(operation ? { operation } : {}),
+            ...(restoreClaudeRegistration ? { claudeRegistration: restoreClaudeRegistration } : {}),
           }),
         );
       } catch (error) {

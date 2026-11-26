@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs/promises", () => ({
@@ -23,6 +25,7 @@ import {
   buildClaudeResumePlan,
   buildClaudeRestorePlan,
   claudeCommand,
+  claudeStartupDialog,
   ensureClaudeSettings,
   findLatestSessionFile,
   findClaudeSessionId,
@@ -485,5 +488,97 @@ describe("buildClaudeRestorePlan", () => {
     expect(result?.launchCommand).toContain("--settings '/settings.json'");
     expect(result?.launchCommand).toContain("--permission-mode plan");
     expect(result?.launchCommand).toContain("--effort max");
+  });
+});
+
+describe("claudeRegistration", () => {
+  afterEach(() => {
+    delete process.env["CLAUDE_CONFIG_DIR"];
+  });
+
+  it("points a pinned fresh plan at the launch CLAUDE_CONFIG_DIR sessions dir", () => {
+    const plan = buildClaudePlan("p", { sessionId: "sid-1", claudeConfigDir: "/managed/home" });
+    expect(plan.claudeRegistration).toEqual({
+      sessionsDir: "/managed/home/sessions",
+      sessionId: "sid-1",
+    });
+    expect(plan.launchCommand).toContain("CLAUDE_CONFIG_DIR='/managed/home'");
+  });
+
+  it("falls back to the daemon CLAUDE_CONFIG_DIR, then ~/.claude, ignoring empty values", () => {
+    process.env["CLAUDE_CONFIG_DIR"] = "/x";
+    expect(buildClaudePlan("p", { sessionId: "s" }).claudeRegistration?.sessionsDir).toBe(
+      "/x/sessions",
+    );
+    expect(
+      buildClaudePlan("p", { sessionId: "s", claudeConfigDir: "/opt" }).claudeRegistration
+        ?.sessionsDir,
+    ).toBe("/opt/sessions");
+    process.env["CLAUDE_CONFIG_DIR"] = "";
+    expect(buildClaudePlan("p", { sessionId: "s" }).claudeRegistration?.sessionsDir).toBe(
+      "/home/testuser/.claude/sessions",
+    );
+  });
+
+  it("carries no registration without a pinned id", () => {
+    expect(buildClaudePlan("p").claudeRegistration).toBeUndefined();
+  });
+
+  it("always carries registration on resume and restore plans", async () => {
+    expect(buildClaudeResumePlan("sid-2").claudeRegistration).toEqual({
+      sessionsDir: "/home/testuser/.claude/sessions",
+      sessionId: "sid-2",
+    });
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/wt"]);
+    mockStat.mockResolvedValue({ mtimeMs: 1 });
+    const restore = await buildClaudeRestorePlan("/wt", "prompt", {
+      sessionId: "sid-3",
+      claudeConfigDir: "/managed/home",
+    });
+    expect(restore?.claudeRegistration).toEqual({
+      sessionsDir: "/managed/home/sessions",
+      sessionId: "sid-3",
+    });
+  });
+});
+
+describe("claudeStartupDialog", () => {
+  const fixture = (name: string): string =>
+    readFileSync(join(__dirname, "../fixtures/claude-startup-panes", name), "utf8");
+
+  it.each([
+    ["bypass-warning.txt", "bypass permissions warning"],
+    ["workspace-trust.txt", "workspace trust dialog"],
+    ["api-key-prompt.txt", "custom API key prompt"],
+    ["resume-usage-prompt.txt", "resume usage prompt"],
+    ["resume-summary-prompt.txt", "resume summary prompt"],
+  ])("names the live dialog in %s", (name, screen) => {
+    expect(claudeStartupDialog(fixture(name))).toBe(screen);
+  });
+
+  it("returns null for a ready REPL and for a dismissed dialog left in scrollback", () => {
+    expect(claudeStartupDialog(fixture("repl-ready.txt"))).toBeNull();
+    expect(claudeStartupDialog(fixture("trust-scrollback-then-repl.txt"))).toBeNull();
+  });
+
+  it("calls an unrecognized footer-only dialog a startup dialog", () => {
+    expect(
+      claudeStartupDialog("Pick one\n❯ 1. A\n  2. B\n\nEnter to confirm · Esc to cancel"),
+    ).toBe("startup dialog");
+  });
+
+  const usageMenu = [
+    "What do you want to do?",
+    "",
+    "❯ 1. Stop and wait for limit to reset",
+    "  2. Ask your admin for more usage",
+    "",
+    "Enter to confirm · Esc to cancel",
+  ];
+
+  it("names a live usage limit menu but not one in scrollback above a ready REPL", () => {
+    expect(claudeStartupDialog(usageMenu.join("\n"))).toBe("usage limit menu");
+    const scrolled = [...usageMenu, "", "normal task output", "❯ ", "  ⏵⏵ bypass permissions on"];
+    expect(claudeStartupDialog(scrolled.join("\n"))).toBeNull();
   });
 });
