@@ -72,7 +72,13 @@ describe("page source HTTP boundary", () => {
     const { base } = await boot(async (port) => {
       picked.push(port);
       if (picked.length === 1) {
-        await new Promise<void>((resolve) => blocker.listen(port, "127.0.0.1", resolve));
+        await new Promise<void>((resolve, reject) => {
+          blocker.once("error", reject);
+          blocker.listen(port, "127.0.0.1", () => {
+            blocker.off("error", reject);
+            resolve();
+          });
+        });
       }
     });
     expect(picked).toHaveLength(2);
