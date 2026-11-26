@@ -42,7 +42,7 @@ OUTPUT
   Verdict: APPROVED | CHANGES_REQUESTED | BLOCKED
   Publication: APPROVED | CHANGES_REQUESTED | BLOCKED | NOT REQUIRED
   Notification: SENT | BLOCKED | NOT REQUIRED
-  PR review body: "No blockers. Verdict: APPROVE." | "<n> blocker(s). Verdict: REQUEST_CHANGES."; optional "CI: <job> failing."; max 400 chars
+  PR review body: "No blockers. Verdict: APPROVE." | "<n> blocker(s). Verdict: REQUEST_CHANGES."; max 400 chars
   PR finding: inline comment in same review, "[P1|P2|P3] <imperative title>" + 1-3 sentences (failure, consequence); max 400 chars
 
 RULES

@@ -65,7 +65,7 @@ PUBLICATION
   Re-read H/B before publication; changed pair invalidates pass.
   Publish through `spur review-app publish --app-config <file> --request <file> --json`.
   Measure lane identity/access through `spur review-app status`; missing config/access blocks. No human-token or unpinned fallback.
-  Body: one verdict line, "No blockers. Verdict: APPROVE." or "<n> blocker(s). Verdict: REQUEST_CHANGES."; optional "CI: <job> failing." line; max 400 chars. Tool appends hidden attempt trailer and footer.
+  Body: one verdict line, "No blockers. Verdict: APPROVE." or "<n> blocker(s). Verdict: REQUEST_CHANGES."; max 400 chars. Tool appends hidden attempt trailer and footer.
   Finding: request field `comments[]`, each {path, line, side RIGHT|LEFT, body}; all findings in one review.
   Finding body: "[P1|P2|P3] <imperative title>" + 1-3 sentences (failure, consequence); max 400 chars.
   Inline only on lines inside the PR diff. Unchanged-line finding goes in the review body as "<path>:<line> [P1|P2|P3] <title>"; body cap 400 chars plus 400 per such line.
