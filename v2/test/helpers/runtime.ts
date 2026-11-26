@@ -1128,7 +1128,21 @@ export async function createTmuxSession(args: {
   cwd: string;
   env?: Record<string, string | undefined>;
 }): Promise<void> {
-  const tmuxArgs = ["new-session", "-d", "-s", args.sessionName, "-x", "200", "-y", "50"];
+  // A controller CLI that outlives its test daemon must not auto-start a
+  // replacement: that daemon forks detached, untracked by teardown, and
+  // survives the run as an orphan.
+  const tmuxArgs = [
+    "new-session",
+    "-d",
+    "-s",
+    args.sessionName,
+    "-x",
+    "200",
+    "-y",
+    "50",
+    "-e",
+    "SPUR_DISABLE_AUTOSTART=1",
+  ];
   for (const [key, value] of Object.entries(args.env ?? {})) {
     if (!value) continue;
     tmuxArgs.push("-e", `${key}=${value}`);
