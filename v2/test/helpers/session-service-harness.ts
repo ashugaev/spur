@@ -1012,6 +1012,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
   const actual = await importOriginal<typeof runtimeTmuxModule>();
   return {
     PromptReadyTimeoutError: actual.PromptReadyTimeoutError,
+    ClaudeStartupDialogError: actual.ClaudeStartupDialogError,
     TmuxProbeUnknownError: actual.TmuxProbeUnknownError,
     isHistoricalPsProbeDiagnostic: actual.isHistoricalPsProbeDiagnostic,
     captureTmuxPane: captureTmuxPaneMock,
@@ -1607,7 +1608,11 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   buildAgentLaunchPlanMock
     .mockReset()
     .mockImplementation(
-      (agent: string, initialMessage: string, options?: { planMode?: boolean }) => ({
+      (
+        agent: string,
+        initialMessage: string,
+        options?: { planMode?: boolean; agentSessionId?: string },
+      ) => ({
         agent,
         launchCommand:
           agent === "codex"
@@ -1617,6 +1622,14 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
               : "claude --dangerously-skip-permissions",
         initialMessage,
         readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
+        ...(agent === "claude" && options?.agentSessionId
+          ? {
+              claudeRegistration: {
+                sessionsDir: "/home/test/.claude/sessions",
+                sessionId: options.agentSessionId,
+              },
+            }
+          : {}),
       }),
     );
   buildAgentRestorePlanMock.mockReset().mockResolvedValue({
@@ -1625,13 +1638,17 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
     initialMessage:
       'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nhello',
     readyMarkers: ["❯"],
+    claudeRegistration: {
+      sessionsDir: "/home/test/.claude/sessions",
+      sessionId: "session-uuid",
+    },
   });
   buildAgentResumePlanMock
     .mockReset()
     .mockImplementation(
       (
-        _agent: string,
-        _agentSessionId: string,
+        agent: string,
+        agentSessionId: string,
         _launchCommand: string,
         options?: { planMode?: boolean },
       ) => ({
@@ -1639,6 +1656,14 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
           ? "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan"
           : "claude --resume session-uuid --dangerously-skip-permissions",
         readyMarkers: ["❯"],
+        ...(agent === "claude"
+          ? {
+              claudeRegistration: {
+                sessionsDir: "/home/test/.claude/sessions",
+                sessionId: agentSessionId || "session-uuid",
+              },
+            }
+          : {}),
       }),
     );
   findAgentSessionIdMock.mockReset().mockResolvedValue("session-uuid");
