@@ -1,0 +1,12 @@
+[fixture synthesized from claude 2.1.291 binary strings, not live-captured]
+ ▐▛███▛█   Claude Code v2.1.291
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   ~/project
+
+────────────────────────────────────────────────────────────────────────────────
+ Resume this conversation?
+
+ ❯ 1. Resume
+   2. Start a new conversation
+
+ Enter to confirm · Esc to resume

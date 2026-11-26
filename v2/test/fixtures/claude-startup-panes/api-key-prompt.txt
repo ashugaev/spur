@@ -1,0 +1,12 @@
+[fixture reconstructed from live probe notes, claude 2.1.291; no "Claude Code" text]
+
+ Detected a custom API key in your environment
+
+ ANTHROPIC_API_KEY: sk-ant-...XXXX
+
+ Do you want to use this API key?
+
+ ❯ 1. Yes
+   2. No (recommended)
+
+ Enter to confirm · Esc to cancel
