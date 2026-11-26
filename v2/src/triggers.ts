@@ -33,6 +33,7 @@ import {
   type AppConfig,
   type AutoPingDestination,
   type AutoPingRouteDescriptor,
+  type CronSpawnOrigin,
   type SendTriggerConfig,
   type SendBatchRetryEntry,
   type SessionView,
@@ -300,6 +301,7 @@ async function runSpawnTrigger(
   eventData: unknown,
   logger: TriggerLogger,
   queue: { work: PersistedSpawnWork; current(): boolean; save(): boolean },
+  cronOrigin: CronSpawnOrigin | undefined,
 ): Promise<void> {
   const { work } = queue;
   logTriggerEvent(dataDir, "trigger.spawn.matched", {
@@ -422,7 +424,10 @@ async function runSpawnTrigger(
         let session: SessionView;
         let spawnFailure: { error: unknown } | undefined;
         try {
-          session = await service.spawn(spawnRequest, { triggerBirthKey: birthKey });
+          session = await service.spawn(spawnRequest, {
+            triggerBirthKey: birthKey,
+            ...(cronOrigin ? { cronOrigin } : {}),
+          });
         } catch (error) {
           const birth = service.getTriggerBirth(projectId, birthKey, spawnRequest);
           if (!birth) throw error;
@@ -1632,6 +1637,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       work.eventData,
       logger,
       { work, current, save },
+      deps.config.projects[work.projectId]?.sources[work.sourceId]?.type === "cron"
+        ? { projectId: work.projectId, sourceId: work.sourceId, triggerId: work.triggerId }
+        : undefined,
     );
     if (current() && work.nextBlockIndex === work.blocks.length) {
       const data = work.eventData;

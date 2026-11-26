@@ -142,14 +142,7 @@ export function readCronStorage(
     (artifact) => artifact.id !== CRON_STORAGE_NOTE && !NOTE_TEMP_RE.test(artifact.id),
   );
   const noteFile = readArtifactInDir(root, CRON_STORAGE_NOTE);
-  let note = "";
-  if (noteFile) {
-    try {
-      note = readFileSync(noteFile.path, "utf-8");
-    } catch {
-      note = "";
-    }
-  }
+  const note = noteFile ? readFileSync(noteFile.path, "utf-8") : "";
   const noteUpdatedAt = noteFile?.updatedAt ?? null;
   const stamps = [
     ...files.map((file) => file.updatedAt),
