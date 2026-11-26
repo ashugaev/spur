@@ -1,0 +1,13 @@
+[fixture synthesized from claude 2.1.291 binary strings, not live-captured]
+ ▐▛███▛█   Claude Code v2.1.291
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   ~/project
+
+────────────────────────────────────────────────────────────────────────────────
+ This session is 3h old and 120k tokens.
+
+ ❯ 1. Resume from summary (recommended)
+   2. Resume full session as-is
+   3. Don't ask me again
+
+ Enter to confirm · Esc to cancel

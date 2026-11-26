@@ -1,0 +1,21 @@
+[fixture reconstructed from live probe notes, claude 2.1.291]
+ Quick safety check: Is this a project you created or one you trust? If not,
+ take a moment to review what's in this folder first.
+
+ ❯ 1. Yes, I trust this folder
+   2. No, exit
+
+ Enter to confirm · Esc to cancel
+
+ ▐▛███▛█   Claude Code v2.1.291
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   ~/project
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

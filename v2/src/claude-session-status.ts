@@ -2,6 +2,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import type { SessionState } from "./types.js";
+import type { ClaudeLaunchRegistration } from "./agents/types.js";
 import { resolveWorktreePathCandidates } from "./agents/worktree-path.js";
 import { canReadProcessTree, classifyProcessOwnership, type PpidReader } from "./process-tree.js";
 
@@ -236,4 +237,44 @@ export async function readClaudeSessionStatus(
     ...latest,
     state,
   };
+}
+
+/**
+ * True once the launched claude has written its own interactive session
+ * registration (sessions/<pid>.json) carrying exactly `registration.sessionId`.
+ * Registration means the REPL is up; dialogs shown before it never register.
+ * When pane ancestry is readable the file must be owned by the pane's process
+ * tree, so a dead-pid leftover of the same session id does not count.
+ */
+export async function readClaudeLaunchRegistration(
+  registration: ClaudeLaunchRegistration,
+  panePid: number | null,
+  readPpid?: PpidReader,
+): Promise<boolean> {
+  let entries: string[];
+  try {
+    entries = await readdir(registration.sessionsDir);
+  } catch {
+    return false;
+  }
+  const candidates = (
+    await Promise.all(
+      entries
+        .filter((entry) => entry.endsWith(".json"))
+        .map((entry) => readCandidate(join(registration.sessionsDir, entry))),
+    )
+  ).filter(
+    (candidate): candidate is ClaudeSessionStatusCandidate =>
+      candidate !== null &&
+      candidate.sessionId === registration.sessionId &&
+      candidate.kind === "interactive",
+  );
+  if (candidates.length === 0) {
+    return false;
+  }
+  if (panePid === null || panePid <= 0 || !(await canReadProcessTree(panePid, readPpid))) {
+    return true;
+  }
+  const owned = await filterByPaneTree(candidates, { panePid, ...(readPpid ? { readPpid } : {}) });
+  return owned.some((candidate) => candidate.paneOwned === true);
 }
