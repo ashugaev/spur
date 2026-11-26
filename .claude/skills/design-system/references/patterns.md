@@ -39,6 +39,9 @@ ICONS
   Reuse the repo icon component for any behavior that already has one: Dashboard lane icons, link-icons.tsx, components/icons/, DirectTerminal, VoiceInput.
   Designs copy that exact SVG; never redraw or approximate it.
   New icon only where no repo icon exists; mark it proposed and get design approval before it ships.
+  Sprite: DS canvas board 09 Icons lists every repo icon with its source file, proposed icons, and the migration table.
+  Every new icon enters the sprite as proposed. One that supersedes an existing icon names what it replaces and where, and adds a migration row.
+  Target: one icon per meaning in components/icons/; merge duplicates through the migration table. Implementation: #1514.
 
 
 VOICE INPUT
