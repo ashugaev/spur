@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   classifyClaudeSessionStatus,
+  readClaudeLaunchRegistration,
   readClaudeSessionStatus,
 } from "../../src/claude-session-status.js";
 
@@ -337,5 +338,64 @@ describe("readClaudeSessionStatus", () => {
     await expect(
       readClaudeSessionStatus("/tmp/spur-worktrees/api/api-1", undefined, sessionsDir),
     ).resolves.toBeNull();
+  });
+});
+
+describe("readClaudeLaunchRegistration", () => {
+  const registration = (sessionsDir: string) => ({ sessionsDir, sessionId: "sid-1" });
+  const record = (overrides: Record<string, unknown> = {}) => ({
+    pid: process.pid,
+    sessionId: "sid-1",
+    kind: "interactive",
+    status: "idle",
+    cwd: "/wt",
+    ...overrides,
+  });
+
+  it("is true for an owned interactive registration of the launch session id", async () => {
+    const dir = await makeSessionsDir();
+    await writeStatus(dir, `${process.pid}.json`, record());
+    await expect(readClaudeLaunchRegistration(registration(dir), process.pid)).resolves.toBe(true);
+  });
+
+  it("is false for a missing dir, another session id, a non-interactive kind, keys and junk", async () => {
+    const dir = await makeSessionsDir();
+    await expect(
+      readClaudeLaunchRegistration(registration(join(dir, "nope")), process.pid),
+    ).resolves.toBe(false);
+    await writeStatus(dir, "1.json", record({ sessionId: "other" }));
+    await writeStatus(dir, "2.json", record({ kind: "sdk" }));
+    await writeStatus(dir, "3.json", { pid: process.pid, sessionId: "sid-1", status: "idle" });
+    await writeStatus(dir, `${process.pid}.abc.key`, record());
+    await writeFile(join(dir, "4.json"), "{not json", "utf8");
+    await expect(readClaudeLaunchRegistration(registration(dir), process.pid)).resolves.toBe(false);
+  });
+
+  it("rejects a dead-pid leftover of the same session id when ancestry is readable", async () => {
+    const dir = await makeSessionsDir();
+    await writeStatus(dir, "999999.json", record({ pid: 999999 }));
+    // pane 500 readable (parent 1); leftover pid 999999 unreadable -> unknown.
+    const readPpid = async (pid: number): Promise<number | null> => (pid === 500 ? 1 : null);
+    await expect(readClaudeLaunchRegistration(registration(dir), 500, readPpid)).resolves.toBe(
+      false,
+    );
+  });
+
+  it("accepts the leftover id match when ancestry is unreadable or the pane pid is null", async () => {
+    const dir = await makeSessionsDir();
+    await writeStatus(dir, "999999.json", record({ pid: 999999 }));
+    const blind = async (): Promise<number | null> => null;
+    await expect(readClaudeLaunchRegistration(registration(dir), 500, blind)).resolves.toBe(true);
+    await expect(readClaudeLaunchRegistration(registration(dir), null)).resolves.toBe(true);
+  });
+
+  it("accepts a registration whose pid descends from the pane pid", async () => {
+    const dir = await makeSessionsDir();
+    await writeStatus(dir, "700.json", record({ pid: 700 }));
+    const tree: Record<number, number> = { 500: 1, 700: 600, 600: 500 };
+    const readPpid = async (pid: number): Promise<number | null> => tree[pid] ?? null;
+    await expect(readClaudeLaunchRegistration(registration(dir), 500, readPpid)).resolves.toBe(
+      true,
+    );
   });
 });
