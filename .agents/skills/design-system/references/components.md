@@ -8,7 +8,7 @@ OWNERS
   packages/web/src/design/classes.ts       shared recipes
   packages/web/src/design/tone.ts          status tone type and helpers
   packages/web/src/components/DataRow.tsx  row shell and actions
-  packages/web/src/lib/tag-style.ts        tag chips
+  packages/web/src/design/tag.ts           tag chips
   packages/web/src/components/             primitive APIs and state behavior
 
 

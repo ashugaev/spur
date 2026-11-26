@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import { getAgentDisplayName, type AgentName } from "@/lib/agents";
-import { tagChipStyle } from "@/lib/tag-style";
+import { tagChipStyle } from "@/design/tag.js";
 import type { AttentionLevel } from "@/lib/types";
 
 const OPTION_BASE_CLASS =

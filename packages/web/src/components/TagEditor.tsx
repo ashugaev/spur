@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useTags } from "@/components/TagsContext";
 import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
-import { CHIP_CLASS, tagChipStyle } from "@/lib/tag-style";
+import { CHIP_CLASS, tagChipStyle } from "@/design/tag.js";
 import type { DashboardSession } from "@/lib/types";
 
 export type TagEditorVariant = "dots" | "chips";
