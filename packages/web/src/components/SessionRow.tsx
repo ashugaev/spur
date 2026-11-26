@@ -415,10 +415,11 @@ export function SessionRow({
   const branchColor = hasSeenAttention
     ? "text-[var(--color-text-tertiary)]"
     : "text-[var(--color-text-secondary)]";
+  // Override the unlayered global anchor color for idle and hover states.
   const titleColor =
     isAttentionState && !hasSeenAttention
-      ? "text-[var(--color-text-primary)]"
-      : "text-[var(--color-text-secondary)]";
+      ? "text-[var(--color-text-primary)]!"
+      : "text-[var(--color-text-secondary)]!";
 
   const togglePopover = (popover: Exclude<ActiveRowPopover, null>) => {
     setActivePopover((current) => (current === popover ? null : popover));
@@ -473,7 +474,7 @@ export function SessionRow({
       />
 
       <Link
-        className={`min-w-0 flex-1 truncate ${titleColor} hover:text-[var(--color-text-primary)] hover:no-underline`}
+        className={`min-w-0 flex-1 truncate ${titleColor} hover:text-[var(--color-text-primary)]! hover:no-underline`}
         href={buildSessionPath(session.id, projectFilterId)}
       >
         {title}

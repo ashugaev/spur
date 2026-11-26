@@ -870,7 +870,8 @@ describe("SessionRow", () => {
     );
 
     const titleLink = screen.getByRole("link", { name: "Remove row link strip" });
-    expect(titleLink).toHaveClass("text-[var(--color-text-primary)]");
+    expect(titleLink).toHaveClass("text-[var(--color-text-primary)]!");
+    expect(titleLink).toHaveClass("hover:text-[var(--color-text-primary)]!");
     expect(titleLink).not.toHaveClass("opacity-70");
 
     rerender(
@@ -882,8 +883,8 @@ describe("SessionRow", () => {
       />,
     );
 
-    expect(titleLink).toHaveClass("text-[var(--color-text-secondary)]");
-    expect(titleLink).not.toHaveClass("text-[var(--color-text-primary)]");
+    expect(titleLink).toHaveClass("text-[var(--color-text-secondary)]!");
+    expect(titleLink).not.toHaveClass("text-[var(--color-text-primary)]!");
   });
 
   it("does not dim row text for non-needs_input states even when unseen", () => {
@@ -910,7 +911,7 @@ describe("SessionRow", () => {
 
       const titleLink = screen.getByRole("link", { name: "Remove row link strip" });
       expect(titleLink).not.toHaveClass("opacity-70");
-      expect(titleLink).toHaveClass("text-[var(--color-text-secondary)]");
+      expect(titleLink).toHaveClass("text-[var(--color-text-secondary)]!");
       unmount();
     }
   });
@@ -937,7 +938,7 @@ describe("SessionRow", () => {
     );
 
     const titleLink = screen.getByRole("link", { name: "Remove row link strip" });
-    expect(titleLink).toHaveClass("text-[var(--color-text-primary)]");
+    expect(titleLink).toHaveClass("text-[var(--color-text-primary)]!");
     expect(titleLink).not.toHaveClass("opacity-70");
   });
 
