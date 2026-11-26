@@ -186,6 +186,21 @@ describe("published interface contracts", () => {
     expect(commands).toMatch(/SPUR_CLOSEOUT_OWNER=1[^\n]*`0`/);
   });
 
+  it("documents the cron storage env in command docs and both skills", async () => {
+    const [commands, configuration, agentSkill, claudeSkill] = await Promise.all([
+      readRepoFile("docs/commands.md"),
+      readRepoFile("docs/configuration.md"),
+      readRepoFile(".agents/skills/spur/SKILL.md"),
+      readRepoFile(".claude/skills/spur/SKILL.md"),
+    ]);
+
+    expect(commands).toContain("$SPUR_CRON_STORAGE_DIR");
+    expect(commands).toContain("v2/src/cron-storage.ts");
+    expect(configuration).toContain("commands.md#session-tools-and-environment");
+    expect(agentSkill).toContain("$SPUR_CRON_STORAGE_DIR");
+    expect(agentSkill).toBe(claudeSkill);
+  });
+
   it("documents auto-ping CLI names, daemon routes, source support, and agent interface", async () => {
     const [commands, daemonApi, configuration, agentSkill, claudeSkill] = await Promise.all([
       readRepoFile("docs/commands.md"),
