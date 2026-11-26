@@ -2170,6 +2170,213 @@ describe("runtime-tmux", () => {
     }
   });
 
+  describe("claude readiness", () => {
+    const paneFixture = (name: string): string =>
+      readFileSync(join(__dirname, "../fixtures/claude-startup-panes", name), "utf8");
+    const REPL = "Claude Code\n❯ ";
+
+    function claudeHarness(
+      panes: (captureCount: number) => string,
+      onCapture?: (captureCount: number) => void,
+    ) {
+      let now = 0;
+      let captures = 0;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+      execFileAsyncMock.mockImplementation(async (_file, args) => {
+        if (args[0] === "capture-pane") {
+          captures += 1;
+          now += 1_000;
+          onCapture?.(captures);
+          return { stdout: panes(captures), stderr: "" };
+        }
+        if (args[0] === "list-panes") {
+          // pid far above pid_max: ancestry unreadable, so id match alone counts.
+          return { stdout: "api-1 1 1 0 2000000000 /dev/pts/1", stderr: "" };
+        }
+        return { stdout: "", stderr: "" };
+      });
+      return {
+        captures: () => captures,
+        elapsed: () => now,
+        restore: () => nowSpy.mockRestore(),
+      };
+    }
+
+    function tmuxCalls(name: string): number {
+      return execFileAsyncMock.mock.calls.filter(([, args]) => args[0] === name).length;
+    }
+
+    function inputCalls(): number {
+      return execFileAsyncMock.mock.calls.filter(([, args]) =>
+        ["send-keys", "paste-buffer", "load-buffer"].includes(args[0] ?? ""),
+      ).length;
+    }
+
+    function makeSessionsDir(): string {
+      return mkdtempSync(join(TEST_TMP_DIR, "claude-reg-"));
+    }
+
+    function writeRegistration(dir: string): void {
+      writeFileSync(
+        join(dir, "42.json"),
+        JSON.stringify({ pid: 42, sessionId: "sid-1", kind: "interactive", status: "idle" }),
+      );
+    }
+
+    it("waits for the session registration while the ready markers are already visible", async () => {
+      const dir = makeSessionsDir();
+      const h = claudeHarness(
+        () => REPL,
+        (n) => {
+          if (n === 3) writeRegistration(dir);
+        },
+      );
+      try {
+        const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+        await waitForTmuxReady("api-1", ["Claude Code", "❯"], 60_000, {
+          agent: "claude",
+          claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
+        });
+        expect(h.captures()).toBe(3);
+        expect(inputCalls()).toBe(0);
+      } finally {
+        h.restore();
+      }
+    });
+
+    it("reads the pane pid once across registration-absent polls", async () => {
+      const dir = makeSessionsDir();
+      const h = claudeHarness(
+        () => REPL,
+        (n) => {
+          if (n === 6) writeRegistration(dir);
+        },
+      );
+      try {
+        const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+        await waitForTmuxReady("api-1", ["Claude Code", "❯"], 60_000, {
+          agent: "claude",
+          claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
+        });
+        expect(h.captures()).toBe(6);
+        expect(tmuxCalls("list-panes")).toBe(1);
+      } finally {
+        h.restore();
+      }
+    });
+
+    it("times out with a PromptReadyTimeoutError naming the sessions dir when registration never appears", async () => {
+      const dir = makeSessionsDir();
+      const h = claudeHarness(() => REPL);
+      try {
+        const { waitForTmuxReady, PromptReadyTimeoutError } =
+          await import("../../src/runtime-tmux.js");
+        await expect(
+          waitForTmuxReady("api-1", ["Claude Code", "❯"], 5_000, {
+            agent: "claude",
+            claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
+          }),
+        ).rejects.toSatisfy(
+          (err: unknown) =>
+            err instanceof PromptReadyTimeoutError &&
+            err.message.includes(`registration not seen in ${dir} for session sid-1`),
+        );
+      } finally {
+        h.restore();
+      }
+    });
+
+    it("resolves on markers alone when the plan has no registration target", async () => {
+      const h = claudeHarness(() => REPL);
+      try {
+        const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+        await waitForTmuxReady("api-1", ["Claude Code", "❯"], 5_000, { agent: "claude" });
+        expect(h.captures()).toBe(1);
+        expect(tmuxCalls("list-panes")).toBe(0);
+      } finally {
+        h.restore();
+      }
+    });
+
+    it.each([
+      ["workspace-trust.txt", "workspace trust dialog"],
+      ["bypass-warning.txt", "bypass permissions warning"],
+      ["api-key-prompt.txt", "custom API key prompt"],
+      ["resume-summary-prompt.txt", "resume summary prompt"],
+    ])("refuses to proceed past %s and types nothing", async (name, screen) => {
+      const dir = makeSessionsDir();
+      writeRegistration(dir);
+      const h = claudeHarness(() => paneFixture(name));
+      try {
+        const { waitForTmuxReady, ClaudeStartupDialogError, PromptReadyTimeoutError } =
+          await import("../../src/runtime-tmux.js");
+        await expect(
+          waitForTmuxReady("api-1", ["❯"], 120_000, {
+            agent: "claude",
+            claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
+          }),
+        ).rejects.toSatisfy(
+          (err: unknown) =>
+            err instanceof ClaudeStartupDialogError &&
+            !(err instanceof PromptReadyTimeoutError) &&
+            err.screen === screen &&
+            err.message.includes(screen),
+        );
+        // Fails at the 10s settle, not the 120s timeout.
+        expect(h.elapsed()).toBeLessThan(15_000);
+        expect(inputCalls()).toBe(0);
+      } finally {
+        h.restore();
+      }
+    });
+
+    it("names the dialog when the timeout is shorter than the settle", async () => {
+      const h = claudeHarness(() => paneFixture("workspace-trust.txt"));
+      try {
+        const { waitForTmuxReady, ClaudeStartupDialogError } =
+          await import("../../src/runtime-tmux.js");
+        await expect(
+          waitForTmuxReady("api-1", ["❯"], 3_000, { agent: "claude" }),
+        ).rejects.toBeInstanceOf(ClaudeStartupDialogError);
+      } finally {
+        h.restore();
+      }
+    });
+
+    it("resolves when a dialog is answered inside the settle window", async () => {
+      const dir = makeSessionsDir();
+      writeRegistration(dir);
+      const h = claudeHarness((n) => (n <= 4 ? paneFixture("workspace-trust.txt") : REPL));
+      try {
+        const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+        await waitForTmuxReady("api-1", ["Claude Code", "❯"], 120_000, {
+          agent: "claude",
+          claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
+        });
+        expect(h.captures()).toBe(5);
+        expect(inputCalls()).toBe(0);
+      } finally {
+        h.restore();
+      }
+    });
+
+    it("ignores a dismissed dialog left in scrollback above a ready REPL", async () => {
+      const dir = makeSessionsDir();
+      writeRegistration(dir);
+      const h = claudeHarness(() => paneFixture("trust-scrollback-then-repl.txt"));
+      try {
+        const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+        await waitForTmuxReady("api-1", ["Claude Code", "❯"], 5_000, {
+          agent: "claude",
+          claudeRegistration: { sessionsDir: dir, sessionId: "sid-1" },
+        });
+        expect(h.captures()).toBe(1);
+      } finally {
+        h.restore();
+      }
+    });
+  });
+
   it("sends a bare digit keystroke to select a menu option within the first nine", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
