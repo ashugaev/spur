@@ -6769,9 +6769,16 @@ export class SessionService {
       // observed `error`: a workspace diagnostic is better evidence than the
       // status-derived state. Any other divergence is a lost append and gets
       // repaired. Running records publish nothing here.
+      // A write that clears the record's own retained error (pause) is a real
+      // recovery, so `recordErrored` remembers which records carried one.
+      const recordErrored = new Set<string>();
       const writeDerivedState = (record: SessionRecord): SessionState | undefined => {
+        const retained = hasRetainedSessionError(record);
+        const clearedError = recordErrored.delete(record.id) && !retained;
+        if (retained) recordErrored.add(record.id);
         if (this.isLiveSessionRecord(record)) return undefined;
         const keepObserved =
+          !clearedError &&
           store.observedStatus(record.id) === record.status &&
           store.observedState(record.id) === "error";
         return keepObserved ? undefined : statusDerivedState(record);

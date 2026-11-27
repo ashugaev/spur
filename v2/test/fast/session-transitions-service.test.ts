@@ -1004,6 +1004,24 @@ describe("session transitions service", () => {
     expect((await poll({ since: cursor })).entries).toEqual([]);
   });
 
+  it("publishes the recovery edge when a pause clears a stored error under a new diagnostic", async () => {
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({ status: "stopped", stopReason: "manual_pause", error: "agent failed" }),
+    );
+    expect(binding().store.observedState("api-1")).toBe("error");
+    const cursor = (await poll()).nextCursor;
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed: EACCES",
+    });
+    await service.pause("api-1");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toContain("stopped");
+  });
+
   it("repairs a boot-kept error on a killed record once the diagnostic is gone", async () => {
     metadata.writeSession(TEST_DATA_DIR, record({ status: "killed", retainInList: true }));
     probeWorkspaceMock.mockReturnValue({
