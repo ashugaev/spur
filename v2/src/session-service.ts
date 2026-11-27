@@ -7695,7 +7695,7 @@ export class SessionService {
             details: { actor, force },
           });
         const ended = readSession(this.config.dataDir, sessionId);
-        if (ended && this.endedSinceClassification(ended, false)) {
+        if (ended && this.statusMovedSinceClassification(ended, classified.session.status)) {
           logCleared();
           return { sessionId, state: statusDerivedState(ended), deliveryScheduled: false };
         }
@@ -30931,20 +30931,27 @@ export class SessionService {
     return (await this.assembleDashboard(session))?.view;
   }
 
-  // The one fence for a classification that outlived its record: the write hook
-  // already published the terminal edge, so the in-hand state must not be
-  // journaled after it. Callers reclassify the latest record instead.
-  private endedSinceClassification(latest: SessionRecord | null, inputTerminal: boolean): boolean {
-    return latest !== null && isTerminalSessionStatus(latest.status) && !inputTerminal;
+  // The one fence for a classification that outlived its record's status: the
+  // write hook already published the non-live edge, so the in-hand state must
+  // not be journaled after it. Compares against the status the classification
+  // itself ended on, so its own reconcile writes do not count. Callers
+  // reclassify the latest record once, then skip the publish.
+  private statusMovedSinceClassification(
+    latest: SessionRecord | null,
+    classifiedStatus: SessionStatus,
+  ): boolean {
+    return latest !== null && latest.status !== classifiedStatus;
   }
 
   private async assembleDashboard(
     session: SessionRecord,
+    // Set on the one reclassification after a status move; a second move skips
+    // the state publish.
+    retried = false,
   ): Promise<
     { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
   > {
     const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
-    const inputTerminal = isTerminalSessionStatus(session.status);
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
@@ -30965,11 +30972,12 @@ export class SessionService {
 
     const hasServiceIssues = await this.hasServiceIssues(session);
     const latest = readSession(this.config.dataDir, session.id);
+    const statusMoved = this.statusMovedSinceClassification(latest, classified.session.status);
     if (
       (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
-      this.endedSinceClassification(latest, inputTerminal)
+      (statusMoved && !retried)
     ) {
-      return latest ? this.assembleDashboard(latest) : undefined;
+      return latest ? this.assembleDashboard(latest, true) : undefined;
     }
     const reported = this.withReportingError(session);
     const reportingConsistent = isDeepStrictEqual(reported, session);
@@ -31021,16 +31029,18 @@ export class SessionService {
       state !== rawState && (state === "completed" || state === "needs_input")
         ? "task_status"
         : classified.source;
-    await this.updateStateHistory(
-      session,
-      state,
-      stateSource,
-      classified.historySourcePath ?? null,
-      classified.serverError,
-      classified.serverErrorEvidence,
-      classified.rateLimitResetAt,
-      "read",
-    );
+    // Moved again during the retry: the write hook and background ticks publish.
+    if (!statusMoved)
+      await this.updateStateHistory(
+        session,
+        state,
+        stateSource,
+        classified.historySourcePath ?? null,
+        classified.serverError,
+        classified.serverErrorEvidence,
+        classified.rateLimitResetAt,
+        "read",
+      );
     const marked = readSession(this.config.dataDir, session.id);
     if (!marked) return undefined;
     session = this.withReportingError(marked);
@@ -31377,6 +31387,9 @@ export class SessionService {
     // A background repair passes the check that its observation is still the
     // current one; it runs where the record is re-read, before any state publish.
     stillCurrent?: () => boolean,
+    // Set on the one reclassification after a status move; a second move skips
+    // the state publish.
+    retried = false,
   ): Promise<{
     view: Omit<SessionListItemView, "lifecycle">;
     classified: SessionStateResult;
@@ -31389,7 +31402,6 @@ export class SessionService {
       Boolean(record.serverErrorAt) ||
       Boolean(record.error?.trim() && !record.error.startsWith(STATUS_DETECTION_ERROR_PREFIX));
     const inputHasIndependentError = hasIndependentError(session);
-    const inputTerminal = isTerminalSessionStatus(session.status);
     const classified = await this.classifySessionRecord(session, { journalPolicy: "read" });
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified, "read");
     if (persisted.status === "missing") {
@@ -31413,16 +31425,16 @@ export class SessionService {
     const tokenUsageView = this.deriveTokenUsageView(session);
     const sidecars = await this.sidecarViews(session, project);
     if (stillCurrent && !stillCurrent()) throw new Error("Observation superseded");
-    // Also reclassify a record that ended while this classification ran: the
-    // write hook already published its terminal edge, and the in-hand state
-    // predates it.
+    // A record whose status moved while this classification ran gets one
+    // reclassification; the state is never published for a stale status.
     const latest = readSession(this.config.dataDir, session.id);
+    const statusMoved = this.statusMovedSinceClassification(latest, classified.session.status);
     if (
       (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
-      this.endedSinceClassification(latest, inputTerminal)
+      (statusMoved && !retried)
     ) {
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
-      return this.enrichWithClassified(latest, claudeAccounts, sessionBatch, stillCurrent);
+      return this.enrichWithClassified(latest, claudeAccounts, sessionBatch, stillCurrent, true);
     }
     const reported = this.withReportingError(session);
     const reportingConsistent = isDeepStrictEqual(reported, session);
@@ -31440,16 +31452,18 @@ export class SessionService {
       state !== classified.state && (state === "completed" || state === "needs_input")
         ? "task_status"
         : classified.source;
-    await this.updateStateHistory(
-      session,
-      state,
-      stateSource,
-      classified.historySourcePath ?? null,
-      classified.serverError,
-      classified.serverErrorEvidence,
-      classified.rateLimitResetAt,
-      "read",
-    );
+    // Moved again during the retry: the write hook and background ticks publish.
+    if (!statusMoved)
+      await this.updateStateHistory(
+        session,
+        state,
+        stateSource,
+        classified.historySourcePath ?? null,
+        classified.serverError,
+        classified.serverErrorEvidence,
+        classified.rateLimitResetAt,
+        "read",
+      );
     const marked = readSession(this.config.dataDir, session.id);
     if (!marked) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     session = this.withReportingError(marked);

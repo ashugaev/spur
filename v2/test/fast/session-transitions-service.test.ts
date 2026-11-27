@@ -1235,6 +1235,38 @@ describe("session transitions service", () => {
     ).toEqual(["killed"]);
   });
 
+  it("publishes no stale stopped state when a completed row is reopened during a dashboard build", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("stopped");
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const pending = sessionServiceInternals(service)
+      .enrichDashboard(record({ status: "completed" }))
+      .catch(() => undefined);
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("working");
+    release();
+    await pending;
+    expect(binding().store.observedState("api-1")).toBe("working");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["working"]);
+  });
+
   it("keeps the killed state edge when a dashboard build that started before the kill resumes after it", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     await service.get("api-1");
