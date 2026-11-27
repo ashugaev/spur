@@ -33,9 +33,9 @@
 - `GET /projects/cron/edit` — disk draft for a Cron spawn trigger; MCP `get_cron_job_draft`; `v2/src/cron-job-editor.ts`.
 - `PATCH /projects/cron/edit` — save validated YAML with revision conflict detection, then reload automation; `activation` applied|failed; MCP `save_cron_job_draft`; `v2/src/cron-job-editor.ts`.
 - `GET /projects/:projectId/cron/:triggerId/storage` — Cron job storage view: note, files, total size; no configured trigger needed; `409` symlinked or non-directory storage path; MCP `get_cron_storage`; `v2/src/cron-storage.ts`.
-- `GET /projects/:projectId/cron/:triggerId/storage/files/:path` — one storage file, HTML sandboxed, SVG as download; MCP `get_cron_storage_file`; `v2/src/cron-storage.ts`.
+- `GET /projects/:projectId/cron/:triggerId/storage/files/:path` — one storage file, HTML sandboxed, SVG as download; `400` bad id; `409` symlinked or non-directory storage path; MCP `get_cron_storage_file`; `v2/src/cron-storage.ts`.
 - `PATCH /projects/:projectId/cron/:triggerId/storage/note` — body `{note}`; replace `note.md`; `404` unless a configured Cron spawn trigger; MCP `update_cron_storage_note`; `v2/src/cron-storage.ts`.
-- `DELETE /projects/:projectId/cron/:triggerId/storage` — delete note and files; MCP `clear_cron_storage`; `v2/src/cron-storage.ts`.
+- `DELETE /projects/:projectId/cron/:triggerId/storage` — delete note and files; `409` symlinked or non-directory storage path; MCP `clear_cron_storage`; `v2/src/cron-storage.ts`.
 - `POST /projects`
 - `PATCH /projects/:id`
 - `DELETE /projects/:id`

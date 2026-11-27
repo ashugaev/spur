@@ -193,6 +193,7 @@ export function CronStorageSection({
             className={`${INPUT_CLASS} min-h-22 w-full resize-y`}
             onChange={(event) => setDraft(event.target.value)}
             placeholder="Context for later runs..."
+            readOnly={busy}
             value={noteText}
           />
           <div className="flex items-center justify-between gap-3">

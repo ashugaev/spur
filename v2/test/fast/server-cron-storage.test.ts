@@ -176,6 +176,13 @@ describe("cron storage routes", () => {
       expect(
         (await patchNote(`${base}/projects/ghost/cron/audit/storage/note`, { note: "x" })).status,
       ).toBe(404);
+      for (const inherited of ["__proto__", "toString", "constructor"]) {
+        expect(
+          (await patchNote(`${base}/projects/${inherited}/cron/audit/storage/note`, { note: "x" }))
+            .status,
+        ).toBe(404);
+        expect((await patchNote(note(inherited), { note: "x" })).status).toBe(404);
+      }
       expect(existsSync(join(dataDir, "cron-storage"))).toBe(false);
       expect((await patchNote(note("audit"), { note: 1 })).status).toBe(400);
       expect((await patchNote(note("audit"), { note: "x", extra: true })).status).toBe(400);

@@ -19,7 +19,7 @@ import {
 import type { CronSpawnOrigin, CronStorageView } from "./types.js";
 
 const CRON_STORAGE_ROOT = "cron-storage";
-export const CRON_STORAGE_NOTE = "note.md";
+const CRON_STORAGE_NOTE = "note.md";
 const NOTE_TEMP_RE = /^\.note-[0-9a-f]{16}\.tmp$/;
 
 /** A storage level exists but is a symlink or not a directory. */
@@ -40,7 +40,11 @@ export function isCronSpawnOrigin(value: unknown): value is CronSpawnOrigin {
   );
 }
 
-function storageLevels(dataDir: string, projectId: string, triggerId: string): string[] {
+function storageLevels(
+  dataDir: string,
+  projectId: string,
+  triggerId: string,
+): [string, string, string] {
   for (const id of [projectId, triggerId]) {
     if (!PROJECT_ID_PATTERN.test(id)) {
       throw new Error(`Invalid cron storage id: ${JSON.stringify(id)}`);

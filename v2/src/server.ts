@@ -1894,8 +1894,13 @@ export async function startServer(
           sendError(response, 400, "Invalid cron storage project or trigger id");
           return;
         }
-        const project = service.config.projects[ids.projectId];
-        const trigger = project?.triggers[ids.triggerId];
+        const project = Object.hasOwn(service.config.projects, ids.projectId)
+          ? service.config.projects[ids.projectId]
+          : undefined;
+        const trigger =
+          project && Object.hasOwn(project.triggers, ids.triggerId)
+            ? project.triggers[ids.triggerId]
+            : undefined;
         if (
           !trigger ||
           !("spawn" in trigger) ||

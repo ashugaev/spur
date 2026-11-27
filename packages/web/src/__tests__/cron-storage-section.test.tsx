@@ -180,9 +180,11 @@ describe("CronStorageSection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Save" })).toBeDisabled());
     expect(screen.getByRole("button", { name: "Clear storage" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Storage note" })).toHaveAttribute("readonly");
     finish?.(jsonResponse({ error: "Cron storage path is not a real directory" }, 409));
     expect(await screen.findByRole("alert")).toHaveTextContent("not a real directory");
     expect(screen.getByRole("textbox", { name: "Storage note" })).toHaveValue("next");
+    expect(screen.getByRole("textbox", { name: "Storage note" })).not.toHaveAttribute("readonly");
     expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
   });
 
