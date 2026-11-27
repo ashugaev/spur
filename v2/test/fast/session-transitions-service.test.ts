@@ -1022,6 +1022,74 @@ describe("session transitions service", () => {
     ).toContain("stopped");
   });
 
+  it("does not repair an old store's record after the data directory is rebound", async () => {
+    const diagnostic = { exists: false, missing: false, diagnostic: "workspace stat failed" };
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed", retainInList: true }));
+    probeWorkspaceMock.mockReturnValue(diagnostic);
+    await service.list({ includeCompleted: true });
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    await restart();
+    const nextDir = join(TEST_DATA_DIR, "next");
+    metadata.writeSession(nextDir, record({ status: "stopped", stopReason: "manual_pause" }));
+    const internals = service as unknown as {
+      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+    };
+    const original = internals.enrichWithClassified.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (...args) => {
+      await held;
+      return original(args[0], ...args.slice(1));
+    });
+    const repair = sessionServiceInternals(service).repairBootKeptErrors();
+    service.applyConfig({ ...config, dataDir: nextDir }, []);
+    release();
+    await repair;
+    expect(binding().store.observedState("api-1")).toBe("stopped");
+    expect((await poll({ kinds: ["state"] })).entries.map((entry) => entry.to)).toEqual([
+      "stopped",
+    ]);
+  });
+
+  it("drops a repair whose observed error was already replaced by a list", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed",
+    });
+    await service.list({ includeCompleted: true });
+    expect(binding().store.observedState("api-1")).toBe("error");
+    await restart();
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const repair = sessionServiceInternals(service).repairBootKeptErrors();
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    await service.list({ includeCompleted: true });
+    expect(binding().store.observedState("api-1")).toBe("stopped");
+    release();
+    await repair;
+    expect(binding().store.observedState("api-1")).toBe("stopped");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["stopped"]);
+  });
+
   it("repairs a boot-kept error on a killed record once the diagnostic is gone", async () => {
     metadata.writeSession(TEST_DATA_DIR, record({ status: "killed", retainInList: true }));
     probeWorkspaceMock.mockReturnValue({

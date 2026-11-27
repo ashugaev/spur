@@ -13168,6 +13168,7 @@ export class SessionService {
     record: SessionRecord,
     claudeAccounts: { id: string; label?: string; authenticated: boolean }[] | undefined,
     listing: SessionRecord[],
+    stillCurrent?: () => boolean,
   ): Promise<
     Awaited<ReturnType<SessionService["enrichWithClassified"]>> & {
       receipt: SessionLifecycleSnapshot;
@@ -13176,7 +13177,7 @@ export class SessionService {
     const receipt = this.lifecycle.snapshot(record.id);
     const clearRevision = this.rateLimitClearRevisions.get(record.id) ?? 0;
     const configGeneration = this.configGeneration;
-    const enriched = await this.enrichWithClassified(record, claudeAccounts, listing);
+    const enriched = await this.enrichWithClassified(record, claudeAccounts, listing, stillCurrent);
     if (
       enriched.source !== null &&
       !enriched.detectionOnlyError &&
@@ -13217,6 +13218,7 @@ export class SessionService {
         !isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false),
       "repair_failed",
       this.bootRepairGate,
+      true,
     );
   }
 
@@ -13224,8 +13226,12 @@ export class SessionService {
     pick: (record: SessionRecord) => boolean,
     failureEvent: "warm_failed" | "repair_failed",
     gate: ReturnType<typeof createConcurrencyGate>,
+    // A repair only publishes while the `error` it set out to repair is still
+    // the observed state of the same record in the same store.
+    repairsObservedError = false,
   ): Promise<void> {
     try {
+      const configGeneration = this.configGeneration;
       const listing = listSessions(this.config.dataDir);
       const records = listing.filter((record) => !this.isLiveSessionRecord(record) && pick(record));
       if (records.length === 0) return;
@@ -13233,10 +13239,19 @@ export class SessionService {
       await Promise.all(
         records.map((record) =>
           gate.run(async () => {
-            if (this.isDeliveryStopped()) return;
+            if (this.isDeliveryStopped() || this.configGeneration !== configGeneration) return;
+            const revision = this.lifecycle.snapshot(record.id).revision;
+            const stillCurrent = repairsObservedError
+              ? () =>
+                  this.configGeneration === configGeneration &&
+                  this.transitionsBinding?.store.observedState(record.id) === "error" &&
+                  readSession(this.config.dataDir, record.id) === record &&
+                  this.lifecycle.snapshot(record.id).revision === revision
+              : undefined;
             try {
-              await this.enrichFullView(record, claudeAccounts, listing);
+              await this.enrichFullView(record, claudeAccounts, listing, stillCurrent);
             } catch (error) {
+              if (stillCurrent && !stillCurrent()) return;
               this.logListEnrichFailed(record.id, error);
             }
           }),
@@ -31325,6 +31340,9 @@ export class SessionService {
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
+    // A background repair passes the check that its observation is still the
+    // current one; it runs where the record is re-read, before any state publish.
+    stillCurrent?: () => boolean,
   ): Promise<{
     view: Omit<SessionListItemView, "lifecycle">;
     classified: SessionStateResult;
@@ -31360,6 +31378,7 @@ export class SessionService {
     const project = this.resolveProjectForSession(session);
     const tokenUsageView = this.deriveTokenUsageView(session);
     const sidecars = await this.sidecarViews(session, project);
+    if (stillCurrent && !stillCurrent()) throw new Error("Observation superseded");
     // Also reclassify a record that ended while this classification ran: the
     // write hook already published its terminal edge, and the in-hand state
     // predates it.
@@ -31369,7 +31388,7 @@ export class SessionService {
       (latest && isTerminalSessionStatus(latest.status) && !inputTerminal)
     ) {
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
-      return this.enrichWithClassified(latest, claudeAccounts, sessionBatch);
+      return this.enrichWithClassified(latest, claudeAccounts, sessionBatch, stillCurrent);
     }
     const reported = this.withReportingError(session);
     const reportingConsistent = isDeepStrictEqual(reported, session);
