@@ -84,7 +84,7 @@ Claude and Codex still need a login under your own account (`claude`, or `codex 
 
 ## Private access (Tailscale, opt-in)
 
-Plain `spur init` never installs Tailscale and never calls sudo; web stays on `127.0.0.1`. `spur init --tailscale` sets up private web access over your tailnet — your devices only, never public.
+Plain `spur init` never installs Tailscale and never calls sudo. A fresh install stays on `127.0.0.1`; an existing tailnet bind is kept, and `spur init --no-tailscale` removes it. `spur init --tailscale` sets up private web access over your tailnet — your devices only, never public.
 
 `--tailscale` needs root or sudo when Tailscale is not installed; without a terminal it needs passwordless sudo. It checks this before changing anything. Re-running plain `spur init` keeps an existing tailnet bind.
 

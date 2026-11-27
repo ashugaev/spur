@@ -687,9 +687,21 @@ assert_no_log "$FAKE_BIN" curl
 assert_no_log "$FAKE_BIN" sudo
 assert_loopback
 assert_out "$OUT_FILE" "npm-init:   Tailscale: not found, bind skipped"
-assert_out "$OUT_FILE" "npm-init: info: Tailscale is not installed; web UI is now on 127.0.0.1 only. To restore the tailnet bind: spur init --tailscale"
+assert_out "$OUT_FILE" "npm-init: info: Tailscale is not installed; web UI moves to 127.0.0.1 only when spur-web restarts. To restore the tailnet bind: spur init --tailscale"
+refute_out "$OUT_FILE" "web UI is now on 127.0.0.1 only"
 refute_out "$OUT_FILE" "Tailscale is not up"
 echo "npm-init.test.sh: keep-bind-binary-missing scenario OK"
+
+# keep-bind-started: services restart, so the web UI really is on loopback now.
+new_isolated_scenario keep-bind-started
+rm -f "$FAKE_BIN/sleep"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_BIN/sleep"
+printf '#!/usr/bin/env bash\necho 200\n' >"$FAKE_BIN/curl"
+chmod +x "$FAKE_BIN/sleep" "$FAKE_BIN/curl"
+run_isolated_init --keep-tailscale
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "keep-bind-started exited $rc"; }
+assert_out "$OUT_FILE" "npm-init: info: Tailscale is not installed; web UI is now on 127.0.0.1 only. To restore the tailnet bind: spur init --tailscale"
+echo "npm-init.test.sh: keep-bind-started scenario OK"
 
 # keep-bind-down: --keep-tailscale, Tailscale installed but not up.
 new_isolated_scenario keep-bind-down
@@ -705,7 +717,7 @@ run_isolated_init --no-start --keep-tailscale
 assert_no_log "$FAKE_BIN" curl
 assert_loopback
 assert_out "$OUT_FILE" "npm-init:   Tailscale: not up"
-assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI is now on 127.0.0.1 only. To restore the tailnet bind: sudo tailscale up, then spur init --tailscale"
+assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI moves to 127.0.0.1 only when spur-web restarts. To restore the tailnet bind: sudo tailscale up, then spur init --tailscale"
 echo "npm-init.test.sh: keep-bind-down scenario OK"
 
 # keep-bind-stopped: `ip -4` still answers a cached 100.x after `tailscale
@@ -717,7 +729,7 @@ TS_STATUS_RC=1 run_isolated_init --no-start --keep-tailscale
 [ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "keep-bind-stopped exited $rc"; }
 assert_loopback
 assert_out "$OUT_FILE" "npm-init:   Tailscale: not up"
-assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI is now on 127.0.0.1 only."
+assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI moves to 127.0.0.1 only when spur-web restarts."
 assert_no_log "$FAKE_BIN" curl
 echo "npm-init.test.sh: keep-bind-stopped scenario OK"
 
@@ -745,7 +757,7 @@ chmod +x "$FAKE_BIN/curl"
 run_isolated_init --no-start --tailscale
 [ "$rc" -eq 1 ] || { cat "$OUT_FILE" >&2; fail "opt-in-install-fail must exit 1, got $rc"; }
 grep -q 'tailscale.com/install.sh' "$FAKE_BIN/../curl.log" || fail "--tailscale must run the install script"
-assert_out "$OUT_FILE" "npm-init: Tailscale install failed; no units changed, running services left as they were, web UI not on the tailnet. Install Tailscale manually (https://tailscale.com/download), then re-run: spur init --tailscale"
+assert_out "$OUT_FILE" "npm-init: Tailscale install failed; no units changed, running services and any existing tailnet bind left as they were. Install Tailscale manually (https://tailscale.com/download), then re-run: spur init --tailscale"
 [ ! -e "$UNIT_DIR" ] || fail "units must not be written when the Tailscale install fails"
 refute_out "$OUT_FILE" "npm-init: summary:"
 echo "npm-init.test.sh: opt-in-install-fail scenario OK"

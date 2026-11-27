@@ -142,7 +142,7 @@ tailscale_install_result="already installed"
 if [[ "$EXPOSE_WEB" -eq 0 && "$TAILSCALE" == "install" ]] && ! command -v tailscale >/dev/null 2>&1; then
   echo "npm-init: tailscale not found, installing (curl -fsSL https://tailscale.com/install.sh | sh)"
   curl -fsSL https://tailscale.com/install.sh | sh ||
-    die "Tailscale install failed; no units changed, running services left as they were, web UI not on the tailnet. Install Tailscale manually (https://tailscale.com/download), then re-run: spur init --tailscale"
+    die "Tailscale install failed; no units changed, running services and any existing tailnet bind left as they were. Install Tailscale manually (https://tailscale.com/download), then re-run: spur init --tailscale"
   tailscale_install_result="installed"
 fi
 
@@ -192,6 +192,11 @@ fi
 # --tailscale; no other mode installs or elevates.
 tailscale_result="not requested"
 info_lines=()
+# With --no-start the unit is rewritten but the running web process is not.
+keep_web_state="web UI is now on 127.0.0.1 only"
+if [[ "$NO_START" -eq 1 ]]; then
+  keep_web_state="web UI moves to 127.0.0.1 only when spur-web restarts"
+fi
 if [[ "$EXPOSE_WEB" -eq 1 ]]; then
   tailscale_result="skipped (--expose-web)"
 elif [[ "$TAILSCALE" != "off" ]]; then
@@ -228,13 +233,13 @@ elif [[ "$TAILSCALE" != "off" ]]; then
   elif [[ "$have_tailscale" -eq 1 ]]; then
     tailscale_result="not up"
     if [[ "$TAILSCALE" == "keep" ]]; then
-      info_lines+=("Tailscale is not up; web UI is now on 127.0.0.1 only. To restore the tailnet bind: sudo tailscale up, then spur init --tailscale")
+      info_lines+=("Tailscale is not up; $keep_web_state. To restore the tailnet bind: sudo tailscale up, then spur init --tailscale")
     else
       info_lines+=("Tailscale is not up; web UI stays on 127.0.0.1. For remote access: sudo tailscale up, then spur init --tailscale")
     fi
   else
     tailscale_result="not found, bind skipped"
-    info_lines+=("Tailscale is not installed; web UI is now on 127.0.0.1 only. To restore the tailnet bind: spur init --tailscale")
+    info_lines+=("Tailscale is not installed; $keep_web_state. To restore the tailnet bind: spur init --tailscale")
   fi
 fi
 
