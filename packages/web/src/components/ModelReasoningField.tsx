@@ -123,7 +123,7 @@ export function ModelReasoningField({
         }}
       />
       {attention ? (
-        <span className="w-full text-[10px] uppercase tracking-[0.1em] text-[var(--color-status-attention)]">
+        <span className="w-full text-label uppercase tracking-label text-[var(--color-status-attention)]">
           {attention}
         </span>
       ) : null}

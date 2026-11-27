@@ -408,7 +408,8 @@ describe("snapshot reads", () => {
       "owner new",
     ]);
     expect(entries.map((entry) => entry.status)).toEqual(["completed", "completed", "stopped"]);
-    expect(entries.map((entry) => entry.state)).toEqual([null, null, "waiting"]);
+    // Ended records publish their status-derived state at write time.
+    expect(entries.map((entry) => entry.state)).toEqual(["stopped", "stopped", "waiting"]);
     expect(entries[2]?.snapshot.version).toBe(2);
     expect(entries[0]?.snapshot.freshness).toMatchObject({ activitySince: null, stale: false });
   });

@@ -204,7 +204,7 @@ describe("snippet-srcdoc", () => {
 });
 
 describe("theme token parity", () => {
-  const css = readFileSync(resolve(__dirname, "../app/globals.css"), "utf8");
+  const css = readFileSync(resolve(__dirname, "../design/tokens.css"), "utf8");
   const darkStart = css.indexOf("@theme");
   const lightStart = css.indexOf(':root[data-theme="light"]');
   const dark = css.slice(darkStart, lightStart);

@@ -6,7 +6,7 @@ const TONE_CLASS = {
   neutral:
     "h-8 w-8 border-[var(--color-border-strong)] text-[var(--color-text-secondary)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]",
   error:
-    "h-[26px] w-[26px] border-[var(--color-chip-error-border)] text-[var(--color-chip-error-text)] hover:bg-[var(--color-hover-overlay)]",
+    "h-[26px] w-[26px] border-[var(--color-status-error-border)] text-[var(--color-status-error)] hover:bg-[var(--color-hover-overlay)]",
 } as const;
 
 /** Square icon button that hands a sign-in to a native terminal. */

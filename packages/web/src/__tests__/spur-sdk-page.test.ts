@@ -1,7 +1,8 @@
 // @vitest-environment node
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import nextConfig from "../../next.config.js";
 import { flush, pageRig, sdkSource } from "./fixtures/spur-sdk-rig";
 
 // Page transport stays at the Page root, including nested documents.
@@ -171,10 +172,7 @@ describe("page transport", () => {
   });
 
   it("palette stylesheet defines the fixed tones as light-dark pairs", () => {
-    const css = readFileSync(
-      resolve(__dirname, "../../public/spur/spur-page-theme.v2.css"),
-      "utf8",
-    );
+    const css = readFileSync(resolve(__dirname, "../../public/spur/spur-page-theme.css"), "utf8");
     for (const token of [
       "text-tertiary",
       "status-error",
@@ -185,6 +183,29 @@ describe("page transport", () => {
       expect(css).toMatch(
         new RegExp(`--spur-${token}: light-dark\\(#[0-9a-f]{6}, #[0-9a-f]{6}\\)`),
       );
+    }
+  });
+
+  it("routes the stable page theme URL to the single baseline asset", async () => {
+    if (!nextConfig.rewrites) throw new Error("page asset rewrites missing");
+    const rewrites = await nextConfig.rewrites();
+    if (!Array.isArray(rewrites)) throw new Error("page asset rewrites must be an array");
+    const themeRewrites = rewrites.filter(
+      ({ source, destination }) =>
+        source === "/p/:id/_spur/theme.css" ||
+        source.includes("spur-page-theme") ||
+        destination.includes("spur-page-theme"),
+    );
+    expect(themeRewrites).toEqual([
+      { source: "/p/:id/_spur/theme.css", destination: "/spur/spur-page-theme.css" },
+    ]);
+    expect(
+      existsSync(resolve(__dirname, "../../public", themeRewrites[0]!.destination.slice(1))),
+    ).toBe(true);
+    for (const version of ["v1", "v2"]) {
+      expect(
+        existsSync(resolve(__dirname, `../../public/spur/spur-page-theme.${version}.css`)),
+      ).toBe(false);
     }
   });
 

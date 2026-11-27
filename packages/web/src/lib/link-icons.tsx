@@ -725,7 +725,7 @@ export function ReviewersBadge({ info }: { info: PrInfo }) {
       data-pr-reviewers
       role="img"
       aria-label={reviewersSummary(info)}
-      className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${color}`}
+      className={`inline-flex items-center gap-0.5 text-label font-bold ${color}`}
     >
       <svg
         aria-hidden="true"
@@ -757,7 +757,7 @@ export function ReviewCommentsBadge({ total, unresolved }: { total: number; unre
     : `${total} resolved thread${total === 1 ? "" : "s"}`;
   return (
     <span
-      className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${color}`}
+      className={`inline-flex items-center gap-0.5 text-label font-bold ${color}`}
       title={title}
     >
       <svg

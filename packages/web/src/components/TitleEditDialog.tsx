@@ -81,7 +81,7 @@ export function TitleEditDialog({
     >
       <div
         ref={panelRef}
-        className="w-[min(22rem,calc(100vw-2rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]"
+        className="w-[min(22rem,calc(100vw-2rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-raised"
       >
         <div className="mb-3 flex items-center justify-between gap-3">
           <h2
@@ -106,7 +106,7 @@ export function TitleEditDialog({
             <input
               id="session-title-edit"
               ref={inputRef}
-              className="min-w-0 flex-1 border-none bg-transparent py-1 font-bold uppercase text-[var(--color-input-text)] outline-none"
+              className="min-w-0 flex-1 border-none bg-transparent py-1 font-bold uppercase text-[var(--color-text-primary)] outline-none"
               disabled={saving}
               onChange={(event) => onDraftChange(event.target.value)}
               value={draft}

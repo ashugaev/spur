@@ -841,7 +841,6 @@ vi.mock("../../src/metadata.js", async (importOriginal) => {
   actualMetadataModule = actual;
   return {
     observeSessionWrites: actual.observeSessionWrites,
-    withSessionWriteGuard: actual.withSessionWriteGuard,
     deletePendingSendBatch: actual.deletePendingSendBatch,
     deletePendingSendBatchConditional: actual.deletePendingSendBatchConditional,
     deletePendingSpawnWork: actual.deletePendingSpawnWork,
@@ -1472,6 +1471,14 @@ type SessionServiceInternals = {
   withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
   withSessionLifecycleLocks<T>(sessionIds: readonly string[], task: () => Promise<T>): Promise<T>;
   enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
+  dashboardCache: Map<string, { id: string; state: SessionState }>;
+  runDashboardCacheTick(): Promise<void>;
+  startDashboardCacheLoop(): void;
+  warmFullViewCache(): Promise<void>;
+  repairBootKeptErrors(): Promise<void>;
+  fullViewCache: Map<string, { input: SessionRecord }>;
+  fullViewCacheReady: Promise<void> | null;
+  listedActivityHighWater: Map<string, string>;
   classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },
@@ -1547,6 +1554,21 @@ type SessionServiceInternals = {
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
   return service as SessionServiceInternals;
+}
+
+// Records the ids `enrichWithClassified` runs for; `onEnrich` fires per call.
+function enrichedIds(service: unknown, onEnrich?: () => void) {
+  const internals = service as {
+    enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+  };
+  const original = internals.enrichWithClassified.bind(internals);
+  const ids: string[] = [];
+  const spy = vi.spyOn(internals, "enrichWithClassified").mockImplementation((record, ...rest) => {
+    ids.push(record.id);
+    onEnrich?.();
+    return original(record, ...rest);
+  });
+  return { ids, restore: () => spy.mockRestore() };
 }
 
 // Typed, because vitest's `toBe` accepts any expected value: renaming an outcome
@@ -2458,6 +2480,7 @@ export {
   findLatestClaudeSessionFileMock,
   runningSession,
   sessionServiceInternals,
+  enrichedIds,
   SUBMITTED,
   SUBMIT_UNCONFIRMED,
 };
