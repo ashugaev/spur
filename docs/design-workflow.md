@@ -8,7 +8,7 @@ Use for visible `packages/web` changes, in any agent runtime.
 4. Session has Telegram: also send screenshot as an image attachment and mirror the request; route text/buttons and screenshot per [telegram skill](../.agents/skills/telegram/SKILL.md). Missing Telegram never blocks.
 5. Record matching user approval before dependent implementation. Prior approval covering scope counts; screenshot proof still required.
 
-Keep preview code in artifacts. Follow [frontend-codestyle](../.agents/skills/frontend-codestyle/SKILL.md) for components and tokens.
+Keep preview code in artifacts. Follow [design-system](../.agents/skills/design-system/SKILL.md) for components and tokens.
 
 Route approval and gate order through [manager](../.agents/skills/manager/SKILL.md) and [agent protocol](../.agents/skills/github/references/agent-protocol.md). Review implemented UI through `designer`.
 

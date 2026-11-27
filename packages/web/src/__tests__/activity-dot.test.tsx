@@ -6,14 +6,14 @@ describe("ActivityDot", () => {
   it("renders completed tasks with a ready badge without pulsing", () => {
     const { container } = render(<ActivityDot activity="completed" />);
     expect(screen.getByText("completed")).toHaveStyle({ color: "var(--color-status-ready)" });
-    expect(container.firstChild).toHaveStyle({ background: "var(--color-dot-bg-ready)" });
+    expect(container.firstChild).toHaveStyle({ background: "var(--color-status-ready-bg)" });
     expect(container.querySelector(".dot-pulse")).toBeNull();
   });
 
   it("renders closed sessions with an inactive badge", () => {
     const { container } = render(<ActivityDot activity="closed" />);
     expect(screen.getByText("closed")).toBeInTheDocument();
-    expect(container.firstChild).toHaveStyle({ background: "var(--color-dot-bg-inactive)" });
+    expect(container.firstChild).toHaveStyle({ background: "var(--color-status-inactive-bg)" });
   });
   it("renders a distinct budget limited label", () => {
     render(<ActivityDot activity="budget_limited" />);
@@ -36,7 +36,7 @@ describe("ActivityDot", () => {
 
   it("renders 'stale' for the stale activity with no pulse", () => {
     render(<ActivityDot activity="stale" dotOnly />);
-    const dot = document.querySelector(".shrink-0.rounded-full");
+    const dot = document.querySelector(".shrink-0.rounded-dot");
     expect(dot).not.toBeNull();
     expect(dot).not.toHaveClass("dot-pulse");
   });

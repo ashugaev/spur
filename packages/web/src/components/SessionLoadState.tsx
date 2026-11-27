@@ -112,7 +112,7 @@ export function SessionLoadState({ failure, onRetry }: SessionLoadStateProps) {
               </p>
             </div>
           </div>
-          <p className="mt-3 whitespace-pre-wrap break-words border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
+          <p className="mt-3 whitespace-pre-wrap break-words border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-3 py-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
             {failure.message}
           </p>
           <div className="mt-3 flex items-center justify-end">

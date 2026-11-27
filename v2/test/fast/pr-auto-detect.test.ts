@@ -111,6 +111,7 @@ vi.mock("../../src/session-transitions.js", () => ({
   SessionTransitions: class {
     observeStatus = vi.fn();
     observeState = vi.fn();
+    observedStatus = vi.fn();
     observedState = vi.fn();
   },
 }));

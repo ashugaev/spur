@@ -330,7 +330,6 @@ import {
   writeServiceInstance,
   writeSession,
   observeSessionWrites,
-  withSessionWriteGuard,
   listArchivedSessions,
 } from "./metadata.js";
 import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
@@ -759,14 +758,42 @@ import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./up
 
 // Concurrent freshness reads for one by-link snapshot request.
 const SNAPSHOT_READ_CONCURRENCY = 4;
-// Concurrent session enrichments in one transitions-feed refresh pass.
-const TRANSITIONS_ENRICH_CONCURRENCY = 4;
-// `input` is the record classification read; `source` the record re-read after it.
-type TransitionsRefreshRow = {
+// Concurrent session enrichments across all full-view list requests.
+const FULL_LIST_ENRICH_CONCURRENCY = 8;
+// The boot error repair runs alone, off the full-list gate.
+const BOOT_REPAIR_ENRICH_CONCURRENCY = 1;
+// Full-view fields recomputed on every cache hit; the rest is cached with the row.
+const REQUEST_SCOPED_KEYS = [
+  "pr",
+  "slots",
+  "deskGroupMembers",
+  "claudeAccounts",
+  "auth",
+  "authError",
+  "activeClaudeAccountId",
+  "workspaceExists",
+  "workspaceAccess",
+] as const;
+type RequestScopedKey = (typeof REQUEST_SCOPED_KEYS)[number];
+function omitRequestScoped(
+  view: Omit<SessionListItemView, "lifecycle">,
+): Omit<SessionListItemView, "lifecycle" | RequestScopedKey> {
+  const scoped: readonly string[] = REQUEST_SCOPED_KEYS;
+  return Object.fromEntries(Object.entries(view).filter(([key]) => !scoped.includes(key))) as Omit<
+    SessionListItemView,
+    "lifecycle" | RequestScopedKey
+  >;
+}
+// `input` is the listed record the view was classified from; a hit needs the
+// same object, which every record write replaces.
+type FullViewCacheEntry = {
+  input: SessionRecord;
   view: Omit<SessionListItemView, "lifecycle">;
   source: SessionRecord | null;
   receipt: SessionLifecycleSnapshot;
-  input: SessionRecord;
+  clearRevision: number;
+  configGeneration: number;
+  cachedAt: number;
 };
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const STATUS_DETECTION_ERROR_PREFIX = "Session status detection failed: ";
@@ -898,7 +925,7 @@ const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const AGENT_SESSION_ID_PERSIST_BACKOFF_MS = 60_000;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
-const ATTENTION_POLL_INTERVAL_MS = 5_000;
+export const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const TODO_NUDGE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const TODO_NUDGE_BACKOFF_MAX_MS = 30 * 60 * 1000;
 // Shared derivation, one path for every collapseWindowMs-scaled backoff
@@ -1920,6 +1947,11 @@ function statusFallbackState(
   )
     return "stopped";
   return "working"; // running, spawning
+}
+
+// State of a record that is not live: nothing to probe, the record decides.
+function statusDerivedState(session: SessionRecord): SessionState {
+  return hasRetainedSessionError(session) ? "error" : statusFallbackState(session);
 }
 
 // True only while a reported rate limit is both flagged AND, when it carries
@@ -4211,6 +4243,20 @@ export class SessionService {
   private dashboardCacheTimer: NodeJS.Timeout | null = null;
   private dashboardLoopRunning: boolean = false;
   private dashboardCacheReady: Promise<void> | null = null;
+  // Non-live full-view rows, so `list` classifies live rows and misses only.
+  private readonly fullViewCache = new Map<string, FullViewCacheEntry>();
+  private readonly fullListGate = createConcurrencyGate(FULL_LIST_ENRICH_CONCURRENCY);
+  private readonly bootRepairGate = createConcurrencyGate(BOOT_REPAIR_ENRICH_CONCURRENCY);
+  private fullViewCacheReady: Promise<void> | null = null;
+  private readonly listedActivityHighWater = new Map<string, string>();
+  // Counts each session's status changes seen by the write hook. A state
+  // publication whose classification began at another epoch is stale, even when
+  // the status came back (pause then resume). Field-only writes do not count, so
+  // the classifier's own readout and healing writes never trip it.
+  private readonly statusEpochs = new Map<string, number>();
+  private readonly lastWrittenStatuses = new Map<string, SessionStatus>();
+  // Bumped by applyConfig: an enrichment started before a reload never serves after it.
+  private configGeneration = 0;
   private reaperTimer: NodeJS.Timeout | null = null;
   private reaperRunning = false;
   // Round-robin offset into the terminal-session list, advanced by each
@@ -4265,13 +4311,7 @@ export class SessionService {
         dataDir: string;
         store: SessionTransitions;
         unregister: () => void;
-        // Terminal records a strict refresh fully observed, keyed by id. `record` is
-        // the session-file cache object, so identity means the file is unchanged.
-        settled: Map<string, { record: SessionRecord; revision: number; state: SessionState }>;
       }
-    | undefined;
-  private transitionsRefresh:
-    | { binding: NonNullable<SessionService["transitionsBinding"]>; run: Promise<void> }
     | undefined;
   // Local (in-worktree) project config resolved per session. The 2s dashboard
   // tick resolves a project for every session, so without this each tick
@@ -4646,6 +4686,8 @@ export class SessionService {
     this.startSidecarReaper();
     this.startMemoryShedLoop();
     this.dashboardCacheReady = this.trackBackgroundLoop(this.runDashboardCacheTick());
+    this.fullViewCacheReady = this.trackBackgroundLoop(this.warmFullViewCache());
+    this.startBootErrorRepair();
     this.startDashboardCacheLoop();
     this.startReaperLoop();
     this.startSessionGcLoop();
@@ -6716,6 +6758,8 @@ export class SessionService {
     // Local project configs are parsed with the daemon config as defaults, so
     // every cached resolution is stale the moment the daemon config changes.
     this.sessionProjectCache.clear();
+    this.fullViewCache.clear();
+    this.configGeneration += 1;
     this.registryPaths = nextRegistryPaths;
     setTmuxSocketName(this.config.tmux.socketName);
     mkdirSync(this.config.dataDir, { recursive: true });
@@ -6725,6 +6769,7 @@ export class SessionService {
       this.transitionsBinding?.unregister();
       this.transitionsBinding = undefined;
       this.stateCache.clear();
+      this.listedActivityHighWater.clear();
       this.stateHistory.clear();
       this.claudeJsonlReaders.clear();
       this.lastClassifiedLogStates.clear();
@@ -6740,17 +6785,72 @@ export class SessionService {
         dataDir,
         store,
         unregister: () => {},
-        settled: new Map(),
+      };
+      // A non-live record's state follows its status, so the write publishes both
+      // edges; running records publish state from background classification.
+      const publishEdges = (record: SessionRecord, derived: SessionState | undefined): void => {
+        this.publishSessionTransition(record, () => {
+          const links = this.displaySlotsForSession(record)?.links ?? [];
+          try {
+            store.observeStatus(record, links);
+          } finally {
+            if (derived) store.observeState(record, derived, links);
+          }
+        });
+      };
+      // The one state rule for hook and boot. An unchanged status keeps an
+      // observed `error`: a workspace diagnostic is better evidence than the
+      // status-derived state. Any other divergence is a lost append and gets
+      // repaired. Running records publish nothing here.
+      // A write that clears the record's own retained error (pause) is a real
+      // recovery, so `recordErrored` remembers which records carried one.
+      const recordErrored = new Set<string>();
+      const writeDerivedState = (record: SessionRecord): SessionState | undefined => {
+        const retained = hasRetainedSessionError(record);
+        const clearedError = recordErrored.delete(record.id) && !retained;
+        if (retained) recordErrored.add(record.id);
+        if (this.isLiveSessionRecord(record)) return undefined;
+        const keepObserved =
+          !clearedError &&
+          store.observedStatus(record.id) === record.status &&
+          store.observedState(record.id) === "error";
+        return keepObserved ? undefined : statusDerivedState(record);
       };
       binding.unregister = observeSessionWrites(dataDir, (record) => {
         if (this.transitionsBinding !== binding) return;
-        const links = this.displaySlotsForSession(record)?.links ?? [];
-        this.publishSessionTransition(record, () => store.observeStatus(record, links));
+        // A new status bumps the session's epoch (see statusEpochs). Compared with
+        // the last record seen here, not the journal, which a failed append lags.
+        if (this.lastWrittenStatuses.get(record.id) !== record.status) {
+          this.statusEpochs.set(record.id, (this.statusEpochs.get(record.id) ?? 0) + 1);
+          this.lastWrittenStatuses.set(record.id, record.status);
+        }
+        const derived = writeDerivedState(record);
+        try {
+          publishEdges(record, derived);
+        } finally {
+          // Journal failure must not drop the in-memory history or subscriptions.
+          if (derived && !this.isDeliveryStopped()) {
+            void this.recordStateHistory(record, derived, "status", null).catch(
+              (error: unknown) => {
+                this.logEvent("session.state.history_failed", {
+                  level: "warn",
+                  sessionId: record.id,
+                  projectId: record.project,
+                  message: error instanceof Error ? error.message : String(error),
+                });
+              },
+            );
+          }
+        }
       });
       this.transitionsBinding = binding;
       for (const record of listSessions(dataDir)) {
-        store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
+        // Seeded so the first field-only write of an existing session is no status change.
+        this.lastWrittenStatuses.set(record.id, record.status);
+        publishEdges(record, writeDerivedState(record));
       }
+      // A rebind boots the new store like a restart; the initial start covers the first one.
+      if (this.backgroundLoopsStarted) this.startBootErrorRepair();
     }
     const removeIds = new Set(options.unconfiguredToRemove ?? []);
     mutateConfigRegistry(this.config.dataDir, (current) => ({
@@ -7187,6 +7287,7 @@ export class SessionService {
           return undefined;
         // List callers (lastBuild) drop the one row that cannot be rebuilt
         // instead of failing the whole listing; refuse callers keep the throw.
+        if (options.signal?.aborted) throw error;
         if (options.onExhausted === "lastBuild" && !(error instanceof SessionLifecycleError)) {
           this.logListEnrichFailed(record.id, error);
           return undefined;
@@ -7617,11 +7718,28 @@ export class SessionService {
         this.codexPaneLimitObservedAt.delete(sessionId);
         this.lastClassifiedLogStates.delete(sessionId);
         this.stateCache.delete(sessionId);
+        const statusEpoch = this.statusEpochs.get(sessionId) ?? 0;
         const classified = await this.classifySessionRecord(cleared, {
           bypassClearBarrier: true,
           suppressMenuConfirmation: true,
           reconcileRuntime: false,
         });
+        // The status changed during the classification (it runs without runtime
+        // reconcile, so it never changes status itself): the write hook already
+        // published the edge, and this state is stale.
+        const logCleared = () =>
+          this.logEvent("session.rate_limit.cleared", {
+            level: "info",
+            sessionId,
+            projectId: latest.project,
+            message: `Rate limit cleared for ${sessionId}`,
+            details: { actor, force },
+          });
+        const ended = readSession(this.config.dataDir, sessionId);
+        if (ended && (this.statusEpochs.get(sessionId) ?? 0) !== statusEpoch) {
+          logCleared();
+          return { sessionId, state: statusDerivedState(ended), deliveryScheduled: false };
+        }
         const state = this.stabilizeState(sessionId, classified.state);
         await this.updateStateHistory(
           cleared,
@@ -7633,13 +7751,7 @@ export class SessionService {
         );
         const deliveryScheduled = state !== "rate_limited";
         if (deliveryScheduled) this.ensureDeliveryRunner(sessionId);
-        this.logEvent("session.rate_limit.cleared", {
-          level: "info",
-          sessionId,
-          projectId: latest.project,
-          message: `Rate limit cleared for ${sessionId}`,
-          details: { actor, force },
-        });
+        logCleared();
         return { sessionId, state, deliveryScheduled };
       } finally {
         this.rateLimitClearBarriers.delete(sessionId);
@@ -8659,6 +8771,7 @@ export class SessionService {
       // risk of being evicted on this same pass.
       const liveIds = new Set(liveSessions.map((session) => session.id));
       this.pruneSessionScopedState(liveIds);
+      this.pruneFullViewCache(new Set(allSessions.map((session) => session.id)));
       const claudeAccounts = await this.computeClaudeAccountsView();
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
@@ -8666,7 +8779,7 @@ export class SessionService {
         this.refreshSessionToolsOnce(session);
         try {
           this.warnIfTokenBudgetUnenforced(session);
-          const { view, classified, detectionOnlyError } = await this.enrichWithClassified(
+          const { view, classified, detectionOnlyError } = await this.enrichFullView(
             session,
             claudeAccounts,
             allSessions,
@@ -12936,8 +13049,14 @@ export class SessionService {
     links?: readonly { label: string; url?: string }[];
     signal?: AbortSignal | undefined;
   }): Promise<SessionListView[]> {
+    // Before the listing snapshot: a record written during the warm must not hit.
+    if (options?.view !== "dashboard" && this.fullViewCacheReady) await this.fullViewCacheReady;
     const allSessions = listSessions(this.config.dataDir);
-    this.lifecycle.prune(new Set(allSessions.map((session) => session.id)));
+    // The binding is replaced only when the data directory is rebound.
+    const binding = this.transitionsBinding;
+    const listedIds = new Set(allSessions.map((session) => session.id));
+    this.lifecycle.prune(listedIds);
+    this.pruneFullViewCache(listedIds);
     const included = (view: { id: string; status: SessionStatus; retainInList?: boolean }) =>
       isListedSessionView(
         view,
@@ -12991,38 +13110,234 @@ export class SessionService {
       return views.filter((view) => included(view) && matchesLinks(view));
     }
     const sessions = allSessions.filter(included);
+    const snapshotEpochs = new Map(
+      sessions.map((session) => [session.id, this.statusEpochs.get(session.id) ?? 0]),
+    );
     // Compute the claude accounts snapshot once for the whole batch instead of
     // per-session inside enrich.
     const claudeAccounts = await this.computeClaudeAccountsView();
     const rows = await Promise.all(
-      sessions.map(async (session) => {
-        const receipt = this.lifecycle.snapshot(session.id);
-        try {
-          const { view, source } = await this.enrichWithClassified(
-            session,
-            claudeAccounts,
-            allSessions,
-          );
-          return { view, source, receipt };
-        } catch (error) {
-          if (
-            error instanceof SessionResourceNotFoundError &&
-            !readSession(this.config.dataDir, session.id)
-          )
+      sessions.map((session) => {
+        const build = async () => {
+          try {
+            // The snapshot may predate a status change while it queued for a slot.
+            const current = this.latestIfStatusMoved(session, snapshotEpochs.get(session.id) ?? 0);
+            // Checked inside the gate slot: an entry can expire while queued.
+            const hit = this.fullViewHit(current);
+            return hit
+              ? await this.reuseFullView(current, hit, claudeAccounts, allSessions)
+              : await this.enrichFullView(current, claudeAccounts, allSessions);
+          } catch (error) {
+            if (
+              error instanceof SessionResourceNotFoundError &&
+              !readSession(this.config.dataDir, session.id)
+            )
+              return undefined;
+            if (error instanceof SessionLifecycleError) throw error;
+            this.logListEnrichFailed(session.id, error);
             return undefined;
-          if (error instanceof SessionLifecycleError) throw error;
-          this.logListEnrichFailed(session.id, error);
-          return undefined;
-        }
+          }
+        };
+        return this.fullListGate.run(() => {
+          options?.signal?.throwIfAborted();
+          return build();
+        });
       }),
     );
     const views = await this.finalizeLifecycleRows(
       rows.filter((row) => row !== undefined),
-      (record, listing) => this.enrichWithClassified(record, undefined, listing),
+      (record, listing) =>
+        this.fullListGate.run(() => {
+          options?.signal?.throwIfAborted();
+          return this.enrichWithClassified(record, undefined, listing);
+        }),
       { includePending: true, onExhausted: "lastBuild", signal: options?.signal },
     );
-    for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
+    for (const view of views) {
+      // A reload during this list may have rebound the data directory: these
+      // rows belong to the old store and must not feed the new high-water marks.
+      if (this.transitionsBinding === binding) this.keepListedActivityMonotonic(view);
+      this.guardSidecarViews(view.id, view.sidecars);
+    }
     return views.filter((view) => included(view) && matchesLinks(view));
+  }
+
+  // A listed row never reports an older lastActivityAt than an earlier full list
+  // did: tmux activity can drop out of the max once a pane dies.
+  private keepListedActivityMonotonic(view: { id: string; lastActivityAt: string }): void {
+    const previous = this.listedActivityHighWater.get(view.id);
+    if (previous !== undefined && Date.parse(previous) > Date.parse(view.lastActivityAt)) {
+      view.lastActivityAt = previous;
+    } else {
+      this.listedActivityHighWater.set(view.id, view.lastActivityAt);
+    }
+  }
+
+  // Takes every listed id, not the non-terminal set: ended rows stay cached.
+  private pruneFullViewCache(listedIds: ReadonlySet<string>): void {
+    for (const id of this.fullViewCache.keys()) {
+      if (!listedIds.has(id)) this.fullViewCache.delete(id);
+    }
+    for (const id of this.listedActivityHighWater.keys()) {
+      if (!listedIds.has(id)) this.listedActivityHighWater.delete(id);
+    }
+    for (const id of this.statusEpochs.keys()) {
+      if (!listedIds.has(id)) this.statusEpochs.delete(id);
+    }
+    for (const id of this.lastWrittenStatuses.keys()) {
+      if (!listedIds.has(id)) this.lastWrittenStatuses.delete(id);
+    }
+  }
+
+  private fullViewHit(record: SessionRecord): FullViewCacheEntry | undefined {
+    const entry = this.fullViewCache.get(record.id);
+    if (!entry || entry.input !== record || this.isLiveSessionRecord(record)) return undefined;
+    if (
+      entry.receipt.revision !== this.lifecycle.snapshot(record.id).revision ||
+      entry.clearRevision !== (this.rateLimitClearRevisions.get(record.id) ?? 0) ||
+      entry.configGeneration !== this.configGeneration
+    )
+      return undefined;
+    // The attention sweep skips ended records, so only age bounds their sidecars and services.
+    if (
+      isTerminalSessionStatus(record.status) &&
+      Date.now() - entry.cachedAt >= ATTENTION_POLL_INTERVAL_MS
+    )
+      return undefined;
+    return entry;
+  }
+
+  private async reuseFullView(
+    record: SessionRecord,
+    entry: FullViewCacheEntry,
+    claudeAccounts: { id: string; label?: string; authenticated: boolean }[],
+    listing: SessionRecord[],
+  ): Promise<Pick<FullViewCacheEntry, "view" | "source" | "receipt">> {
+    const { view } = entry;
+    const scoped = await this.requestScopedFields(
+      record,
+      { state: view.state, runtimeAlive: view.runtimeAlive },
+      claudeAccounts,
+      listing,
+    );
+    return {
+      view: { ...omitRequestScoped(view), ...scoped },
+      source: entry.source,
+      receipt: this.lifecycle.snapshot(record.id),
+    };
+  }
+
+  // Sole writer of the full-view cache: list misses, the warm and the attention sweep.
+  private async enrichFullView(
+    record: SessionRecord,
+    claudeAccounts: { id: string; label?: string; authenticated: boolean }[] | undefined,
+    listing: SessionRecord[],
+    stillCurrent?: () => boolean,
+  ): Promise<
+    Awaited<ReturnType<SessionService["enrichWithClassified"]>> & {
+      receipt: SessionLifecycleSnapshot;
+    }
+  > {
+    const receipt = this.lifecycle.snapshot(record.id);
+    const clearRevision = this.rateLimitClearRevisions.get(record.id) ?? 0;
+    const configGeneration = this.configGeneration;
+    const enriched = await this.enrichWithClassified(record, claudeAccounts, listing, stillCurrent);
+    if (
+      enriched.source !== null &&
+      !enriched.detectionOnlyError &&
+      !this.isLiveSessionRecord(record)
+    ) {
+      this.fullViewCache.set(record.id, {
+        input: record,
+        view: enriched.view,
+        source: enriched.source,
+        receipt,
+        clearRevision,
+        configGeneration,
+        cachedAt: Date.now(),
+      });
+    }
+    return { ...enriched, receipt };
+  }
+
+  // Never rejects: every full-view list awaits it.
+  private warmFullViewCache(): Promise<void> {
+    return this.enrichNonLiveRecords(
+      (record) => isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false),
+      "warm_failed",
+      this.fullListGate,
+    );
+  }
+
+  // Ended rows whose boot-kept `error` was observed before the restart get one
+  // real classification: a lost state append is repaired, a persistent
+  // diagnostic stays `error`. Not awaited by list: each row can walk its desk
+  // siblings. Never rejects.
+  private startBootErrorRepair(): void {
+    void this.trackBackgroundLoop(this.repairBootKeptErrors());
+  }
+
+  private repairBootKeptErrors(): Promise<void> {
+    const store = this.transitionsBinding?.store;
+    return this.enrichNonLiveRecords(
+      (record) =>
+        isTerminalSessionStatus(record.status) &&
+        store?.observedState(record.id) === "error" &&
+        !isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false),
+      "repair_failed",
+      this.bootRepairGate,
+      true,
+    );
+  }
+
+  private async enrichNonLiveRecords(
+    pick: (record: SessionRecord) => boolean,
+    failureEvent: "warm_failed" | "repair_failed",
+    gate: ReturnType<typeof createConcurrencyGate>,
+    // A repair only publishes while the `error` it set out to repair is still
+    // the observed state of the same record in the same store, with no state
+    // entry journaled since the job started.
+    repairsObservedError = false,
+  ): Promise<void> {
+    try {
+      // Only a data-directory rebind replaces the binding; a same-store reload
+      // keeps the job, whose observation guard covers staleness.
+      const binding = this.transitionsBinding;
+      const listing = listSessions(this.config.dataDir);
+      const records = listing.filter((record) => !this.isLiveSessionRecord(record) && pick(record));
+      if (records.length === 0) return;
+      const claudeAccounts = await this.computeClaudeAccountsView();
+      await Promise.all(
+        records.map((record) =>
+          gate.run(async () => {
+            if (this.isDeliveryStopped() || this.transitionsBinding !== binding) return;
+            const revision = this.lifecycle.snapshot(record.id).revision;
+            const observation = repairsObservedError
+              ? binding?.store.observedStateSequence(record.id)
+              : undefined;
+            const stillCurrent = repairsObservedError
+              ? () =>
+                  this.transitionsBinding === binding &&
+                  binding?.store.observedState(record.id) === "error" &&
+                  binding.store.observedStateSequence(record.id) === observation &&
+                  readSession(this.config.dataDir, record.id) === record &&
+                  this.lifecycle.snapshot(record.id).revision === revision
+              : undefined;
+            try {
+              await this.enrichFullView(record, claudeAccounts, listing, stillCurrent);
+            } catch (error) {
+              if (stillCurrent && !stillCurrent()) return;
+              this.logListEnrichFailed(record.id, error);
+            }
+          }),
+        ),
+      );
+    } catch (error) {
+      this.logEvent(`session.list.${failureEvent}`, {
+        level: "warn",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async listSessionTransitions(
@@ -13030,189 +13345,7 @@ export class SessionService {
   ): Promise<SessionTransitionsResponse> {
     const binding = this.transitionsBinding;
     if (!binding) throw new Error("Session transitions service is disposed");
-    const assertCurrent = () => {
-      if (this.transitionsBinding !== binding)
-        throw new Error("Session transitions data directory changed; retry poll");
-    };
-    let refresh = this.transitionsRefresh;
-    if (!refresh || refresh.binding !== binding) {
-      const run = withSessionWriteGuard(assertCurrent, () =>
-        this.refreshSessionTransitions(binding, assertCurrent),
-      );
-      refresh = { binding, run };
-      this.transitionsRefresh = refresh;
-    }
-    try {
-      await refresh.run;
-    } finally {
-      if (this.transitionsRefresh === refresh) this.transitionsRefresh = undefined;
-    }
-    assertCurrent();
     return binding.store.query(query);
-  }
-
-  private async refreshSessionTransitions(
-    binding: NonNullable<SessionService["transitionsBinding"]>,
-    assertCurrent: () => void,
-  ): Promise<void> {
-    assertCurrent();
-    binding.store.flushPending();
-    const accounts = await this.computeClaudeAccountsView();
-    const seen = new Set<string>();
-    let rows: TransitionsRefreshRow[] = [];
-    // A settled terminal record re-derives the status and state it already published:
-    // skip it while its file, lifecycle revision and feed observation are unchanged.
-    // A settled (succeeded/failed) operation receipt stays on the record after
-    // complete() or kill(); only a pending one can still move it.
-    const unchanged = (record: SessionRecord): boolean => {
-      const settled = binding.settled.get(record.id);
-      if (settled?.record !== record) return false;
-      const lifecycle = this.lifecycle.snapshot(record.id);
-      return (
-        lifecycle.operation?.phase !== "pending" &&
-        lifecycle.revision === settled.revision &&
-        binding.store.observedState(record.id) === settled.state
-      );
-    };
-    const gate = createConcurrencyGate(TRANSITIONS_ENRICH_CONCURRENCY);
-    const vanished = (error: unknown, id: string): boolean =>
-      error instanceof SessionResourceNotFoundError && !readSession(binding.dataDir, id);
-    for (let pass = 0; pass < LIFECYCLE_REBUILD_PASSES; pass += 1) {
-      assertCurrent();
-      const records = listSessions(binding.dataDir);
-      const stale: SessionRecord[] = [];
-      for (const record of records) {
-        if (unchanged(record)) {
-          seen.add(record.id);
-          continue;
-        }
-        binding.store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
-        if (!seen.has(record.id)) stale.push(record);
-      }
-      const enrich = async (record: SessionRecord): Promise<void> => {
-        const receipt = this.lifecycle.snapshot(record.id);
-        try {
-          const { view, source } = await this.enrichWithClassified(
-            record,
-            accounts,
-            records,
-            assertCurrent,
-          );
-          assertCurrent();
-          rows.push({ view, source, receipt, input: record });
-          seen.add(record.id);
-        } catch (error) {
-          assertCurrent();
-          if (vanished(error, record.id)) return;
-          throw error;
-        }
-      };
-      // The first failure stops queued enrichments; in-flight ones settle before it is thrown.
-      const failures: unknown[] = [];
-      await Promise.all(
-        stale.map((record) =>
-          gate.run(async () => {
-            if (failures.length > 0) return;
-            await enrich(record).catch((error: unknown) => {
-              failures.push(error);
-            });
-          }),
-        ),
-      );
-      if (failures.length > 0) throw failures[0];
-      // Rows cover every unsettled record; the listing below catches records that
-      // appeared meanwhile, and a settled record whose operation began is unsettled
-      // next poll — so finalization rereads rows only instead of a third listing.
-      // A rebuild replaces a row's view and source, so its classified record becomes
-      // the row's input; a row finalization dropped keeps no settle basis and leaves
-      // this refresh. On a failed rebuild, queued ones stop and running ones settle
-      // before the error leaves this refresh.
-      const rebuiltInputs = new Map<string, SessionRecord>();
-      const rebuilds: Promise<unknown>[] = [];
-      let rebuildFailed = false;
-      let finalized: { id: string }[];
-      try {
-        finalized = await this.finalizeLifecycleRows(
-          rows,
-          (record, listing) => {
-            const rebuild = gate.run(async () => {
-              if (rebuildFailed) throw new Error("Transitions refresh rebuild cancelled");
-              try {
-                const rebuilt = await this.enrichWithClassified(
-                  record,
-                  accounts,
-                  listing,
-                  assertCurrent,
-                );
-                rebuiltInputs.set(record.id, record);
-                return rebuilt;
-              } catch (error) {
-                // finalizeLifecycleRows drops a vanished record; anything else fails it.
-                if (!vanished(error, record.id)) rebuildFailed = true;
-                throw error;
-              }
-            });
-            rebuilds.push(rebuild);
-            return rebuild;
-          },
-          { includePending: false, onExhausted: "refuse" },
-        );
-      } catch (error) {
-        await Promise.allSettled(rebuilds);
-        throw error;
-      }
-      const live = new Set(finalized.map((view) => view.id));
-      rows = rows.filter((row) => live.has(row.view.id));
-      for (const row of rows) row.input = rebuiltInputs.get(row.view.id) ?? row.input;
-      assertCurrent();
-      const current = listSessions(binding.dataDir);
-      if (current.every((record) => seen.has(record.id))) {
-        // No await between final reconciliation and caller's high-water snapshot.
-        for (const record of current)
-          if (!unchanged(record))
-            binding.store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
-        this.settleTransitionRecords(binding, rows, current);
-        return;
-      }
-    }
-    throw new Error("Session set changed during transitions refresh; retry poll");
-  }
-
-  // Settles a terminal record only when this refresh classified exactly the file now
-  // on disk (input and re-read source both equal it) and the feed holds the state
-  // that classification produced. Rate-limit markers stay unsettled:
-  // updateStateHistory still clears them on a later pass.
-  private settleTransitionRecords(
-    binding: NonNullable<SessionService["transitionsBinding"]>,
-    rows: readonly TransitionsRefreshRow[],
-    current: readonly SessionRecord[],
-  ): void {
-    const enriched = new Map(rows.map((row) => [row.view.id, row]));
-    const settled: NonNullable<SessionService["transitionsBinding"]>["settled"] = new Map();
-    for (const record of current) {
-      const row = enriched.get(record.id);
-      if (!row) {
-        const kept = binding.settled.get(record.id);
-        if (kept?.record === record) settled.set(record.id, kept);
-        continue;
-      }
-      const lifecycle = this.lifecycle.snapshot(record.id);
-      const state = binding.store.observedState(record.id);
-      if (
-        isTerminalSessionStatus(record.status) &&
-        !record.rateLimitedAt &&
-        !record.rateLimitResetAt &&
-        lifecycle.operation?.phase !== "pending" &&
-        lifecycle.revision === row.receipt.revision &&
-        state !== undefined &&
-        state === row.view.state &&
-        row.source !== null &&
-        isDeepStrictEqual(record, row.source) &&
-        isDeepStrictEqual(record, row.input)
-      )
-        settled.set(record.id, { record, revision: lifecycle.revision, state });
-    }
-    binding.settled = settled;
   }
 
   getSessionIdentity(sessionId: string): Pick<SessionRecord, "id" | "agent"> {
@@ -29150,6 +29283,19 @@ export class SessionService {
         );
       }
     }
+    return this.recordStateHistory(session, state, stateSource, historySourcePath);
+  }
+
+  // Reads the in-memory history at call time: the marker writes above fire the
+  // session-write hook, which records a non-live record's transition first.
+  private async recordStateHistory(
+    session: SessionRecord,
+    state: SessionState,
+    stateSource: StateSource,
+    historySourcePath: string | null,
+  ): Promise<SessionStateTransition[]> {
+    const history = this.stateHistory.get(session.id) ?? [];
+    const lastEntry = history[history.length - 1];
     if (history.length === 0 || lastEntry?.state !== state) {
       const transitionAt = new Date().toISOString();
       history.push({ state, at: transitionAt, source: stateSource });
@@ -29267,7 +29413,6 @@ export class SessionService {
     workspaceMissing: boolean,
     probeRevision = this.lifecycle.snapshot(session.id).revision,
     journalPolicy: SessionJournalPolicy = "strict",
-    strictErrors = false,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
     if (this.isDeliveryStopped() || this.staleParksInFlight.has(session.id)) {
       return { session, runtime };
@@ -29314,9 +29459,7 @@ export class SessionService {
         // both reads and mark a genuinely live session stopped.
         try {
           confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
-          if (strictErrors) this.assertClassificationProbe(confirmedRuntime);
         } catch (error) {
-          if (strictErrors) throw error;
           const diagnostic = error instanceof Error ? error.message : String(error);
           const retained = this.retainDetectionError(
             session,
@@ -29367,7 +29510,6 @@ export class SessionService {
               return this.stopOrphanedSpawnPane(session, assertCurrent);
             },
           );
-          if (strictErrors) this.assertClassificationProbe(confirmedRuntime);
         } catch (error) {
           if (error !== superseded) throw error;
           return {
@@ -29671,8 +29813,6 @@ export class SessionService {
       reconcileRuntime?: boolean;
       bypassClearBarrier?: boolean;
       suppressMenuConfirmation?: boolean;
-      strictErrors?: boolean;
-      assertCurrent?: () => void;
       journalPolicy?: SessionJournalPolicy;
     },
     observePreparation?: (session: SessionRecord) => void,
@@ -29690,16 +29830,11 @@ export class SessionService {
       const probeRevision = this.lifecycle.snapshot(session.id).revision;
       let observation = session;
       try {
-        options?.assertCurrent?.();
-        const result = await this.classifySessionRecordKnown(session, options, (prepared) => {
+        return await this.classifySessionRecordKnown(session, options, (prepared) => {
           observation = prepared;
           observePreparation?.(prepared);
         });
-        options?.assertCurrent?.();
-        return result;
       } catch (error) {
-        options?.assertCurrent?.();
-        if (options?.strictErrors) throw error;
         if (
           error instanceof SessionResourceNotFoundError &&
           !readSession(this.config.dataDir, session.id)
@@ -29880,24 +30015,12 @@ export class SessionService {
     }
   }
 
-  private assertClassificationProbe(
-    runtime?: Pick<SessionRuntimeSnapshot, "probeUnresponsive" | "diagnostic">,
-    workspaceDiagnostic?: string,
-  ): void {
-    const diagnostic = runtime?.diagnostic ?? workspaceDiagnostic;
-    if (runtime?.probeUnresponsive || diagnostic || workspaceDiagnostic) {
-      throw new Error(diagnostic ?? "Runtime probe unresponsive");
-    }
-  }
-
   private async classifySessionRecordKnown(
     session: SessionRecord,
     options?: {
       scanPane?: boolean;
       reconcileRuntime?: boolean;
       suppressMenuConfirmation?: boolean;
-      strictErrors?: boolean;
-      assertCurrent?: () => void;
       journalPolicy?: SessionJournalPolicy;
     },
     observePreparation?: (session: SessionRecord) => void,
@@ -29930,7 +30053,6 @@ export class SessionService {
       !hasRetainedSessionError(session)
     ) {
       const workspace = probeWorkspace(session.worktreePath);
-      if (options?.strictErrors) this.assertClassificationProbe(undefined, workspace.diagnostic);
       this.lastClassifiedLogStates.delete(session.id);
       return {
         session,
@@ -29958,13 +30080,8 @@ export class SessionService {
     };
     if (!isTerminalSessionStatus(session.status)) {
       try {
-        runtime = await (options?.strictErrors
-          ? this.readRuntimeSnapshot(session, { fresh: true })
-          : this.readRuntimeSnapshot(session));
-        options?.assertCurrent?.();
+        runtime = await this.readRuntimeSnapshot(session);
       } catch (error) {
-        options?.assertCurrent?.();
-        if (options?.strictErrors) throw error;
         const result = this.classificationErrorResult(
           session,
           error,
@@ -29994,7 +30111,6 @@ export class SessionService {
         agentActivityAt: null,
       };
     const workspace = probeWorkspace(session.worktreePath);
-    if (options?.strictErrors) this.assertClassificationProbe(runtime, workspace.diagnostic);
     const observed = readSession(this.config.dataDir, session.id);
     if (
       observed &&
@@ -30019,7 +30135,7 @@ export class SessionService {
           tmuxActivityAt: null,
           probeUnresponsive: true,
         },
-        state: hasRetainedSessionError(current) ? "error" : statusFallbackState(current),
+        state: statusDerivedState(current),
         source: "status",
         historySourcePath: null,
         workspacePresent: workspace.exists,
@@ -30107,7 +30223,6 @@ export class SessionService {
         workspace.missing,
         probeRevision,
         options?.journalPolicy,
-        options?.strictErrors,
       );
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
@@ -30895,12 +31010,25 @@ export class SessionService {
     return (await this.assembleDashboard(session))?.view;
   }
 
+  // A full-list snapshot taken before a status change (queued behind a gate
+  // slot, say) is replaced by the latest record, so the epoch captured next never
+  // describes a newer status than the classified record. Other callers (sweep,
+  // delivery loops) enrich the record they hold on purpose.
+  private latestIfStatusMoved(record: SessionRecord, snapshotEpoch: number): SessionRecord {
+    if ((this.statusEpochs.get(record.id) ?? 0) === snapshotEpoch) return record;
+    return readSession(this.config.dataDir, record.id) ?? record;
+  }
+
   private async assembleDashboard(
     session: SessionRecord,
+    // Set on the one reclassification after a status move; a second move skips
+    // the state publish.
+    retried = false,
   ): Promise<
     { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
   > {
     const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
+    const statusEpoch = this.statusEpochs.get(session.id) ?? 0;
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
@@ -30920,9 +31048,13 @@ export class SessionService {
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
     const hasServiceIssues = await this.hasServiceIssues(session);
-    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
-      const current = readSession(this.config.dataDir, session.id);
-      return current ? this.assembleDashboard(current) : undefined;
+    const latest = readSession(this.config.dataDir, session.id);
+    const epochChanged = (this.statusEpochs.get(session.id) ?? 0) !== statusEpoch;
+    if (
+      (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
+      (epochChanged && !retried)
+    ) {
+      return latest ? this.assembleDashboard(latest, true) : undefined;
     }
     const reported = this.withReportingError(session);
     const reportingConsistent = isDeepStrictEqual(reported, session);
@@ -30974,16 +31106,18 @@ export class SessionService {
       state !== rawState && (state === "completed" || state === "needs_input")
         ? "task_status"
         : classified.source;
-    await this.updateStateHistory(
-      session,
-      state,
-      stateSource,
-      classified.historySourcePath ?? null,
-      classified.serverError,
-      classified.serverErrorEvidence,
-      classified.rateLimitResetAt,
-      "read",
-    );
+    // Moved again during the retry: the write hook and background ticks publish.
+    if (!epochChanged)
+      await this.updateStateHistory(
+        session,
+        state,
+        stateSource,
+        classified.historySourcePath ?? null,
+        classified.serverError,
+        classified.serverErrorEvidence,
+        classified.rateLimitResetAt,
+        "read",
+      );
     const marked = readSession(this.config.dataDir, session.id);
     if (!marked) return undefined;
     session = this.withReportingError(marked);
@@ -31327,7 +31461,12 @@ export class SessionService {
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
-    assertCurrent?: () => void,
+    // A background repair passes the check that its observation is still the
+    // current one; it runs where the record is re-read, before any state publish.
+    stillCurrent?: () => boolean,
+    // Set on the one reclassification after a status move; a second move skips
+    // the state publish.
+    retried = false,
   ): Promise<{
     view: Omit<SessionListItemView, "lifecycle">;
     classified: SessionStateResult;
@@ -31335,23 +31474,14 @@ export class SessionService {
     detectionOnlyError: boolean;
   }> {
     const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
+    const statusEpoch = this.statusEpochs.get(session.id) ?? 0;
     const hasIndependentError = (record: SessionRecord): boolean =>
       record.status === "errored" ||
       Boolean(record.serverErrorAt) ||
       Boolean(record.error?.trim() && !record.error.startsWith(STATUS_DETECTION_ERROR_PREFIX));
     const inputHasIndependentError = hasIndependentError(session);
-    assertCurrent?.();
-    const classified = await this.classifySessionRecord(session, {
-      strictErrors: assertCurrent !== undefined,
-      journalPolicy: assertCurrent ? "strict" : "read",
-      ...(assertCurrent ? { assertCurrent } : {}),
-    });
-    assertCurrent?.();
-    const persisted = this.persistClassifiedTokenUsage(
-      classified.session,
-      classified,
-      assertCurrent ? "strict" : "read",
-    );
+    const classified = await this.classifySessionRecord(session, { journalPolicy: "read" });
+    const persisted = this.persistClassifiedTokenUsage(classified.session, classified, "read");
     if (persisted.status === "missing") {
       throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     }
@@ -31371,19 +31501,18 @@ export class SessionService {
 
     const project = this.resolveProjectForSession(session);
     const tokenUsageView = this.deriveTokenUsageView(session);
-    // Fetched at most once per enrich (zero extra IO for a non-desk session,
-    // where deskAnchorRecord returns `session` itself unchanged): reused for
-    // the sidecars' owner state (ports, still per-record) below. Passed into
-    // resolveWorkspaceState for the shared slots/pr too, so a sibling doesn't
-    // pay for a second read of the same anchor record when there's no
-    // workspace file yet.
-    const anchorRecord = this.deskAnchorRecord(session);
     const sidecars = await this.sidecarViews(session, project);
-    assertCurrent?.();
-    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
-      const current = readSession(this.config.dataDir, session.id);
-      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
-      return this.enrichWithClassified(current, claudeAccounts, sessionBatch, assertCurrent);
+    if (stillCurrent && !stillCurrent()) throw new Error("Observation superseded");
+    // A record whose status moved while this classification ran gets one
+    // reclassification; the state is never published for a stale status.
+    const latest = readSession(this.config.dataDir, session.id);
+    const epochChanged = (this.statusEpochs.get(session.id) ?? 0) !== statusEpoch;
+    if (
+      (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
+      (epochChanged && !retried)
+    ) {
+      if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      return this.enrichWithClassified(latest, claudeAccounts, sessionBatch, stillCurrent, true);
     }
     const reported = this.withReportingError(session);
     const reportingConsistent = isDeepStrictEqual(reported, session);
@@ -31401,17 +31530,18 @@ export class SessionService {
       state !== classified.state && (state === "completed" || state === "needs_input")
         ? "task_status"
         : classified.source;
-    await this.updateStateHistory(
-      session,
-      state,
-      stateSource,
-      classified.historySourcePath ?? null,
-      classified.serverError,
-      classified.serverErrorEvidence,
-      classified.rateLimitResetAt,
-      assertCurrent ? "strict" : "read",
-    );
-    assertCurrent?.();
+    // Moved again during the retry: the write hook and background ticks publish.
+    if (!epochChanged)
+      await this.updateStateHistory(
+        session,
+        state,
+        stateSource,
+        classified.historySourcePath ?? null,
+        classified.serverError,
+        classified.serverErrorEvidence,
+        classified.rateLimitResetAt,
+        "read",
+      );
     const marked = readSession(this.config.dataDir, session.id);
     if (!marked) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     session = this.withReportingError(marked);
@@ -31420,36 +31550,15 @@ export class SessionService {
     if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
       const current = readSession(this.config.dataDir, session.id);
       if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
-      return this.enrichWithClassified(current, claudeAccounts, sessionBatch, assertCurrent);
+      return this.enrichWithClassified(current, claudeAccounts, sessionBatch);
     }
     const queuedMessagesView = displayQueuedMessages(session);
-    const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
-    const workspaceState = resolveWorkspaceState(this.config.dataDir, anchorRecord);
-    const displaySlots = this.displaySlotsForSession(session, workspaceState);
-    const deskGroupMembers = await this.buildDeskGroupMembers(
+    const requestScoped = await this.requestScopedFields(
       session,
-      {
-        state,
-        runtimeAlive: classified.runtime.runtimeAlive,
-      },
+      { state, runtimeAlive: classified.runtime.runtimeAlive },
+      claudeAccounts,
       sessionBatch,
     );
-    const resolvedClaudeAccounts =
-      session.agent === "claude"
-        ? (claudeAccounts ?? (await this.computeClaudeAccountsView()))
-        : [];
-    let effectiveAuth = session.auth;
-    let authError: string | undefined;
-    if (session.auth) {
-      try {
-        effectiveAuth =
-          (await this.readAuthorizationState()).sessions.find(
-            (entry) => entry.sessionId === session.id,
-          ) ?? session.auth;
-      } catch {
-        authError = "Managed authorization proxy unavailable";
-      }
-    }
     const {
       launchCommand: _launchCommand,
       prompt: _prompt,
@@ -31481,8 +31590,6 @@ export class SessionService {
 
     const view: Omit<SessionListItemView, "lifecycle"> = {
       ...sessionWithoutDetailFields,
-      ...(effectiveAuth ? { auth: effectiveAuth } : {}),
-      ...(authError ? { authError } : {}),
       ...(session.spawnIntent ? { spawnIntent: publicSpawnIntent(session.spawnIntent) } : {}),
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
@@ -31490,25 +31597,15 @@ export class SessionService {
       deskId: workspaceIdOf(session),
       planMode: resolvePlanMode(session),
       restrictWrites: resolveRestrictWrites(session),
-      ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
-      ...(displaySlots ? { slots: displaySlots } : {}),
       runtimeAlive: classified.runtime.runtimeAlive,
-      workspaceExists: workspacePresent,
       state,
       stateSource,
       hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
       lastActivityAt,
       services,
       sidecars,
-      ...(workspaceAccess ? { workspaceAccess } : {}),
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
-      ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
-      ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
-      ...(session.agent === "claude" && effectiveAuth
-        ? { activeClaudeAccountId: effectiveAuth.effectiveAccountId }
-        : session.claudeAccountId
-          ? { activeClaudeAccountId: session.claudeAccountId }
-          : {}),
+      ...requestScoped,
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
       tokenUsageView,
       preflightTokenUsageView: this.derivePreflightTokenUsageView(session),
@@ -31522,6 +31619,60 @@ export class SessionService {
       !hasIndependentError(session);
     this.guardSidecarViews(session.id, sidecars);
     return { view, classified, source, detectionOnlyError };
+  }
+
+  // View fields that depend on more than the session record: the workspace
+  // file, the desk siblings, accounts and managed authorization. A cached
+  // full-view row recomputes them on every hit.
+  private async requestScopedFields(
+    session: SessionRecord,
+    current: { state: SessionState; runtimeAlive: boolean },
+    claudeAccounts: { id: string; label?: string; authenticated: boolean }[] | undefined,
+    sessionBatch: SessionRecord[] | undefined,
+  ): Promise<Pick<Omit<SessionListItemView, "lifecycle">, RequestScopedKey>> {
+    const workspaceExists = probeWorkspace(session.worktreePath).exists;
+    const workspaceAccess = buildWorkspaceAccess(
+      session,
+      this.resolveProjectForSession(session),
+      workspaceExists,
+    );
+    const workspaceState = resolveWorkspaceState(
+      this.config.dataDir,
+      this.deskAnchorRecord(session),
+    );
+    const displaySlots = this.displaySlotsForSession(session, workspaceState);
+    const deskGroupMembers = await this.buildDeskGroupMembers(session, current, sessionBatch);
+    const resolvedClaudeAccounts =
+      session.agent === "claude"
+        ? (claudeAccounts ?? (await this.computeClaudeAccountsView()))
+        : [];
+    let effectiveAuth = session.auth;
+    let authError: string | undefined;
+    if (session.auth) {
+      try {
+        effectiveAuth =
+          (await this.readAuthorizationState()).sessions.find(
+            (entry) => entry.sessionId === session.id,
+          ) ?? session.auth;
+      } catch {
+        authError = "Managed authorization proxy unavailable";
+      }
+    }
+    return {
+      ...(effectiveAuth ? { auth: effectiveAuth } : {}),
+      ...(authError ? { authError } : {}),
+      ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
+      ...(displaySlots ? { slots: displaySlots } : {}),
+      workspaceExists,
+      ...(workspaceAccess ? { workspaceAccess } : {}),
+      ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
+      ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
+      ...(session.agent === "claude" && effectiveAuth
+        ? { activeClaudeAccountId: effectiveAuth.effectiveAccountId }
+        : session.claudeAccountId
+          ? { activeClaudeAccountId: session.claudeAccountId }
+          : {}),
+    };
   }
 
   private async classifySessionState(session: SessionRecord): Promise<SessionState> {
