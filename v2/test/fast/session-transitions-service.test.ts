@@ -1224,6 +1224,11 @@ describe("session transitions service", () => {
     metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
     release();
     await clearing;
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "session.rate_limit.cleared" && entry.sessionId === "api-1",
+      ),
+    ).toBe(true);
     expect(binding().store.observedState("api-1")).toBe("killed");
     expect(
       (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),

@@ -7686,8 +7686,17 @@ export class SessionService {
         });
         // Killed or completed during the classification: its write hook already
         // published the terminal edge.
+        const logCleared = () =>
+          this.logEvent("session.rate_limit.cleared", {
+            level: "info",
+            sessionId,
+            projectId: latest.project,
+            message: `Rate limit cleared for ${sessionId}`,
+            details: { actor, force },
+          });
         const ended = readSession(this.config.dataDir, sessionId);
         if (ended && this.endedSinceClassification(ended, false)) {
+          logCleared();
           return { sessionId, state: statusDerivedState(ended), deliveryScheduled: false };
         }
         const state = this.stabilizeState(sessionId, classified.state);
@@ -7701,13 +7710,7 @@ export class SessionService {
         );
         const deliveryScheduled = state !== "rate_limited";
         if (deliveryScheduled) this.ensureDeliveryRunner(sessionId);
-        this.logEvent("session.rate_limit.cleared", {
-          level: "info",
-          sessionId,
-          projectId: latest.project,
-          message: `Rate limit cleared for ${sessionId}`,
-          details: { actor, force },
-        });
+        logCleared();
         return { sessionId, state, deliveryScheduled };
       } finally {
         this.rateLimitClearBarriers.delete(sessionId);
