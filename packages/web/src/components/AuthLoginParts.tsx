@@ -67,7 +67,7 @@ export function Checklist({ items }: { items: ChecklistItem[] }) {
 export function ErrorBox({ title, cause }: { title: string; cause: string }) {
   return (
     <div
-      className="flex items-start gap-2 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-2 text-[var(--color-chip-error-text)]"
+      className="flex items-start gap-2 border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2.5 py-2 text-[var(--color-status-error)]"
       data-testid="auth-login-error"
       role="alert"
     >

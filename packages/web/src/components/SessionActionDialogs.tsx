@@ -528,7 +528,7 @@ export function useSessionActionDialogs({
           }}
         >
           <div
-            className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+            className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-modal sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
             onKeyDown={(event) => {
               if (isVoiceToggleHotkey(event)) {
                 event.preventDefault();
@@ -544,7 +544,7 @@ export function useSessionActionDialogs({
             <div className="mb-4 flex items-center justify-between">
               <h2
                 id="handoff-modal-title"
-                className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+                className="font-bold uppercase tracking-label text-[var(--color-text-primary)]"
               >
                 Handoff
               </h2>
@@ -559,7 +559,7 @@ export function useSessionActionDialogs({
             </div>
             {prLink ? (
               <div
-                className="mb-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                className="mb-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-meta leading-snug text-[var(--color-text-secondary)]"
                 role="note"
               >
                 This session links a PR ({prLink.url}). The handoff prompt asks the new agent to
@@ -567,7 +567,7 @@ export function useSessionActionDialogs({
               </div>
             ) : null}
             <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-              <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]">
+              <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-meta leading-snug text-[var(--color-text-secondary)]">
                 Spur builds the main handoff prompt from this session&apos;s task, links, branch,
                 and workspace. Add optional notes below.
               </div>
@@ -615,12 +615,12 @@ export function useSessionActionDialogs({
                 voice={handoffVoice}
               />
               {handoffVoice.voiceError ? (
-                <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+                <div className="border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2.5 py-1.5 text-[var(--color-status-error)]">
                   {handoffVoice.voiceError}
                 </div>
               ) : null}
               <div className="flex flex-wrap items-start justify-between gap-2">
-                <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
+                <span className="min-w-0 flex-1 text-label text-[var(--color-text-tertiary)]">
                   {handoffVoice.voiceBusy && !handoffVoice.recording ? (
                     <VoiceStatusHint voice={handoffVoice} />
                   ) : null}
@@ -646,7 +646,7 @@ export function useSessionActionDialogs({
                       <span>Handoff</span>
                       <span
                         aria-hidden="true"
-                        className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/70"
+                        className="ml-2 whitespace-nowrap font-mono text-label font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/70"
                       >
                         {PRIMARY_SUBMIT_HINT}
                       </span>
@@ -680,7 +680,7 @@ export function useSessionActionDialogs({
             artifactSlot:
               startupArtifacts.length > 0 ? (
                 <div className="space-y-2">
-                  <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  <div className="text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
                     Keep existing images
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -712,7 +712,7 @@ export function useSessionActionDialogs({
               ) : null,
             noteSlot: prLink ? (
               <div
-                className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-meta leading-snug text-[var(--color-text-secondary)]"
                 role="note"
               >
                 <div>
