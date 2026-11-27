@@ -360,6 +360,23 @@ describe("full-view list cache", () => {
     );
   });
 
+  it("keeps the boot error repair off the warm that every full list awaits", async () => {
+    const hidden = record({ id: "hidden", status: "killed" });
+    metadata.writeSession(TEST_DATA_DIR, hidden);
+    const internals = sessionServiceInternals(service);
+    // Observed `error` for an ended, unlisted row, as after a restart.
+    const store = (service as unknown as { transitionsBinding: { store: object } })
+      .transitionsBinding.store as { observedState(id: string): string | undefined };
+    vi.spyOn(store, "observedState").mockImplementation((id) =>
+      id === "hidden" ? "error" : undefined,
+    );
+    const enrich = enrichedIds();
+    await internals.warmFullViewCache();
+    expect(enrich.ids).toEqual([]);
+    await internals.repairBootKeptErrors();
+    expect(enrich.ids).toEqual(["hidden"]);
+  });
+
   it("keeps the startup warm from rejecting when the listing fails", async () => {
     listSessionsMock.mockImplementationOnce(() => {
       throw new Error("listing unavailable");

@@ -1475,6 +1475,7 @@ type SessionServiceInternals = {
   runDashboardCacheTick(): Promise<void>;
   startDashboardCacheLoop(): void;
   warmFullViewCache(): Promise<void>;
+  repairBootKeptErrors(): Promise<void>;
   fullViewCache: Map<string, { input: SessionRecord }>;
   fullViewCacheReady: Promise<void> | null;
   listedActivityHighWater: Map<string, string>;

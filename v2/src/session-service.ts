@@ -4655,6 +4655,7 @@ export class SessionService {
     this.startMemoryShedLoop();
     this.dashboardCacheReady = this.trackBackgroundLoop(this.runDashboardCacheTick());
     this.fullViewCacheReady = this.trackBackgroundLoop(this.warmFullViewCache());
+    void this.trackBackgroundLoop(this.repairBootKeptErrors());
     this.startDashboardCacheLoop();
     this.startReaperLoop();
     this.startSessionGcLoop();
@@ -13189,20 +13190,35 @@ export class SessionService {
   }
 
   // Never rejects: every full-view list awaits it.
-  private async warmFullViewCache(): Promise<void> {
+  private warmFullViewCache(): Promise<void> {
+    return this.enrichNonLiveRecords(
+      (record) => isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false),
+      "warm_failed",
+    );
+  }
+
+  // Ended rows whose boot-kept `error` was observed before the restart get one
+  // real classification: a lost state append is repaired, a persistent
+  // diagnostic stays `error`. Not awaited by list: each row can walk its desk
+  // siblings. Never rejects.
+  private repairBootKeptErrors(): Promise<void> {
+    const store = this.transitionsBinding?.store;
+    return this.enrichNonLiveRecords(
+      (record) =>
+        isTerminalSessionStatus(record.status) &&
+        store?.observedState(record.id) === "error" &&
+        !isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false),
+      "repair_failed",
+    );
+  }
+
+  private async enrichNonLiveRecords(
+    pick: (record: SessionRecord) => boolean,
+    failureEvent: "warm_failed" | "repair_failed",
+  ): Promise<void> {
     try {
       const listing = listSessions(this.config.dataDir);
-      // Ended rows whose boot-kept `error` was observed before the restart get
-      // one real classification: a lost state append is repaired, a persistent
-      // diagnostic stays `error`.
-      const store = this.transitionsBinding?.store;
-      const records = listing.filter(
-        (record) =>
-          !this.isLiveSessionRecord(record) &&
-          (isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false) ||
-            (isTerminalSessionStatus(record.status) &&
-              store?.observedState(record.id) === "error")),
-      );
+      const records = listing.filter((record) => !this.isLiveSessionRecord(record) && pick(record));
       if (records.length === 0) return;
       const claudeAccounts = await this.computeClaudeAccountsView();
       await Promise.all(
@@ -13218,7 +13234,7 @@ export class SessionService {
         ),
       );
     } catch (error) {
-      this.logEvent("session.list.warm_failed", {
+      this.logEvent(`session.list.${failureEvent}`, {
         level: "warn",
         message: error instanceof Error ? error.message : String(error),
       });

@@ -999,7 +999,7 @@ describe("session transitions service", () => {
     await restart();
     expect(journalLines()).toBe(before);
     expect((await poll({ since: cursor })).entries).toEqual([]);
-    await sessionServiceInternals(service).warmFullViewCache();
+    await sessionServiceInternals(service).repairBootKeptErrors();
     await service.list({ includeCompleted: true });
     expect((await poll({ since: cursor })).entries).toEqual([]);
   });
@@ -1037,7 +1037,7 @@ describe("session transitions service", () => {
     const cursor = (await poll()).nextCursor;
     await restart();
     expect(binding().store.observedState("api-1")).toBe("error");
-    await sessionServiceInternals(service).warmFullViewCache();
+    await sessionServiceInternals(service).repairBootKeptErrors();
     expect(binding().store.observedState("api-1")).toBe("killed");
     expect(
       (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
