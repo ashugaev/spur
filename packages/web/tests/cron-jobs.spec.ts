@@ -373,7 +373,7 @@ test.describe("Cron job storage", () => {
     const methods = await mockStorage(page, FILLED_STORAGE);
     const storage = await openStorage(page);
     await expect(storage.getByText("1 file · 4.1 KB")).toBeVisible();
-    await expect(storage.getByRole("cell", { name: "triage.md" })).toBeVisible();
+    await expect(storage.getByRole("cell", { name: "triage.md", exact: true })).toBeVisible();
     const toggle = storage.getByRole("button", { name: "Note" });
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await expect(storage.getByLabel("Storage note")).toBeHidden();
