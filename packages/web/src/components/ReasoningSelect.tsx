@@ -70,7 +70,7 @@ export function ReasoningSelect({
       </select>
       {disabled ? (
         <span
-          className={`text-[10px] uppercase tracking-[0.1em] ${unavailable ? "text-[var(--color-status-error)]" : "text-[var(--color-text-tertiary)]"}`}
+          className={`text-label uppercase tracking-label ${unavailable ? "text-[var(--color-status-error)]" : "text-[var(--color-text-tertiary)]"}`}
         >
           {unavailable
             ? (error ?? "Reasoning capabilities unavailable")

@@ -1,0 +1,425 @@
+{
+  "version": "2.2.0",
+  "surfaces": ["--color-bg-base", "--color-bg-surface", "--color-bg-elevated"],
+  "overlays": ["--color-hover-overlay"],
+  "tokens": {
+    "--color-bg-base": {
+      "group": "color.surface",
+      "role": "page ground",
+      "since": "1.0.0"
+    },
+    "--color-bg-surface": {
+      "group": "color.surface",
+      "role": "panel and inline surface",
+      "since": "1.0.0"
+    },
+    "--color-bg-elevated": {
+      "group": "color.surface",
+      "role": "card, menu, popover, modal",
+      "since": "1.0.0"
+    },
+    "--color-terminal-bg": {
+      "group": "color.surface",
+      "role": "xterm container",
+      "since": "1.0.0"
+    },
+    "--color-border-subtle": {
+      "group": "color.border",
+      "role": "row separator",
+      "since": "1.0.0"
+    },
+    "--color-border-default": {
+      "group": "color.border",
+      "role": "card edge, divider",
+      "since": "1.0.0"
+    },
+    "--color-border-strong": {
+      "group": "color.border",
+      "role": "popover, menu, icon button edge",
+      "since": "1.0.0"
+    },
+    "--color-text-primary": {
+      "group": "color.text",
+      "role": "values, titles, input text",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-text-secondary": {
+      "group": "color.text",
+      "role": "body copy, labels",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-text-tertiary": {
+      "group": "color.text",
+      "role": "meta, counts, hints, placeholders",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-text-inverse": {
+      "group": "color.text",
+      "role": "label on accent or error fill",
+      "since": "1.0.0"
+    },
+    "--color-input-bg": {
+      "group": "color.input",
+      "role": "field ground",
+      "since": "1.0.0"
+    },
+    "--color-input-border": {
+      "group": "color.input",
+      "role": "field edge, its only cue",
+      "since": "1.0.0",
+      "contrast": 3
+    },
+    "--color-accent": {
+      "group": "color.accent",
+      "role": "links, primary fill, focus ring",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-accent-hover": {
+      "group": "color.accent",
+      "role": "primary fill hover",
+      "since": "1.0.0"
+    },
+    "--color-accent-violet": {
+      "group": "color.accent",
+      "role": "link-icons provider mark",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-hover-overlay": {
+      "group": "color.overlay",
+      "role": "hover fill, zebra stripe",
+      "since": "1.0.0"
+    },
+    "--color-modal-backdrop": {
+      "group": "color.overlay",
+      "role": "modal backdrop",
+      "since": "1.0.0"
+    },
+    "--color-scrollbar-thumb": {
+      "group": "color.overlay",
+      "role": "scrollbar thumb",
+      "since": "1.0.0"
+    },
+    "--color-scrollbar-thumb-hover": {
+      "group": "color.overlay",
+      "role": "scrollbar thumb hover",
+      "since": "1.0.0"
+    },
+    "--color-scrollbar-thumb-active": {
+      "group": "color.overlay",
+      "role": "scrollbar thumb drag",
+      "since": "1.0.0"
+    },
+    "--color-activity-pulse": {
+      "group": "color.overlay",
+      "role": "working dot pulse ring",
+      "since": "1.0.0"
+    },
+    "--color-shadow-menu": {
+      "group": "color.shadow",
+      "role": "input to --shadow-overlay",
+      "since": "1.0.0"
+    },
+    "--color-shadow-modal-sm": {
+      "group": "color.shadow",
+      "role": "input to --shadow-raised",
+      "since": "1.0.0"
+    },
+    "--color-shadow-modal-lg": {
+      "group": "color.shadow",
+      "role": "input to --shadow-modal",
+      "since": "1.0.0"
+    },
+    "--color-status-working": {
+      "group": "color.status",
+      "role": "working: dot, icon, edge, status word",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-status-ready": {
+      "group": "color.status",
+      "role": "ready: dot, icon, edge, status word",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-status-attention": {
+      "group": "color.status",
+      "role": "attention: dot, icon, edge, status word",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-status-error": {
+      "group": "color.status",
+      "role": "error: dot, icon, edge, status word",
+      "since": "1.0.0",
+      "contrast": 4.5
+    },
+    "--color-status-inactive": {
+      "group": "color.status",
+      "role": "inactive: dot, icon, edge, status word",
+      "since": "2.0.0",
+      "contrast": 4.5
+    },
+    "--color-status-working-bg": {
+      "group": "color.status",
+      "role": "working: tint ground",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-ready-bg": {
+      "group": "color.status",
+      "role": "ready: tint ground",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-attention-bg": {
+      "group": "color.status",
+      "role": "attention: tint ground",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-error-bg": {
+      "group": "color.status",
+      "role": "error: tint ground",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-inactive-bg": {
+      "group": "color.status",
+      "role": "inactive: tint ground",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-working-border": {
+      "group": "color.status",
+      "role": "working: chip and zone edge",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-ready-border": {
+      "group": "color.status",
+      "role": "ready: chip and zone edge",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-attention-border": {
+      "group": "color.status",
+      "role": "attention: chip and zone edge",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-error-border": {
+      "group": "color.status",
+      "role": "error: chip and zone edge",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--color-status-inactive-border": {
+      "group": "color.status",
+      "role": "inactive: chip and zone edge",
+      "since": "2.0.0",
+      "derived": true
+    },
+    "--safe-top": {
+      "group": "layout.safe-area",
+      "role": "safe-area inset",
+      "since": "1.0.0"
+    },
+    "--safe-bottom": {
+      "group": "layout.safe-area",
+      "role": "safe-area inset",
+      "since": "1.0.0"
+    },
+    "--safe-left": {
+      "group": "layout.safe-area",
+      "role": "safe-area inset",
+      "since": "1.0.0"
+    },
+    "--safe-right": {
+      "group": "layout.safe-area",
+      "role": "safe-area inset",
+      "since": "1.0.0"
+    },
+    "--radius-xs": {
+      "group": "shape.radius",
+      "role": "square",
+      "since": "1.0.0"
+    },
+    "--radius-sm": {
+      "group": "shape.radius",
+      "role": "square",
+      "since": "1.0.0"
+    },
+    "--radius-md": {
+      "group": "shape.radius",
+      "role": "square",
+      "since": "1.0.0"
+    },
+    "--radius-lg": {
+      "group": "shape.radius",
+      "role": "square",
+      "since": "1.0.0"
+    },
+    "--radius-xl": {
+      "group": "shape.radius",
+      "role": "square",
+      "since": "1.0.0"
+    },
+    "--radius-dot": {
+      "group": "shape.radius",
+      "role": "status dots only (rounded-dot)",
+      "since": "2.0.0"
+    },
+    "--font-sans": {
+      "group": "type.family",
+      "role": "one family",
+      "since": "1.0.0"
+    },
+    "--font-mono": {
+      "group": "type.family",
+      "role": "alias of --font-sans",
+      "since": "1.0.0"
+    },
+    "--text-label": {
+      "group": "type.size",
+      "role": "caps labels, chips, buttons",
+      "since": "2.0.0"
+    },
+    "--text-meta": {
+      "group": "type.size",
+      "role": "time, hints, code",
+      "since": "2.0.0"
+    },
+    "--text-body": {
+      "group": "type.size",
+      "role": "default, set on body",
+      "since": "2.0.0"
+    },
+    "--text-title": {
+      "group": "type.size",
+      "role": "section and dialog heads",
+      "since": "2.0.0"
+    },
+    "--text-display": {
+      "group": "type.size",
+      "role": "page titles",
+      "since": "2.0.0"
+    },
+    "--tracking-display": {
+      "group": "type.tracking",
+      "role": "display titles",
+      "since": "2.0.0"
+    },
+    "--tracking-body": {
+      "group": "type.tracking",
+      "role": "default, set on body",
+      "since": "2.0.0"
+    },
+    "--tracking-meta": {
+      "group": "type.tracking",
+      "role": "inline meta, chips",
+      "since": "2.0.0"
+    },
+    "--tracking-label": {
+      "group": "type.tracking",
+      "role": "buttons, field labels",
+      "since": "2.0.0"
+    },
+    "--tracking-caps": {
+      "group": "type.tracking",
+      "role": "section and modal heads",
+      "since": "2.0.0"
+    },
+    "--shadow-raised": {
+      "group": "elevation",
+      "role": "status card, inline panel",
+      "since": "2.0.0"
+    },
+    "--shadow-overlay": {
+      "group": "elevation",
+      "role": "menu, popover, toast, FAB",
+      "since": "2.0.0"
+    },
+    "--shadow-modal": {
+      "group": "elevation",
+      "role": "modal",
+      "since": "2.0.0"
+    }
+  },
+  "recipes": {
+    "INPUT_CLASS": {
+      "since": "1.0.0"
+    },
+    "FOCUS_RING_CLASS": {
+      "since": "1.1.0"
+    },
+    "ICON_BUTTON_CLASS": {
+      "since": "1.1.0"
+    },
+    "SECONDARY_BUTTON_CLASS": {
+      "since": "1.0.0"
+    },
+    "PRIMARY_BUTTON_CLASS": {
+      "since": "1.0.0"
+    },
+    "DANGER_BUTTON_CLASS": {
+      "since": "1.0.0"
+    },
+    "ATTENTION_BUTTON_CLASS": {
+      "since": "1.0.0"
+    },
+    "CHECKBOX_CLASS": {
+      "since": "1.0.0"
+    },
+    "HARD_WRAP_TEXT_CLASS": {
+      "since": "1.0.0"
+    },
+    "STATUS_CARD_CLASS": {
+      "since": "1.0.0"
+    }
+  },
+  "banned": [
+    {
+      "pattern": "\\btext-\\[\\d+px\\]",
+      "use": "text-label | text-meta | text-body | text-title | text-display"
+    },
+    {
+      "pattern": "\\btext-(?:xs|sm|base|lg|xl|[2-9]xl)\\b",
+      "use": "text-label | text-meta | text-body | text-title | text-display"
+    },
+    {
+      "pattern": "\\btracking-\\[",
+      "use": "tracking-display | tracking-body | tracking-meta | tracking-label | tracking-caps"
+    },
+    {
+      "pattern": "\\bshadow-\\[",
+      "use": "shadow-raised | shadow-overlay | shadow-modal"
+    },
+    {
+      "pattern": "\\brounded(?:-(?!dot\\b|none\\b)[\\w\\[\\]./-]+)?(?=[\\s\"'`])",
+      "use": "square corners; rounded-dot for status dots"
+    },
+    {
+      "pattern": "\\bopacity-(?!0\\b|50\\b|100\\b)\\d+",
+      "use": "opacity-0 | opacity-50 (disabled) | opacity-100; mute with a text token"
+    },
+    {
+      "pattern": "\\bfont-(?:semibold|light|extrabold|black|thin)\\b",
+      "use": "font-normal | font-medium | font-bold"
+    }
+  ],
+  "literalAllow": [
+    {
+      "file": "components/SessionDetail.tsx",
+      "reason": "artifact preview iframe paints a white page canvas; favicon fallback color"
+    },
+    {
+      "file": "lib/file-attachments.ts",
+      "reason": "canvas fill when flattening an image attachment"
+    }
+  ]
+}

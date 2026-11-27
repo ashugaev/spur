@@ -270,7 +270,7 @@ export function ModelSelect({
       {open ? (
         <div
           aria-label="Model options"
-          className="fixed z-20 flex max-h-80 w-max min-w-[min(20rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] flex-col overflow-hidden border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+          className="fixed z-20 flex max-h-80 w-max min-w-[min(20rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] flex-col overflow-hidden border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-overlay"
           ref={menuRef}
           role="menu"
           style={menuStyle}
@@ -290,11 +290,11 @@ export function ModelSelect({
                 <Skeleton className="h-4 w-28" label="Loading models" />
               </div>
             ) : error ? (
-              <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-status-error)]">
+              <div className="px-2 py-2 text-label uppercase tracking-label text-[var(--color-status-error)]">
                 {error}
               </div>
             ) : orderedModels.length === 0 ? (
-              <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
+              <div className="px-2 py-2 text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
                 No models
               </div>
             ) : (
@@ -345,13 +345,13 @@ export function ModelSelect({
                           // chain above preselects — a different row can be
                           // the actual selection. Worded so it never reads
                           // as "the default choice" for this control.
-                          <span className="ml-1 text-[10px] font-normal text-[var(--color-text-tertiary)]">
+                          <span className="ml-1 text-label font-normal text-[var(--color-text-tertiary)]">
                             (catalog default)
                           </span>
                         ) : null}
                       </span>
                       <span
-                        className="block truncate text-[10px] text-[var(--color-text-secondary)]"
+                        className="block truncate text-label text-[var(--color-text-secondary)]"
                         title={model.id}
                       >
                         {model.id}
