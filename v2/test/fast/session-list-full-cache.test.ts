@@ -186,6 +186,64 @@ describe("full-view list cache", () => {
     expect(await activity("idle")).toBe(raised);
   });
 
+  it("serves a queue write made while the startup warm is still running", async () => {
+    writeFleet(2, 0);
+    await service.list();
+    const internals = sessionServiceInternals(service);
+    let release: () => void = () => {};
+    internals.fullViewCacheReady = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = service.list();
+    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      stopped("idle-0", { queuedMessages: { messages: ["ring"] } } as Partial<SessionRecord>),
+    );
+    release();
+    const idle = ((await pending) as SessionView[]).find((view) => view.id === "idle-0");
+    expect(idle?.queuedMessages?.messages).toEqual(["ring"]);
+  });
+
+  it("runs cache hits and lifecycle rebuilds through the shared gate", async () => {
+    writeFleet(20, 0);
+    await service.list();
+    const internals = service as unknown as {
+      requestScopedFields(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.requestScopedFields.bind(internals);
+    let active = 0;
+    let peak = 0;
+    vi.spyOn(internals, "requestScopedFields").mockImplementation(async (...args) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await Promise.resolve();
+      await Promise.resolve();
+      try {
+        return await original(...args);
+      } finally {
+        active -= 1;
+      }
+    });
+    await service.list();
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(8);
+  });
+
+  it("drops the listed lastActivityAt high-water mark when the data directory changes", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "run" }));
+    await service.list();
+    const internals = sessionServiceInternals(service);
+    internals.listedActivityHighWater.set("run", "2026-03-18T12:00:00.000Z");
+    const nextDir = join(TEST_DATA_DIR, "next");
+    metadata.writeSession(nextDir, record({ id: "run" }));
+    service.applyConfig({ ...config, dataDir: nextDir }, []);
+    const run = ((await service.list()) as SessionView[]).find((view) => view.id === "run");
+    expect(Date.parse(run?.lastActivityAt ?? "")).toBeLessThan(
+      Date.parse("2026-03-18T12:00:00.000Z"),
+    );
+  });
+
   it("keeps the startup warm from rejecting when the listing fails", async () => {
     listSessionsMock.mockImplementationOnce(() => {
       throw new Error("listing unavailable");

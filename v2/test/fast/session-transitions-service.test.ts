@@ -936,4 +936,33 @@ describe("session transitions service", () => {
     expect(all.filter((entry) => entry.kind === "state" && entry.to === "killed")).toHaveLength(1);
     expect((await poll({ since: cursor })).entries).toEqual([]);
   });
+
+  it("keeps the killed state edge when a read that started before the kill resumes after it", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    evidence("waiting");
+    const pending = service.get("api-1").catch(() => undefined);
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    release();
+    await pending;
+    expect(binding().store.observedState("api-1")).toBe("killed");
+    const states = (await poll({ since: cursor, kinds: ["state"] })).entries.map(
+      (entry) => entry.to,
+    );
+    expect(states.at(-1)).toBe("killed");
+  });
 });

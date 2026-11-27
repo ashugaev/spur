@@ -6736,6 +6736,7 @@ export class SessionService {
       this.transitionsBinding?.unregister();
       this.transitionsBinding = undefined;
       this.stateCache.clear();
+      this.listedActivityHighWater.clear();
       this.stateHistory.clear();
       this.claudeJsonlReaders.clear();
       this.lastClassifiedLogStates.clear();
@@ -12978,6 +12979,8 @@ export class SessionService {
     links?: readonly { label: string; url?: string }[];
     signal?: AbortSignal | undefined;
   }): Promise<SessionListView[]> {
+    // Before the listing snapshot: a record written during the warm must not hit.
+    if (options?.view !== "dashboard" && this.fullViewCacheReady) await this.fullViewCacheReady;
     const allSessions = listSessions(this.config.dataDir);
     const listedIds = new Set(allSessions.map((session) => session.id));
     this.lifecycle.prune(listedIds);
@@ -13035,7 +13038,6 @@ export class SessionService {
       return views.filter((view) => included(view) && matchesLinks(view));
     }
     const sessions = allSessions.filter(included);
-    if (this.fullViewCacheReady) await this.fullViewCacheReady;
     // Compute the claude accounts snapshot once for the whole batch instead of
     // per-session inside enrich.
     const claudeAccounts = await this.computeClaudeAccountsView();
@@ -13058,7 +13060,6 @@ export class SessionService {
             return undefined;
           }
         };
-        if (hit) return build();
         return this.fullListGate.run(() => {
           options?.signal?.throwIfAborted();
           return build();
@@ -13067,7 +13068,8 @@ export class SessionService {
     );
     const views = await this.finalizeLifecycleRows(
       rows.filter((row) => row !== undefined),
-      (record, listing) => this.enrichWithClassified(record, undefined, listing),
+      (record, listing) =>
+        this.fullListGate.run(() => this.enrichWithClassified(record, undefined, listing)),
       { includePending: true, onExhausted: "lastBuild", signal: options?.signal },
     );
     for (const view of views) {
@@ -31286,6 +31288,7 @@ export class SessionService {
       Boolean(record.serverErrorAt) ||
       Boolean(record.error?.trim() && !record.error.startsWith(STATUS_DETECTION_ERROR_PREFIX));
     const inputHasIndependentError = hasIndependentError(session);
+    const inputTerminal = isTerminalSessionStatus(session.status);
     const classified = await this.classifySessionRecord(session, { journalPolicy: "read" });
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified, "read");
     if (persisted.status === "missing") {
@@ -31308,10 +31311,16 @@ export class SessionService {
     const project = this.resolveProjectForSession(session);
     const tokenUsageView = this.deriveTokenUsageView(session);
     const sidecars = await this.sidecarViews(session, project);
-    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
-      const current = readSession(this.config.dataDir, session.id);
-      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
-      return this.enrichWithClassified(current, claudeAccounts, sessionBatch);
+    // Also reclassify a record that ended while this classification ran: the
+    // write hook already published its terminal edge, and the in-hand state
+    // predates it.
+    const latest = readSession(this.config.dataDir, session.id);
+    if (
+      (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
+      (latest && isTerminalSessionStatus(latest.status) && !inputTerminal)
+    ) {
+      if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      return this.enrichWithClassified(latest, claudeAccounts, sessionBatch);
     }
     const reported = this.withReportingError(session);
     const reportingConsistent = isDeepStrictEqual(reported, session);
