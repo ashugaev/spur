@@ -703,13 +703,16 @@ describe("OpenCode adapter", () => {
         const anchor = Date.now();
         const silent = anchor - 60_000;
 
-        await readOpenCodeState("ses_active", anchor);
+        const activeRead = readOpenCodeState("ses_active", anchor);
+        // Move the clock while export is in flight: the TTL starts at completion.
+        vi.setSystemTime(anchor + 1_500);
+        await activeRead;
         await readOpenCodeState("ses_silent", silent);
         expect(await spawnCountFor(countPath, "ses_active")).toBe(1);
         expect(await spawnCountFor(countPath, "ses_silent")).toBe(1);
 
         for (let step = 1; step <= 10; step += 1) {
-          const at = anchor + step * 6_000;
+          const at = Date.now() + 6_000;
           vi.setSystemTime(at);
           await readOpenCodeState("ses_active", at);
           await readOpenCodeState("ses_silent", silent);
