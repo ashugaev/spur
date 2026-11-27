@@ -6821,7 +6821,11 @@ export class SessionService {
         }
       });
       this.transitionsBinding = binding;
-      for (const record of listSessions(dataDir)) publishEdges(record, writeDerivedState(record));
+      for (const record of listSessions(dataDir)) {
+        // Seeded so the first field-only write of an existing session is no status change.
+        this.lastWrittenStatuses.set(record.id, record.status);
+        publishEdges(record, writeDerivedState(record));
+      }
       // A rebind boots the new store like a restart; the initial start covers the first one.
       if (this.backgroundLoopsStarted) this.startBootErrorRepair();
     }

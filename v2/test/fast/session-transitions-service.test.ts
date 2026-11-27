@@ -1225,6 +1225,18 @@ describe("session transitions service", () => {
     ).toEqual(["killed"]);
   });
 
+  it("leaves the status epoch alone on a field-only write right after boot", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await restart();
+    const epochs = (service as unknown as { statusEpochs: Map<string, number> }).statusEpochs;
+    const before = epochs.get("api-1") ?? 0;
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({ updatedAt: "2026-03-18T10:04:00.000Z", agentSessionId: "a-1" }),
+    );
+    expect(epochs.get("api-1") ?? 0).toBe(before);
+  });
+
   it("counts a status change after a failed journal append", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     const epochs = (service as unknown as { statusEpochs: Map<string, number> }).statusEpochs;
