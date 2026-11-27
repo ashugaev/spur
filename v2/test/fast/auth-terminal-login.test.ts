@@ -157,30 +157,73 @@ describe("auth terminal logins", () => {
     });
 
     it("survives setRunning, the verifying rebuild and finish", async () => {
-      const s = await setup();
-      s.deps.importNativeLogin.mockRejectedValueOnce(new Error("down"));
-      const started = await s.terminals.start({ accountId: ACCOUNT });
-      await s.advance();
-      expect(s.terminals.get(started.id)).toMatchObject({
-        reason: "companion_unavailable",
-        command: "claude auth login",
+      let releaseCleanup: () => void = () => {};
+      const cleanupBlocked = new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
       });
+      let cleanupEntered: () => void = () => {};
+      const entered = new Promise<void>((resolve) => {
+        cleanupEntered = resolve;
+      });
+      let kills = 0;
+      const killTmuxSession = vi.fn(async () => {
+        if (++kills === 2) {
+          cleanupEntered();
+          await cleanupBlocked;
+        }
+      });
+      const s = await setup({ killTmuxSession });
+      let restoreTimerSpy: (() => void) | undefined;
+      try {
+        s.deps.importNativeLogin.mockRejectedValueOnce(new Error("down"));
+        const started = await s.terminals.start({ accountId: ACCOUNT });
+        await s.advance();
+        expect(s.terminals.get(started.id)).toMatchObject({
+          reason: "companion_unavailable",
+          command: "claude auth login",
+        });
 
-      s.deps.importNativeLogin.mockResolvedValueOnce(login("pending", { stage: "verifying" }));
-      await s.advance();
-      expect(s.terminals.get(started.id)).toMatchObject({
-        status: "verifying",
-        command: "claude auth login",
-      });
+        s.deps.importNativeLogin.mockResolvedValueOnce(login("pending", { stage: "verifying" }));
+        await s.advance();
+        await entered;
+        expect(killTmuxSession).toHaveBeenCalledTimes(2);
+        expect(s.terminals.get(started.id)).toMatchObject({
+          status: "verifying",
+          command: "claude auth login",
+        });
 
-      s.deps.loginStatus.mockResolvedValueOnce(login("failed", { errorCode: "duplicate" }));
-      await s.advance();
-      expect(s.terminals.get(started.id)).toMatchObject({
-        status: "not_signed_in",
-        reason: "duplicate",
-        command: "claude auth login",
-      });
-      s.terminals.dispose();
+        let watcherRearmed: () => void = () => {};
+        const rearmed = new Promise<void>((resolve) => {
+          watcherRearmed = resolve;
+        });
+        const fakeSetTimeout = globalThis.setTimeout;
+        const timerSpy = vi
+          .spyOn(globalThis, "setTimeout")
+          .mockImplementation((...args: Parameters<typeof globalThis.setTimeout>) => {
+            const handle = fakeSetTimeout(...args);
+            if (typeof args[0] === "function" && args[1] === TERMINAL_TICK_MS) watcherRearmed();
+            return handle;
+          });
+        restoreTimerSpy = () => timerSpy.mockRestore();
+        releaseCleanup();
+        await rearmed;
+        expect(timerSpy).toHaveBeenCalledWith(expect.any(Function), TERMINAL_TICK_MS);
+        expect(existsSync(s.managedHome)).toBe(false);
+        restoreTimerSpy();
+
+        s.deps.loginStatus.mockResolvedValueOnce(login("failed", { errorCode: "duplicate" }));
+        await s.advance();
+        expect(s.terminals.get(started.id)).toMatchObject({
+          status: "not_signed_in",
+          reason: "duplicate",
+          command: "claude auth login",
+        });
+      } finally {
+        releaseCleanup();
+        restoreTimerSpy?.();
+        s.terminals.dispose();
+        await vi.waitFor(() => expect(existsSync(s.managedHome)).toBe(false));
+      }
     });
   });
 
