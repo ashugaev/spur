@@ -4658,7 +4658,7 @@ export class SessionService {
     this.startMemoryShedLoop();
     this.dashboardCacheReady = this.trackBackgroundLoop(this.runDashboardCacheTick());
     this.fullViewCacheReady = this.trackBackgroundLoop(this.warmFullViewCache());
-    void this.trackBackgroundLoop(this.repairBootKeptErrors());
+    this.startBootErrorRepair();
     this.startDashboardCacheLoop();
     this.startReaperLoop();
     this.startSessionGcLoop();
@@ -6810,6 +6810,8 @@ export class SessionService {
       });
       this.transitionsBinding = binding;
       for (const record of listSessions(dataDir)) publishEdges(record, writeDerivedState(record));
+      // A rebind boots the new store like a restart; the initial start covers the first one.
+      if (this.backgroundLoopsStarted) this.startBootErrorRepair();
     }
     const removeIds = new Set(options.unconfiguredToRemove ?? []);
     mutateConfigRegistry(this.config.dataDir, (current) => ({
@@ -13210,6 +13212,10 @@ export class SessionService {
   // real classification: a lost state append is repaired, a persistent
   // diagnostic stays `error`. Not awaited by list: each row can walk its desk
   // siblings. Never rejects.
+  private startBootErrorRepair(): void {
+    void this.trackBackgroundLoop(this.repairBootKeptErrors());
+  }
+
   private repairBootKeptErrors(): Promise<void> {
     const store = this.transitionsBinding?.store;
     return this.enrichNonLiveRecords(

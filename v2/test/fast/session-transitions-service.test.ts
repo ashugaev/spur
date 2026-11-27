@@ -20,6 +20,7 @@ import { appendFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import type * as Fs from "node:fs";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SessionTransitions } from "../../src/session-transitions.js";
 import type * as Metadata from "../../src/metadata.js";
 import type * as Config from "../../src/config.js";
 import type { SessionService } from "../../src/session-service.js";
@@ -1052,6 +1053,21 @@ describe("session transitions service", () => {
     expect((await poll({ kinds: ["state"] })).entries.map((entry) => entry.to)).toEqual([
       "stopped",
     ]);
+  });
+
+  it("runs the boot repair for the new store after a data-directory rebind", async () => {
+    const nextDir = join(TEST_DATA_DIR, "next");
+    const killed = record({ status: "killed" });
+    metadata.writeSession(nextDir, killed);
+    // The new store's checkpoint holds `error` for an ended row with no diagnostic.
+    const prior = new SessionTransitions(nextDir);
+    prior.observeStatus(killed, []);
+    prior.observeState(killed, "error", []);
+    (service as unknown as { backgroundLoopsStarted: boolean }).backgroundLoopsStarted = true;
+    service.applyConfig({ ...config, dataDir: nextDir }, []);
+    expect(binding().store.observedState("api-1")).toBe("error");
+    await service.settleBackgroundSpawns();
+    expect(binding().store.observedState("api-1")).toBe("killed");
   });
 
   it("keeps a boot repair running across a same-directory reload", async () => {
