@@ -4231,6 +4231,7 @@ export class SessionService {
   // the status came back (pause then resume). Field-only writes do not count, so
   // the classifier's own readout and healing writes never trip it.
   private readonly statusEpochs = new Map<string, number>();
+  private readonly lastWrittenStatuses = new Map<string, SessionStatus>();
   // Bumped by applyConfig: an enrichment started before a reload never serves after it.
   private configGeneration = 0;
   private reaperTimer: NodeJS.Timeout | null = null;
@@ -6794,9 +6795,11 @@ export class SessionService {
       };
       binding.unregister = observeSessionWrites(dataDir, (record) => {
         if (this.transitionsBinding !== binding) return;
-        // A new status bumps the session's epoch (see statusEpochs).
-        if (store.observedStatus(record.id) !== record.status) {
+        // A new status bumps the session's epoch (see statusEpochs). Compared with
+        // the last record seen here, not the journal, which a failed append lags.
+        if (this.lastWrittenStatuses.get(record.id) !== record.status) {
           this.statusEpochs.set(record.id, (this.statusEpochs.get(record.id) ?? 0) + 1);
+          this.lastWrittenStatuses.set(record.id, record.status);
         }
         const derived = writeDerivedState(record);
         try {
@@ -13080,6 +13083,9 @@ export class SessionService {
       return views.filter((view) => included(view) && matchesLinks(view));
     }
     const sessions = allSessions.filter(included);
+    const snapshotEpochs = new Map(
+      sessions.map((session) => [session.id, this.statusEpochs.get(session.id) ?? 0]),
+    );
     // Compute the claude accounts snapshot once for the whole batch instead of
     // per-session inside enrich.
     const claudeAccounts = await this.computeClaudeAccountsView();
@@ -13087,11 +13093,13 @@ export class SessionService {
       sessions.map((session) => {
         const build = async () => {
           try {
+            // The snapshot may predate a status change while it queued for a slot.
+            const current = this.latestIfStatusMoved(session, snapshotEpochs.get(session.id) ?? 0);
             // Checked inside the gate slot: an entry can expire while queued.
-            const hit = this.fullViewHit(session);
+            const hit = this.fullViewHit(current);
             return hit
-              ? await this.reuseFullView(session, hit, claudeAccounts, allSessions)
-              : await this.enrichFullView(session, claudeAccounts, allSessions);
+              ? await this.reuseFullView(current, hit, claudeAccounts, allSessions)
+              : await this.enrichFullView(current, claudeAccounts, allSessions);
           } catch (error) {
             if (
               error instanceof SessionResourceNotFoundError &&
@@ -13147,7 +13155,9 @@ export class SessionService {
       if (!listedIds.has(id)) this.listedActivityHighWater.delete(id);
     }
     for (const id of this.statusEpochs.keys()) {
-      if (!listedIds.has(id)) this.statusEpochs.delete(id);
+      if (listedIds.has(id)) continue;
+      this.statusEpochs.delete(id);
+      this.lastWrittenStatuses.delete(id);
     }
   }
 
@@ -30943,6 +30953,15 @@ export class SessionService {
     session: SessionRecord,
   ): Promise<Omit<DashboardSessionView, "lifecycle"> | undefined> {
     return (await this.assembleDashboard(session))?.view;
+  }
+
+  // A full-list snapshot taken before a status change (queued behind a gate
+  // slot, say) is replaced by the latest record, so the epoch captured next never
+  // describes a newer status than the classified record. Other callers (sweep,
+  // delivery loops) enrich the record they hold on purpose.
+  private latestIfStatusMoved(record: SessionRecord, snapshotEpoch: number): SessionRecord {
+    if ((this.statusEpochs.get(record.id) ?? 0) === snapshotEpoch) return record;
+    return readSession(this.config.dataDir, record.id) ?? record;
   }
 
   private async assembleDashboard(

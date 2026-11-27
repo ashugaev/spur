@@ -1197,6 +1197,50 @@ describe("session transitions service", () => {
     ).toEqual(["killed"]);
   });
 
+  it("classifies the latest record when a queued snapshot predates a kill", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "stopped", stopReason: "manual_pause" }));
+    await service.get("api-1");
+    const cursor = (await poll()).nextCursor;
+    // The list snapshots its records, then waits on the accounts read before its
+    // jobs run; the kill lands in that gap.
+    const internals = service as unknown as {
+      computeClaudeAccountsView(): Promise<unknown>;
+    };
+    const original = internals.computeClaudeAccountsView.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "computeClaudeAccountsView").mockImplementationOnce(async () => {
+      await held;
+      return original();
+    });
+    const listing = service.list({ includeCompleted: true });
+    await vi.waitFor(() => expect(internals.computeClaudeAccountsView).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed", retainInList: true }));
+    release();
+    await listing;
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed"]);
+  });
+
+  it("counts a status change after a failed journal append", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    const epochs = (service as unknown as { statusEpochs: Map<string, number> }).statusEpochs;
+    const before = epochs.get("api-1") ?? 0;
+    const restore = failJournalAppends();
+    expect(() =>
+      metadata.writeSession(
+        TEST_DATA_DIR,
+        record({ status: "stopped", stopReason: "manual_pause" }),
+      ),
+    ).toThrow("journal append unavailable");
+    restore();
+    metadata.writeSession(TEST_DATA_DIR, record());
+    expect(epochs.get("api-1")).toBe(before + 2);
+  });
+
   it("publishes no stale state when a pause and resume overlap a rate-limit clear classification", async () => {
     metadata.writeSession(
       TEST_DATA_DIR,
