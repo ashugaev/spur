@@ -6,11 +6,7 @@ import {
   DEFAULT_ARTIFACT_SORT,
   type ArtifactSortState,
 } from "@/components/ArtifactList";
-import {
-  SECTION_BUTTON_CLASS,
-  SECTION_CLASS,
-  SECTION_HEADING_CLASS,
-} from "@/components/cron-job-classes";
+import { SECTION_CLASS, SECTION_HEADING_CLASS } from "@/components/cron-job-classes";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import {
   clearCronStorage,
@@ -18,7 +14,12 @@ import {
   fetchCronStorage,
   saveCronStorageNote,
 } from "@/lib/cron-jobs";
-import { INPUT_CLASS } from "@/design/classes";
+import {
+  DANGER_BUTTON_CLASS,
+  ICON_BUTTON_CLASS,
+  INPUT_CLASS,
+  SECONDARY_BUTTON_CLASS,
+} from "@/design/classes";
 import { formatBytes, formatRelativeTime } from "@/lib/format";
 import type { CronStorageView } from "@/lib/types";
 
@@ -29,16 +30,13 @@ type LoadState =
 
 const SECONDARY_TEXT = "text-[var(--color-text-secondary)]";
 const ERROR_TEXT = "text-[var(--color-status-error)]";
-const TRASH_BUTTON_CLASS =
-  "inline-flex h-7 w-7 items-center justify-center border border-[var(--color-border-default)] text-[var(--color-text-secondary)] outline-none hover:border-[var(--color-status-error)] focus-visible:border-[var(--color-status-error)] disabled:cursor-not-allowed disabled:opacity-50";
-const DANGER_BUTTON_CLASS =
-  "border border-[var(--color-status-error)] px-2 py-1 font-bold uppercase text-[var(--color-status-error)] outline-none focus-visible:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50";
+const TRASH_BUTTON_CLASS = `${ICON_BUTTON_CLASS} h-7 w-7 text-[var(--color-text-secondary)]`;
 // Restyles ArtifactList through descendant variants; the list component stays unchanged.
 const FILES_CLASS = [
   "[&_thead_tr]:border-[var(--color-border-subtle)]",
-  "[&_th>button]:px-2 [&_th>button]:py-1 [&_th>button]:tracking-[0.06em] [&_th>button]:whitespace-nowrap",
+  "[&_th>button]:px-2 [&_th>button]:py-1 [&_th>button]:tracking-meta [&_th>button]:whitespace-nowrap",
   "[&_th:first-child>button]:pl-0",
-  "[&_th:last-child]:py-1 [&_th:last-child]:pl-2 [&_th:last-child]:pr-0 [&_th:last-child]:tracking-[0.06em] [&_th:last-child]:whitespace-nowrap",
+  "[&_th:last-child]:py-1 [&_th:last-child]:pl-2 [&_th:last-child]:pr-0 [&_th:last-child]:tracking-meta [&_th:last-child]:whitespace-nowrap",
   "[&_td]:px-2 [&_td]:py-1.5 [&_td:first-child]:pl-0 [&_td:last-child]:pr-0",
   "[&_tbody_tr:last-child]:border-b-0",
   "[&_td_a]:border-transparent [&_td_button]:border-transparent",
@@ -138,7 +136,7 @@ export function CronStorageSection({
               {confirmText(view)}
             </span>
             <button
-              className={SECTION_BUTTON_CLASS}
+              className={SECONDARY_BUTTON_CLASS}
               disabled={busy}
               onClick={() => setConfirming(false)}
               type="button"
@@ -159,7 +157,7 @@ export function CronStorageSection({
             <button
               aria-controls={noteId}
               aria-expanded={noteOpen}
-              className={`${SECTION_BUTTON_CLASS} ${noteOpen ? "border-[var(--color-accent)]!" : ""}`}
+              className={`${SECONDARY_BUTTON_CLASS} ${noteOpen ? "border-[var(--color-accent)]! text-[var(--color-text-primary)]" : ""}`}
               onClick={() => setNoteOpen((open) => !open)}
               type="button"
             >
@@ -199,7 +197,7 @@ export function CronStorageSection({
           />
           <div className="flex items-center justify-between gap-3">
             {dirty ? (
-              <span className="text-[var(--color-chip-warn-text)]">Unsaved changes</span>
+              <span className="text-[var(--color-status-attention)]">Unsaved changes</span>
             ) : view.note !== "" && view.noteUpdatedAt ? (
               <span className={SECONDARY_TEXT}>
                 Updated {formatRelativeTime(view.noteUpdatedAt)}
@@ -208,7 +206,7 @@ export function CronStorageSection({
               <span className={SECONDARY_TEXT}>Later runs read this note</span>
             )}
             <button
-              className={SECTION_BUTTON_CLASS}
+              className={SECONDARY_BUTTON_CLASS}
               disabled={!dirty || busy}
               onClick={() => void run(() => saveCronStorageNote(projectId, triggerId, noteText))}
               type="button"
