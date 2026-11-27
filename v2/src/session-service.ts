@@ -13050,9 +13050,10 @@ export class SessionService {
     const claudeAccounts = await this.computeClaudeAccountsView();
     const rows = await Promise.all(
       sessions.map((session) => {
-        const hit = this.fullViewHit(session);
         const build = async () => {
           try {
+            // Checked inside the gate slot: an entry can expire while queued.
+            const hit = this.fullViewHit(session);
             return hit
               ? await this.reuseFullView(session, hit, claudeAccounts, allSessions)
               : await this.enrichFullView(session, claudeAccounts, allSessions);
@@ -13184,10 +13185,16 @@ export class SessionService {
   private async warmFullViewCache(): Promise<void> {
     try {
       const listing = listSessions(this.config.dataDir);
+      // Ended rows whose boot-kept `error` was observed before the restart get
+      // one real classification: a lost state append is repaired, a persistent
+      // diagnostic stays `error`.
+      const store = this.transitionsBinding?.store;
       const records = listing.filter(
         (record) =>
           !this.isLiveSessionRecord(record) &&
-          isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false),
+          (isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false) ||
+            (isTerminalSessionStatus(record.status) &&
+              store?.observedState(record.id) === "error")),
       );
       if (records.length === 0) return;
       const claudeAccounts = await this.computeClaudeAccountsView();

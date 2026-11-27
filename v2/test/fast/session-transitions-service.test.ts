@@ -999,8 +999,31 @@ describe("session transitions service", () => {
     await restart();
     expect(journalLines()).toBe(before);
     expect((await poll({ since: cursor })).entries).toEqual([]);
+    await sessionServiceInternals(service).warmFullViewCache();
     await service.list({ includeCompleted: true });
     expect((await poll({ since: cursor })).entries).toEqual([]);
+  });
+
+  it("repairs a boot-kept error on a killed record once the diagnostic is gone", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed", retainInList: true }));
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed: EACCES",
+    });
+    await service.list({ includeCompleted: true });
+    expect(binding().store.observedState("api-1")).toBe("error");
+    // Hidden ended row: no list or sweep revisits it.
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    const cursor = (await poll()).nextCursor;
+    await restart();
+    expect(binding().store.observedState("api-1")).toBe("error");
+    await sessionServiceInternals(service).warmFullViewCache();
+    expect(binding().store.observedState("api-1")).toBe("killed");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed"]);
   });
 
   it("keeps the killed state edge when a read that started before the kill resumes after it", async () => {

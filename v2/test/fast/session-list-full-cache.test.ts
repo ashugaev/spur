@@ -251,6 +251,34 @@ describe("full-view list cache", () => {
     expect(calls).toBe(1);
   });
 
+  it("rebuilds a completed row whose cache entry expired while it waited for a gate slot", async () => {
+    writeFleet(0, 8);
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({ id: "zdone", status: "completed", retainInList: true }),
+    );
+    await service.list();
+    const internals = service as unknown as {
+      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+    };
+    const original = internals.enrichWithClassified.bind(internals);
+    const seen: string[] = [];
+    vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (record, ...rest) => {
+      seen.push(record.id);
+      // Eight running rows hold every slot past the 5 s age limit.
+      if (record.id.startsWith("run-")) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, serviceModule.ATTENTION_POLL_INTERVAL_MS + 1),
+        );
+      }
+      return original(record, ...rest);
+    });
+    const pending = service.list();
+    await vi.advanceTimersByTimeAsync(serviceModule.ATTENTION_POLL_INTERVAL_MS + 1);
+    await pending;
+    expect(seen).toContain("zdone");
+  });
+
   it("stops queued lifecycle rebuilds inside each callback when the request signal aborts", async () => {
     writeFleet(0, 12);
     const internals = service as unknown as {
