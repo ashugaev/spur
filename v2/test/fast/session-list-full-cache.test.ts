@@ -404,6 +404,23 @@ describe("full-view list cache", () => {
     await repair;
   });
 
+  it("leaves no high-water entry from the old store when the data directory is rebound mid-list", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "run" }));
+    const nextDir = join(TEST_DATA_DIR, "next");
+    metadata.writeSession(nextDir, record({ id: "run" }));
+    const internals = service as unknown as {
+      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+    };
+    const original = internals.enrichWithClassified.bind(internals);
+    vi.spyOn(internals, "enrichWithClassified").mockImplementationOnce(async (record, ...rest) => {
+      const result = await original(record, ...rest);
+      service.applyConfig({ ...config, dataDir: nextDir }, []);
+      return result;
+    });
+    await service.list();
+    expect(sessionServiceInternals(service).listedActivityHighWater.has("run")).toBe(false);
+  });
+
   it("keeps the startup warm from rejecting when the listing fails", async () => {
     listSessionsMock.mockImplementationOnce(() => {
       throw new Error("listing unavailable");
