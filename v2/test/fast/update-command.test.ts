@@ -545,7 +545,7 @@ describe("reinitUnits", () => {
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "6200",
       exposeWeb: true,
-      tailscale: false,
+      tailscale: "off",
     });
   });
 
@@ -570,11 +570,11 @@ describe("reinitUnits", () => {
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "5555",
       exposeWeb: false,
-      tailscale: false,
+      tailscale: "off",
     });
   });
 
-  it("re-applies --tailscale when the live unit already carries a Tailscale bind", async () => {
+  it("keeps the Tailscale bind, never installs, when the live unit already carries one", async () => {
     const home = await mkdtemp(join(tmpdir(), "spur-update-reinit-"));
     const unitDir = join(home, ".config", "systemd", "user");
     await mkdir(unitDir, { recursive: true });
@@ -595,7 +595,7 @@ describe("reinitUnits", () => {
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "4311",
       exposeWeb: false,
-      tailscale: true,
+      tailscale: "keep",
     });
   });
 });
@@ -638,7 +638,7 @@ describe("createRealUpdateDeps reinit delegation", () => {
       configPath: selectedConfig,
       webPort: "6200",
       exposeWeb: true,
-      tailscale: false,
+      tailscale: "off",
     });
   });
 

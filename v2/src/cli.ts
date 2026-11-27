@@ -5,8 +5,10 @@ import {
   collectHostInstallChecks,
   hasErrorSeverity,
   renderHostInstallChecks,
+  resolveSystemdScope,
   runNpmInit,
   type ConfigRegistryPathEntry,
+  type NpmInitTailscaleMode,
   type HostInstallCheck,
 } from "./host-install.js";
 import {
@@ -108,6 +110,7 @@ import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
 import { assertValidSharedMemoryScope } from "./shared-memory.js";
 import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
+import { readWebUnitOptions } from "./update-health.js";
 import {
   buildMergedConfig,
   dropWorktreeInternalPaths,
@@ -1938,7 +1941,7 @@ function helpNotes(command: Command): string[] {
   }
   if (command.name() === "init") {
     return [
-      "Run once per host after `npm install -g`. Installs user systemd units, enables linger, starts spur-daemon and spur-web.",
+      "Run once per host after `npm install -g`. Installs user systemd units, enables linger, starts spur-daemon and spur-web. Installs Tailscale only with `--tailscale`.",
       "`npm install` alone does not register or start services.",
     ];
   }
@@ -2904,14 +2907,38 @@ export function createProgram(cliEntrypoint: string): Command {
       await runMcpTunnel(program.opts<{ config?: string }>().config);
     });
 
+  const initTailscaleFlags = new Set<string>();
   program
     .command("init")
     .description("Install user systemd units and start Spur after npm install.")
     .option("--no-start", "Install units and linger only; do not start services")
     .option("--expose-web", "Bind web UI to 0.0.0.0 instead of 127.0.0.1")
     .option("--web-port <port>", "Web listen port (default 5555)")
-    .option("--no-tailscale", "Skip Tailscale private-access setup; web UI stays on 127.0.0.1 only")
-    .action((options) => {
+    .option(
+      "--tailscale",
+      "Install Tailscale if missing (needs root or sudo) and bind the web UI to the tailnet IP",
+    )
+    .option(
+      "--no-tailscale",
+      "Skip Tailscale and drop an existing tailnet bind; web UI stays on 127.0.0.1 only",
+    )
+    .on("option:tailscale", () => initTailscaleFlags.add("--tailscale"))
+    .on("option:no-tailscale", () => initTailscaleFlags.add("--no-tailscale"))
+    .action((options, command: Command) => {
+      // commander cannot express this conflict: both flags share one attribute.
+      if (initTailscaleFlags.size === 2) {
+        command.error("spur init: --tailscale and --no-tailscale cannot be used together", {
+          exitCode: 2,
+        });
+      }
+      const tailscale: NpmInitTailscaleMode =
+        options.tailscale === true
+          ? "install"
+          : options.tailscale === false
+            ? "off"
+            : readWebUnitOptions(resolveSystemdScope(homedir())).tailscale
+              ? "keep"
+              : "hint";
       runNpmInit(cliEntrypoint, {
         ...(program.opts<{ config?: string }>().config
           ? { configPath: program.opts<{ config?: string }>().config }
@@ -2919,7 +2946,7 @@ export function createProgram(cliEntrypoint: string): Command {
         noStart: Boolean(options.noStart),
         exposeWeb: Boolean(options.exposeWeb),
         webPort: options.webPort,
-        tailscale: Boolean(options.tailscale),
+        tailscale,
       });
     });
 

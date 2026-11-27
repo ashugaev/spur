@@ -263,7 +263,7 @@ export function reinitUnits(cliEntrypoint: string, configPath?: string): void {
   runNpmInit(cliEntrypoint, {
     webPort: String(webPort),
     exposeWeb,
-    tailscale,
+    tailscale: tailscale ? "keep" : "off",
     ...(configPath !== undefined ? { configPath } : {}),
   });
 }
