@@ -32,7 +32,7 @@ type LoadState =
   | { status: "error" }
   | { status: "ready"; data: CronJobsResponse };
 
-const LABEL_CLASS = "text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]";
+const LABEL_CLASS = "text-label uppercase tracking-label text-[var(--color-text-tertiary)]";
 const GRID_CLASS =
   "grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 sm:grid-cols-[minmax(0,1fr)_9.5rem_5.5rem_minmax(0,1fr)]";
 const PRIMARY_TEXT = "text-[var(--color-text-primary)]";

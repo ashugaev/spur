@@ -1,6 +1,7 @@
 "use client";
 
 import { CloseIcon } from "@/components/icons/CloseIcon";
+import { ICON_BUTTON_CLASS } from "@/design/classes";
 import type { ToastEntry } from "@/hooks/useToasts";
 import type { CSSProperties } from "react";
 
@@ -31,18 +32,18 @@ function ToastItem({
   const toneClass =
     toast.tone === "success"
       ? "border-[var(--color-status-ready)] text-[var(--color-text-primary)]"
-      : "border-[var(--color-status-error)] text-[var(--color-chip-error-text)]";
+      : "border-[var(--color-status-error)] text-[var(--color-status-error)]";
   const toastStyle: CSSProperties = {
     maxHeight: toastMaxHeight(stackSize),
   };
 
   return (
     <div
-      className={`pointer-events-auto grid min-h-0 w-[min(calc(100vw-2rem),36rem)] grid-cols-[minmax(0,1fr)_auto] grid-rows-[auto_minmax(0,1fr)] gap-x-3 overflow-hidden border px-3 py-2 shadow-[0_8px_30px_var(--color-shadow-menu)] ${backgroundClass} ${toneClass}`}
+      className={`pointer-events-auto grid min-h-0 w-[min(calc(100vw-2rem),36rem)] grid-cols-[minmax(0,1fr)_auto] grid-rows-[auto_minmax(0,1fr)] gap-x-3 overflow-hidden border px-3 py-2 shadow-overlay ${backgroundClass} ${toneClass}`}
       role={toast.tone === "error" ? "alert" : "status"}
       style={toastStyle}
     >
-      <div className="col-start-1 row-start-1 text-[10px] font-bold uppercase tracking-[0.12em]">
+      <div className="col-start-1 row-start-1 text-label font-bold uppercase tracking-label">
         {toast.tone === "success" ? "Success" : "Error"}
       </div>
       <div
@@ -58,7 +59,7 @@ function ToastItem({
       </div>
       <button
         aria-label="Dismiss toast"
-        className={`col-start-2 row-span-2 row-start-1 inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-border-strong)] ${backgroundClass} text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]`}
+        className={`${ICON_BUTTON_CLASS} col-start-2 row-span-2 row-start-1 h-7 w-7 ${backgroundClass} text-[var(--color-text-primary)]`}
         onClick={() => onDismiss(toast.id)}
         type="button"
       >

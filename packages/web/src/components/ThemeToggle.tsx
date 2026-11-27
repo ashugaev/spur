@@ -85,7 +85,7 @@ export function ThemeToggle() {
         <div
           role="group"
           aria-label="Theme"
-          className="absolute bottom-full right-0 z-50 mb-1.5 grid min-w-[180px] grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] max-[400px]:right-auto max-[400px]:left-1/2 max-[400px]:-translate-x-1/2"
+          className="absolute bottom-full right-0 z-50 mb-1.5 grid min-w-[180px] grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-raised max-[400px]:right-auto max-[400px]:left-1/2 max-[400px]:-translate-x-1/2"
         >
           <div className="col-span-full mb-2 grid grid-cols-subgrid items-center border-b border-[var(--color-border-subtle)] pb-2">
             <span className="text-[var(--color-text-secondary)]">Theme</span>

@@ -1,4 +1,5 @@
 import type { AgentName } from "./agents";
+import type { StatusTone } from "../design/tone";
 
 export type SpurSessionStatus =
   | "spawning"
@@ -1132,30 +1133,21 @@ export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
 
 export interface AttentionLaneMeta {
   label: string;
-  color: string;
-  dividerColor?: string;
+  tone: StatusTone;
 }
 
-// Single source of truth for lane label/color pairs — shared by the
+// Single source of truth for lane label/tone pairs — shared by the
 // AttentionZone section header and the Filters modal Status section so
 // renaming or recoloring a lane can't leave the two views disagreeing.
 export const ATTENTION_LANE_META: Record<AttentionLevel, AttentionLaneMeta> = {
-  error: { label: "Errors", color: "var(--color-status-error)" },
-  rate_limited: { label: "Rate Limited", color: "var(--color-status-attention)" },
-  respond: { label: "Needs Input", color: "var(--color-status-error)" },
-  working: { label: "Working", color: "var(--color-status-working)" },
-  pending: { label: "Waiting", color: "var(--color-status-attention)" },
-  completed: { label: "Completed", color: "var(--color-status-ready)" },
-  stopped: {
-    label: "Stopped",
-    color: "var(--color-text-tertiary)",
-    dividerColor: "var(--color-border-subtle)",
-  },
-  done: {
-    label: "Closed",
-    color: "var(--color-text-tertiary)",
-    dividerColor: "var(--color-border-subtle)",
-  },
+  error: { label: "Errors", tone: "error" },
+  rate_limited: { label: "Rate Limited", tone: "attention" },
+  respond: { label: "Needs Input", tone: "error" },
+  working: { label: "Working", tone: "working" },
+  pending: { label: "Waiting", tone: "attention" },
+  completed: { label: "Completed", tone: "ready" },
+  stopped: { label: "Stopped", tone: "inactive" },
+  done: { label: "Closed", tone: "inactive" },
 };
 
 export function worstAttentionLevel(levels: readonly AttentionLevel[]): AttentionLevel {

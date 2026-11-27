@@ -82,7 +82,7 @@ export function InputHistoryButton({ entries, onSelect, className }: InputHistor
       {open ? (
         <div
           aria-label="Input history"
-          className="absolute bottom-full right-0 z-20 mb-2 w-80 max-w-[calc(100vw-2rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-base)] shadow-[0_8px_30px_var(--color-shadow-menu)]"
+          className="absolute bottom-full right-0 z-20 mb-2 w-80 max-w-[calc(100vw-2rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-base)] shadow-overlay"
           role="dialog"
         >
           <div className="border-b border-[var(--color-border-default)] px-3 py-2 font-bold uppercase text-[var(--color-text-primary)]">
@@ -100,7 +100,7 @@ export function InputHistoryButton({ entries, onSelect, className }: InputHistor
                   }}
                   type="button"
                 >
-                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  <div className="text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
                     {formatInputHistoryTimestamp(entry.savedAt)}
                   </div>
                   <div className="mt-1 whitespace-pre-wrap break-words text-[var(--color-text-primary)]">

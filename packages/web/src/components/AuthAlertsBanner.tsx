@@ -47,7 +47,7 @@ export function AuthAlertsBanner() {
             return (
               <div
                 key={alert.id}
-                className="flex items-center gap-2.5 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]"
+                className="flex items-center gap-2.5 border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2.5 py-1.5 text-[var(--color-status-error)]"
                 data-testid={`auth-alert-${alert.id}`}
                 role="alert"
               >
@@ -63,7 +63,7 @@ export function AuthAlertsBanner() {
                 </span>
                 <button
                   aria-label={`Sign in ${alert.label}`}
-                  className="shrink-0 border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] outline-hidden transition-colors hover:bg-[var(--color-hover-overlay)] focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)]"
+                  className="shrink-0 border border-[var(--color-status-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-status-error)] outline-hidden transition-colors hover:bg-[var(--color-hover-overlay)] focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)]"
                   type="button"
                   onClick={() => setFlow({ alert, mode: "ui" })}
                 >

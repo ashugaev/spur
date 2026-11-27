@@ -15,7 +15,7 @@ export function TerminalStatusDot({ activity, error, wsStatus }: TerminalStatusD
 
   return (
     <div
-      className={cn("h-2 w-2 shrink-0 rounded-full", resolved.pulse && "dot-pulse")}
+      className={cn("h-2 w-2 shrink-0 rounded-dot", resolved.pulse && "dot-pulse")}
       data-activity={activity ?? undefined}
       data-testid="direct-terminal-header-status-dot"
       data-ws-status={wsStatus}

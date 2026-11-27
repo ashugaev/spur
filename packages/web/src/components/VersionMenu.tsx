@@ -415,7 +415,7 @@ export function VersionMenu() {
         )}
       </button>
       {popover.open && switchPhase === "idle" ? (
-        <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+        <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-raised">
           {updateFailure ? (
             <div
               className="mb-2 normal-case tracking-normal text-[var(--color-status-error)]"
@@ -510,7 +510,7 @@ export function VersionMenu() {
                       {!isCurrent ? (
                         <button
                           aria-label={`Switch Spur to ${release.tag}`}
-                          className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                          className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-label font-bold text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
                           data-testid={`switch-version-${release.tag}`}
                           disabled={switchMutation.isPending}
                           type="button"

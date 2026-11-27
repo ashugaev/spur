@@ -323,7 +323,7 @@ describe("UsageModal quota", () => {
   it("renders error sources with chip, verbatim message and HTTP status, no meter", async () => {
     await renderReady({ ...REPORT, quotas: [errorSource] });
     const chip = screen.getByText("rate limited");
-    expect(chip.className).toContain("chip-warn");
+    expect(chip.className).toContain("color-status-attention-border");
     expect(screen.getByText("usage endpoint <b>rate</b> limited")).toBeInTheDocument();
     expect(screen.getByText("HTTP 429")).toBeInTheDocument();
     expect(screen.queryByRole("meter")).not.toBeInTheDocument();
@@ -334,7 +334,7 @@ describe("UsageModal quota", () => {
       ...REPORT,
       quotas: [{ ...errorSource, error: "unauthorized", httpStatus: null }],
     });
-    expect(screen.getByText("unauthorized").className).toContain("chip-error");
+    expect(screen.getByText("unauthorized").className).toContain("color-status-error-border");
     expect(screen.queryByText(/HTTP/)).not.toBeInTheDocument();
   });
 });

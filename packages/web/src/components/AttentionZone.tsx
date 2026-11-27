@@ -52,9 +52,8 @@ export function AttentionZone({
   return (
     <Zone
       label={config.label}
-      color={config.color}
+      tone={config.tone}
       count={rows.length}
-      dividerColor={config.dividerColor}
       collapsed={collapsed}
       onToggle={onToggle ? () => onToggle(level) : undefined}
     >
