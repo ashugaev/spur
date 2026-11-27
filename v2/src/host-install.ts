@@ -1803,8 +1803,8 @@ export function resolveNpmInitScript(cliEntrypoint: string): string {
 export type NpmInitTailscaleMode = "install" | "keep" | "off";
 
 const NPM_INIT_TAILSCALE_FLAGS: Record<NpmInitTailscaleMode, string> = {
-  install: "--tailscale",
-  keep: "--keep-tailscale",
+  install: "--install-tailscale",
+  keep: "--tailscale",
   off: "--no-tailscale",
 };
 

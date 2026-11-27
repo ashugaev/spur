@@ -3,9 +3,11 @@
 # npm does not register or start systemd services — run once per host:
 #   spur init
 # or:
-#   npm-init.sh [--no-start] [--expose-web] [--web-port <port>] [--tailscale|--keep-tailscale|--no-tailscale]
-# Tailscale is never installed without --tailscale; with no flag the script
-# only prints a hint when Tailscale is already up.
+#   npm-init.sh [--no-start] [--expose-web] [--web-port <port>] [--install-tailscale|--tailscale|--no-tailscale]
+# Tailscale is never installed without --install-tailscale. --tailscale only
+# binds an already-installed, up Tailscale (releases before --install-tailscale
+# send it from `update`/`reinit`); with no flag the script only prints a hint
+# when Tailscale is already up.
 
 set -euo pipefail
 
@@ -22,7 +24,7 @@ TAILSCALE=hint
 CONFIG_PATH=""
 
 usage() {
-  sed -n '3,10p' "$0"
+  sed -n '3,12p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -38,8 +40,8 @@ while [[ $# -gt 0 ]]; do
       }
       shift 2
       ;;
-    --tailscale) TAILSCALE=install; shift ;;
-    --keep-tailscale) TAILSCALE=keep; shift ;;
+    --install-tailscale) TAILSCALE=install; shift ;;
+    --tailscale) TAILSCALE=keep; shift ;;
     --no-tailscale) TAILSCALE=off; shift ;;
     -h | --help)
       usage
@@ -189,7 +191,7 @@ fi
 # always-on loopback bind (never a replacement) and is skipped when
 # --expose-web already opted into the public 0.0.0.0 bind (that is a separate,
 # more permissive, explicit override). Installing happens earlier and only for
-# --tailscale; no other mode installs or elevates.
+# --install-tailscale; no other mode installs or elevates.
 tailscale_result="not requested"
 info_lines=()
 # With --no-start the unit is rewritten but the running web process is not.
@@ -228,12 +230,16 @@ elif [[ "$TAILSCALE" != "off" ]]; then
   elif [[ "$ts_up" -eq 1 ]]; then
     sed -i "s/^Environment=WEB_HOST=.*/Environment=WEB_HOST=127.0.0.1,$ts_ip/" "$UNIT_DIR/spur-web.service"
     if [[ "$TAILSCALE" == "install" ]]; then
-      tailscale_result="$tailscale_install_result"
+      tailscale_result="$tailscale_install_result, bound"
     else
       tailscale_result="kept"
     fi
   elif [[ "$have_tailscale" -eq 1 ]]; then
-    tailscale_result="not up"
+    if [[ "$TAILSCALE" == "install" ]]; then
+      tailscale_result="$tailscale_install_result, not up"
+    else
+      tailscale_result="not up"
+    fi
     if [[ "$TAILSCALE" == "keep" ]]; then
       info_lines+=("Tailscale is not up; $keep_web_state. To restore the tailnet bind: sudo tailscale up, then spur init --tailscale")
     else

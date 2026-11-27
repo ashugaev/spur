@@ -116,7 +116,8 @@ export interface WebUnitOptions {
 // A comma-separated WEB_HOST (e.g. `127.0.0.1,100.64.0.1`) marks a Tailscale
 // bind that npm-init.sh already resolved; reinit sends `--tailscale` only when
 // one is live and the `tailscale` binary is on PATH (nothing to install), else
-// `--no-tailscale`, so an unattended `spur update` never installs Tailscale.
+// `--no-tailscale`, so an unattended `spur update` never installs Tailscale,
+// even through an older script that reads `--tailscale` as install.
 // Pre-#573 units set the bind via `HOSTNAME=` rather than `WEB_HOST=`; still
 // recognize that legacy var here so updating a `--expose-web` install doesn't
 // downgrade its public bind back to loopback.

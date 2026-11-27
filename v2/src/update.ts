@@ -265,9 +265,9 @@ export function reinitUnits(cliEntrypoint: string, configPath?: string): void {
     webPort: String(webPort),
     exposeWeb,
     // `update <older-version>` swaps the package first, so the script run here
-    // may predate `--keep-tailscale`: send only flags every script accepts.
-    // With the binary present "install" installs nothing and needs no sudo.
-    tailscale: tailscale && findExecutableOnPath("tailscale") !== null ? "install" : "off",
+    // may predate `--install-tailscale` and treat `--tailscale` as install.
+    // Send it only when the binary is present: nothing to install, no sudo.
+    tailscale: tailscale && findExecutableOnPath("tailscale") !== null ? "keep" : "off",
     ...(configPath !== undefined ? { configPath } : {}),
   });
 }

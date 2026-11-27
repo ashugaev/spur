@@ -607,7 +607,7 @@ describe("reinitUnits", () => {
     });
   });
 
-  it("passes only flags older scripts accept: install, never keep, for a live bind", async () => {
+  it("sends the legacy --tailscale (keep), never the install flag, for a live bind with the binary", async () => {
     const bin = await mkdtemp(join(tmpdir(), "spur-update-bin-"));
     await writeFile(join(bin, "tailscale"), "#!/bin/sh\n", "utf-8");
     await chmod(join(bin, "tailscale"), 0o755);
@@ -619,7 +619,7 @@ describe("reinitUnits", () => {
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "4311",
       exposeWeb: false,
-      tailscale: "install",
+      tailscale: "keep",
     });
   });
 });

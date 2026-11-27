@@ -55,7 +55,7 @@ beforeEach(() => {
 });
 
 function tailscaleFlags(args: ReadonlyArray<string>): string[] {
-  return args.filter((arg) => /^--(?:keep-|no-)?tailscale$/.test(arg));
+  return args.filter((arg) => /^--(?:install-|no-)?tailscale$/.test(arg));
 }
 
 async function writeFakeCliTree(): Promise<string> {
@@ -121,8 +121,8 @@ describe("runNpmInit --tailscale forwarding", () => {
   });
 
   it.each([
-    ["install", "--tailscale"],
-    ["keep", "--keep-tailscale"],
+    ["install", "--install-tailscale"],
+    ["keep", "--tailscale"],
     ["off", "--no-tailscale"],
   ] as const)("forwards exactly one flag for %s", (mode, flag) => {
     findExecutableOnPathMock.mockReturnValue("/usr/bin/tailscale");
