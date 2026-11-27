@@ -189,7 +189,7 @@ Pin first and the flag is still armed: within the next 5-minute tick the daemon 
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | `status=203/EXEC`                                   | no node at `/usr/bin/node` — install nodesource, or link an nvm runtime in (see setup)                        |
 | `EACCES .../usr/lib/node_modules`                   | npm prefix isn't `~/.local` — run `spur init` (re-writes `~/.spur/npmrc`), or reset it manually and reinstall |
-| units die after SSH logout                          | linger off: `loginctl enable-linger $USER`                                                                    |
+| units die after SSH logout                          | linger off: `sudo loginctl enable-linger $USER`                                                               |
 | web terminal `/ws` won't connect                    | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                    |
 | `/ws` closes immediately                            | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
 | web unreachable over Tailscale                      | tailnet not up: `sudo tailscale up`, then re-run `spur init --tailscale`                                      |

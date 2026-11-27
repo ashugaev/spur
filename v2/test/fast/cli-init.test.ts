@@ -84,9 +84,9 @@ describe("spur init action Tailscale mode", () => {
     await rm(home, { recursive: true, force: true });
   });
 
-  it("passes hint when no flag is given and no tailnet bind exists", async () => {
+  it("passes no tailscale mode when no flag is given and no tailnet bind exists", async () => {
     await runInit();
-    expect(runNpmInitMock.mock.calls[0]?.[1]).toMatchObject({ tailscale: "hint" });
+    expect(runNpmInitMock.mock.calls[0]?.[1]).not.toHaveProperty("tailscale");
   });
 
   it("passes keep, never install, when no flag is given and the unit has a tailnet bind", async () => {

@@ -1799,10 +1799,10 @@ export function resolveNpmInitScript(cliEntrypoint: string): string {
 
 // install: install Tailscale when missing, then bind the tailnet IP.
 // keep: bind the tailnet IP when Tailscale is already up; never install.
-// off: no Tailscale call. hint: no flag; the script only prints a hint.
-export type NpmInitTailscaleMode = "install" | "keep" | "off" | "hint";
+// off: no Tailscale call. Unset: no flag; the script only prints a hint.
+export type NpmInitTailscaleMode = "install" | "keep" | "off";
 
-const NPM_INIT_TAILSCALE_FLAGS: Record<Exclude<NpmInitTailscaleMode, "hint">, string> = {
+const NPM_INIT_TAILSCALE_FLAGS: Record<NpmInitTailscaleMode, string> = {
   install: "--tailscale",
   keep: "--keep-tailscale",
   off: "--no-tailscale",
@@ -1862,7 +1862,7 @@ export function runNpmInit(
   if (options.webPort) {
     args.push("--web-port", options.webPort);
   }
-  if (options.tailscale !== undefined && options.tailscale !== "hint") {
+  if (options.tailscale !== undefined) {
     args.push(NPM_INIT_TAILSCALE_FLAGS[options.tailscale]);
   }
   if (!ensureCursorTokenUsageHook()) {

@@ -2931,14 +2931,14 @@ export function createProgram(cliEntrypoint: string): Command {
           exitCode: 2,
         });
       }
-      const tailscale: NpmInitTailscaleMode =
+      const tailscale: NpmInitTailscaleMode | undefined =
         options.tailscale === true
           ? "install"
           : options.tailscale === false
             ? "off"
             : readWebUnitOptions(resolveSystemdScope(homedir())).tailscale
               ? "keep"
-              : "hint";
+              : undefined;
       runNpmInit(cliEntrypoint, {
         ...(program.opts<{ config?: string }>().config
           ? { configPath: program.opts<{ config?: string }>().config }
@@ -2946,7 +2946,7 @@ export function createProgram(cliEntrypoint: string): Command {
         noStart: Boolean(options.noStart),
         exposeWeb: Boolean(options.exposeWeb),
         webPort: options.webPort,
-        tailscale,
+        ...(tailscale !== undefined ? { tailscale } : {}),
       });
     });
 

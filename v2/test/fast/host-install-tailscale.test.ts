@@ -91,15 +91,12 @@ describe("runNpmInit --tailscale forwarding", () => {
     await rm(fakeHome, { recursive: true, force: true });
   });
 
-  it.each([undefined, "hint"] as const)(
-    "forwards no Tailscale flag when tailscale is %s",
-    (mode) => {
-      runNpmInit(cliEntrypoint, mode === undefined ? {} : { tailscale: mode });
-      expect(execFileSyncCalls).toHaveLength(1);
-      expect(execFileSyncCalls[0]?.command).toBe("bash");
-      expect(tailscaleFlags(execFileSyncCalls[0]?.args ?? [])).toEqual([]);
-    },
-  );
+  it("forwards no Tailscale flag when tailscale is unset", () => {
+    runNpmInit(cliEntrypoint, {});
+    expect(execFileSyncCalls).toHaveLength(1);
+    expect(execFileSyncCalls[0]?.command).toBe("bash");
+    expect(tailscaleFlags(execFileSyncCalls[0]?.args ?? [])).toEqual([]);
+  });
 
   it("installs Cursor metering during cold init before any session exists", async () => {
     runNpmInit(cliEntrypoint, { noStart: true });
@@ -125,11 +122,11 @@ describe("runNpmInit --tailscale forwarding", () => {
     expect(tailscaleFlags(execFileSyncCalls[0]?.args ?? [])).toEqual([flag]);
   });
 
-  it("makes no sudo call and no sudo lookup for keep, off, hint and unset", () => {
-    for (const tailscale of ["keep", "off", "hint", undefined] as const) {
+  it("makes no sudo call and no sudo lookup for keep, off and unset", () => {
+    for (const tailscale of ["keep", "off", undefined] as const) {
       runNpmInit(cliEntrypoint, tailscale === undefined ? {} : { tailscale });
     }
-    expect(execFileSyncCalls.map((call) => call.command)).toEqual(["bash", "bash", "bash", "bash"]);
+    expect(execFileSyncCalls.map((call) => call.command)).toEqual(["bash", "bash", "bash"]);
     expect(findExecutableOnPathMock).not.toHaveBeenCalled();
   });
 });
