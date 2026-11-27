@@ -7684,8 +7684,9 @@ export class SessionService {
           suppressMenuConfirmation: true,
           reconcileRuntime: false,
         });
-        // Killed or completed during the classification: its write hook already
-        // published the terminal edge.
+        // Moved off `running` during the classification (it runs without runtime
+        // reconcile, so it never changes status itself): the write hook already
+        // published the edge.
         const logCleared = () =>
           this.logEvent("session.rate_limit.cleared", {
             level: "info",
@@ -7695,7 +7696,7 @@ export class SessionService {
             details: { actor, force },
           });
         const ended = readSession(this.config.dataDir, sessionId);
-        if (ended && this.statusMovedSinceClassification(ended, classified.session.status)) {
+        if (ended && ended.status !== cleared.status) {
           logCleared();
           return { sessionId, state: statusDerivedState(ended), deliveryScheduled: false };
         }
@@ -30931,16 +30932,13 @@ export class SessionService {
     return (await this.assembleDashboard(session))?.view;
   }
 
-  // The one fence for a classification that outlived its record's status: the
-  // write hook already published the non-live edge, so the in-hand state must
-  // not be journaled after it. Compares against the status the classification
-  // itself ended on, so its own reconcile writes do not count. Callers
-  // reclassify the latest record once, then skip the publish.
-  private statusMovedSinceClassification(
-    latest: SessionRecord | null,
-    classifiedStatus: SessionStatus,
-  ): boolean {
-    return latest !== null && latest.status !== classifiedStatus;
+  // State publication fence shared by enrichWithClassified and assembleDashboard:
+  // another write during the awaits replaces the record object, so the in-hand
+  // state is stale (ABA-safe, unlike a status compare). A re-parsed but equal
+  // record is not a move. One reclassification, then the publish is skipped:
+  // the write hook and background ticks publish the rest.
+  private recordMovedSince(latest: SessionRecord | null, settled: SessionRecord | null): boolean {
+    return latest !== settled && !isDeepStrictEqual(latest, settled);
   }
 
   private async assembleDashboard(
@@ -30963,6 +30961,9 @@ export class SessionService {
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified, "read");
     if (persisted.status === "missing") return undefined;
     session = persisted.session;
+    // The record as the classifier left it; the stat-gated cache returns the same
+    // object until another write replaces the file.
+    const settled = readSession(this.config.dataDir, session.id);
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const workspaceState = resolveWorkspaceState(this.config.dataDir, session);
@@ -30972,10 +30973,10 @@ export class SessionService {
 
     const hasServiceIssues = await this.hasServiceIssues(session);
     const latest = readSession(this.config.dataDir, session.id);
-    const statusMoved = this.statusMovedSinceClassification(latest, classified.session.status);
+    const recordMoved = this.recordMovedSince(latest, settled);
     if (
       (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
-      (statusMoved && !retried)
+      (recordMoved && !retried)
     ) {
       return latest ? this.assembleDashboard(latest, true) : undefined;
     }
@@ -31030,7 +31031,7 @@ export class SessionService {
         ? "task_status"
         : classified.source;
     // Moved again during the retry: the write hook and background ticks publish.
-    if (!statusMoved)
+    if (!recordMoved)
       await this.updateStateHistory(
         session,
         state,
@@ -31408,6 +31409,9 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     }
     session = persisted.session;
+    // The record as the classifier left it; the stat-gated cache returns the same
+    // object until another write replaces the file.
+    const settled = readSession(this.config.dataDir, session.id);
     const preReportHasIndependentError =
       hasIndependentError(session) ||
       (classified.state === "error" && !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)) ||
@@ -31428,10 +31432,10 @@ export class SessionService {
     // A record whose status moved while this classification ran gets one
     // reclassification; the state is never published for a stale status.
     const latest = readSession(this.config.dataDir, session.id);
-    const statusMoved = this.statusMovedSinceClassification(latest, classified.session.status);
+    const recordMoved = this.recordMovedSince(latest, settled);
     if (
       (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
-      (statusMoved && !retried)
+      (recordMoved && !retried)
     ) {
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
       return this.enrichWithClassified(latest, claudeAccounts, sessionBatch, stillCurrent, true);
@@ -31453,7 +31457,7 @@ export class SessionService {
         ? "task_status"
         : classified.source;
     // Moved again during the retry: the write hook and background ticks publish.
-    if (!statusMoved)
+    if (!recordMoved)
       await this.updateStateHistory(
         session,
         state,

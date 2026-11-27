@@ -1235,6 +1235,37 @@ describe("session transitions service", () => {
     ).toEqual(["killed"]);
   });
 
+  it("publishes no stale state when a pause and resume leave the status unchanged during a read", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const stale = service.get("api-1").catch(() => undefined);
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "stopped", stopReason: "manual_pause" }));
+    metadata.writeSession(TEST_DATA_DIR, record());
+    evidence("working", "2026-03-18T11:00:00.000Z");
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("rate_limited");
+    release();
+    await stale;
+    expect(binding().store.observedState("api-1")).toBe("rate_limited");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to).at(-1),
+    ).toBe("rate_limited");
+  });
+
   it("publishes no stale stopped state when a completed row is reopened during a dashboard build", async () => {
     metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
     await service.get("api-1");
