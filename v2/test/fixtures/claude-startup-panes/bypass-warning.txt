@@ -1,0 +1,18 @@
+[fixture reconstructed from live probe notes, claude 2.1.291]
+ ▐▛███▛█   Claude Code v2.1.291
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   ~/project
+
+────────────────────────────────────────────────────────────────────────────────
+ WARNING: Claude Code running in Bypass Permissions mode
+
+ In Bypass Permissions mode, Claude Code will not ask for your approval before
+ running potentially dangerous commands.
+
+ By proceeding, you accept all responsibility for actions taken while running
+ in Bypass Permissions mode.
+
+ ❯ 1. No, exit
+   2. Yes, I accept
+
+ Enter to confirm · Esc to cancel

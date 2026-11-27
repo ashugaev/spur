@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionTodo } from "@/components/SessionTodo.js";
 import type { SpurTodoProjection } from "@/lib/types.js";
@@ -169,6 +169,19 @@ describe("SessionTodo", () => {
     await screen.findByRole("list", { name: "All Spur ToDo items" });
     expect(screen.getAllByText("Choose the public command")).toHaveLength(1);
     expect(screen.getByText("Need product input")).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: /Choose the public command/ });
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(within(toggle).getByText("item-12345678")).toBeInTheDocument();
+    expect(within(toggle).getAllByText("Need product input")).toHaveLength(1);
+    expect(within(toggle).getAllByText("Human action: Choose command name")).toHaveLength(1);
+    const heldItem = toggle.closest("li")!;
+    expect(screen.getAllByText("Choose the public command")).toHaveLength(1);
+    const audit = heldItem.querySelector(`#${toggle.getAttribute("aria-controls")}`)!;
+    expect(within(audit as HTMLElement).getByText("Need product input")).toBeInTheDocument();
+    expect(
+      within(audit as HTMLElement).getByText("Human action: Choose command name"),
+    ).toBeInTheDocument();
   });
 
   it("hides zero unfinished indicators for resolved work", async () => {

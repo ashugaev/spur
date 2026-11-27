@@ -298,7 +298,8 @@ describe("SessionDetail header", () => {
               state: "error",
               runtimeAlive: false,
               error: "Agent needs recovery",
-              prompt: "Compact title\n\nFull task details",
+              prompt:
+                "Task handoff from session source-a1 (codex).\n\nOriginal task (as originally requested):\nCompact title\n\nFull task details\n\nAdditional handoff notes:\nKeep the recovery controls exposed",
             }),
           ),
         );
@@ -318,6 +319,11 @@ describe("SessionDetail header", () => {
     expect(task.closest("details")).not.toHaveAttribute("open");
     expect(runtime.closest("details")).not.toHaveAttribute("open");
     expect(screen.getByRole("button", { name: "Copy task" })).not.toBeVisible();
+    const header = screen.getByRole("heading", { level: 1 }).closest("header")!;
+    expect(within(header).queryByText(/Full task details/)).not.toBeInTheDocument();
+    expect(
+      within(header).queryByText("Keep the recovery controls exposed"),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("Agent needs recovery")).toBeVisible();
     expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
     const more = screen.getByRole("button", { name: "More session actions" });
@@ -329,6 +335,12 @@ describe("SessionDetail header", () => {
     expect(more).toHaveFocus();
     fireEvent.click(task);
     expect(screen.getByRole("button", { name: "Copy task" })).toBeInTheDocument();
+    const taskDetails = task.closest("details")!;
+    expect(within(taskDetails).getByText(/Full task details/)).toBeVisible();
+    expect(within(taskDetails).getByText("Keep the recovery controls exposed")).toBeVisible();
+    expect(screen.getAllByText(/Full task details/)).toHaveLength(1);
+    expect(screen.getAllByText("Keep the recovery controls exposed")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Copy handoff" })).toHaveLength(1);
   });
 
   it.each(["claude", "codex"] as const)(

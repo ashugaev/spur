@@ -126,7 +126,7 @@ export function ArtifactList({
                   scope="col"
                 >
                   <button
-                    className="flex w-full items-center gap-1 px-2.5 py-2 text-left uppercase tracking-[0.1em] outline-none hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+                    className="flex w-full items-center gap-1 px-2.5 py-2 text-left uppercase tracking-label outline-none hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
                     onClick={() => toggleColumn(column)}
                     type="button"
                   >
@@ -139,7 +139,7 @@ export function ArtifactList({
               );
             })}
             <th
-              className="px-2.5 py-2 text-left font-bold uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]"
+              className="px-2.5 py-2 text-left font-bold uppercase tracking-label text-[var(--color-text-tertiary)]"
               scope="col"
             >
               Actions

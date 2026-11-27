@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { usePoll } from "@/hooks/usePoll";
 import type { PollOutcome } from "@/lib/poller";
 import { isSpurTodoProjection, type SpurTodoActor, type SpurTodoProjection } from "@/lib/types";
-import { HARD_WRAP_TEXT_CLASS } from "@/design/classes";
+import { FOCUS_RING_CLASS, HARD_WRAP_TEXT_CLASS } from "@/design/classes";
 
 function actorLabel(actor: SpurTodoActor): string {
   if (actor.kind === "agent") return `${actor.agent} · ${actor.sessionId}`;
@@ -53,7 +53,7 @@ function TodoItem({
         type="button"
         aria-expanded={expanded}
         aria-controls={panelId}
-        className="flex w-full items-start gap-2 px-2.5 py-2 text-left"
+        className={`${FOCUS_RING_CLASS} flex w-full items-start gap-2 px-2.5 py-2 text-left`}
         onClick={() => setExpanded((value) => !value)}
       >
         <span
@@ -99,7 +99,7 @@ function TodoItem({
         >
           {item.history.map((event) => (
             <div key={event.eventId}>
-              <div className="uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">
+              <div className="uppercase tracking-meta text-[var(--color-text-secondary)]">
                 {event.type.replaceAll("_", " ")} · {actorLabel(event.actor)} ·{" "}
                 {new Date(event.at).toLocaleString()}
               </div>
@@ -118,7 +118,7 @@ function TodoItem({
                 key={event.eventId}
                 className="border-t border-[var(--color-border-subtle)] pt-2"
               >
-                <div className="uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">
+                <div className="uppercase tracking-meta text-[var(--color-text-secondary)]">
                   Completion override · {actorLabel(event.actor)} ·{" "}
                   {new Date(event.at).toLocaleString()}
                 </div>
@@ -183,7 +183,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
     <section aria-labelledby="session-todo-heading">
       <h2
         id="session-todo-heading"
-        className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-secondary)]"
+        className="flex items-center gap-2 py-2 text-label font-bold uppercase tracking-caps text-[var(--color-text-secondary)]"
       >
         ToDo
         <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
@@ -217,7 +217,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
             >
               {resolved}/{projection.counts.total}
             </div>
-            <div className="flex flex-wrap gap-2 uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">
+            <div className="flex flex-wrap gap-2 uppercase tracking-meta text-[var(--color-text-secondary)]">
               {projection.counts.open > 0 ? <span>{projection.counts.open} open</span> : null}
               {projection.counts.held > 0 ? <span>{projection.counts.held} held</span> : null}
               <span>{resolved} resolved</span>
@@ -243,7 +243,9 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
             open={allExpanded}
             onToggle={(event) => setAllExpanded(event.currentTarget.open)}
           >
-            <summary className="cursor-pointer py-2 uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">
+            <summary
+              className={`${FOCUS_RING_CLASS} cursor-pointer py-2 uppercase tracking-meta text-[var(--color-text-secondary)]`}
+            >
               All tasks &amp; history
             </summary>
             {allExpanded ? (

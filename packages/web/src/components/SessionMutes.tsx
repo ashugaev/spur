@@ -41,14 +41,14 @@ function MuteRow({ mute }: { mute: AutoPingMute }) {
   return (
     <li className="border-t border-[var(--color-border-subtle)] px-2.5 py-2 first:border-t-0">
       <div className="flex flex-wrap items-baseline gap-x-2">
-        <span className="font-bold uppercase tracking-[0.06em] text-[var(--color-text-primary)]">
+        <span className="font-bold uppercase tracking-meta text-[var(--color-text-primary)]">
           {describeKinds(mute)}
         </span>
         <span className={`font-mono text-[var(--color-text-secondary)] ${HARD_WRAP_TEXT_CLASS}`}>
           {describeSubjects(mute)}
         </span>
       </div>
-      <div className="mt-0.5 uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
+      <div className="mt-0.5 uppercase tracking-meta text-[var(--color-text-tertiary)]">
         {untilLabel(mute)}
       </div>
       {mute.reason ? (
@@ -57,7 +57,7 @@ function MuteRow({ mute }: { mute: AutoPingMute }) {
         </div>
       ) : null}
       {mute.endedAt ? (
-        <div className="mt-0.5 uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
+        <div className="mt-0.5 uppercase tracking-meta text-[var(--color-text-tertiary)]">
           Ended {mute.endReason ?? ""} {formatShortTimestamp(mute.endedAt)}
         </div>
       ) : null}
@@ -69,7 +69,7 @@ function MuteSection({ title, mutes }: { title: string; mutes: AutoPingMute[] })
   if (mutes.length === 0) return null;
   return (
     <section aria-label={title}>
-      <h3 className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+      <h3 className="px-2.5 py-1.5 text-label font-bold uppercase tracking-caps text-[var(--color-text-tertiary)]">
         {title}
       </h3>
       <ul>
@@ -131,8 +131,8 @@ export function SessionMutes({ sessionId }: { sessionId: string }) {
         aria-label={hasActive ? `Muted pings ${active.length}` : "Mute history"}
         className={
           hasActive
-            ? "inline-flex h-5 items-center border border-[var(--color-chip-warn-border)] px-1.5 text-[9px] font-bold uppercase tracking-[0.06em] text-[var(--color-chip-warn-text)] transition hover:bg-[var(--color-hover-overlay)]"
-            : "inline-flex h-5 items-center border border-[var(--color-border-subtle)] px-1.5 text-[9px] uppercase tracking-[0.06em] text-[var(--color-text-tertiary)] transition hover:border-[var(--color-border-default)] hover:text-[var(--color-text-secondary)]"
+            ? "inline-flex h-5 items-center border border-[var(--color-status-attention-border)] px-1.5 text-label font-bold uppercase tracking-meta text-[var(--color-status-attention)] transition hover:bg-[var(--color-hover-overlay)]"
+            : "inline-flex h-5 items-center border border-[var(--color-border-subtle)] px-1.5 text-label uppercase tracking-meta text-[var(--color-text-tertiary)] transition hover:border-[var(--color-border-default)] hover:text-[var(--color-text-secondary)]"
         }
         onClick={() => setOpen((value) => !value)}
         ref={buttonRef}
@@ -143,7 +143,7 @@ export function SessionMutes({ sessionId }: { sessionId: string }) {
       {open ? (
         <div
           aria-label="Auto-ping mutes"
-          className="fixed z-30 w-72 max-h-80 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] shadow-[0_8px_30px_var(--color-shadow-menu)]"
+          className="fixed z-30 w-72 max-h-80 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] shadow-overlay"
           ref={menuRef}
           role="dialog"
           style={menuStyle}

@@ -93,7 +93,7 @@ function PrCard({
       tabIndex={-1}
       data-pr-card
       onClick={(event) => event.stopPropagation()}
-      className="absolute right-0 top-full z-50 flex w-max min-w-[9rem] max-w-[16rem] flex-col gap-px border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-1.5 py-1 text-[11px] leading-4 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
+      className="absolute right-0 top-full z-50 flex w-max min-w-[9rem] max-w-[16rem] flex-col gap-px border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-1.5 py-1 text-meta leading-4 shadow-raised"
     >
       {shown.map((row) => (
         <div key={row.key} data-pr-card-row className="flex items-center gap-1.5">
@@ -111,7 +111,7 @@ function PrCard({
       {hidden > 0 ? (
         <div
           data-pr-card-more
-          className="text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]"
+          className="text-label uppercase tracking-meta text-[var(--color-text-tertiary)]"
         >
           +{hidden} more
         </div>

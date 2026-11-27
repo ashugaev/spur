@@ -64,7 +64,12 @@ import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { SessionMutes } from "@/components/SessionMutes";
 import { SessionTodo } from "@/components/SessionTodo";
-import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
+import {
+  FOCUS_RING_CLASS,
+  HARD_WRAP_TEXT_CLASS,
+  ICON_BUTTON_CLASS,
+  INPUT_CLASS,
+} from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
@@ -256,7 +261,7 @@ function PromptSectionCopyButton({
   return (
     <button
       aria-label={`Copy ${copyLabel}`}
-      className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] active:scale-[0.97]"
+      className={`${ICON_BUTTON_CLASS} h-6 w-6 text-[var(--color-text-secondary)] active:scale-[0.97]`}
       onClick={() => void onCopy(label, value)}
       title={`Copy ${copyLabel}`}
       type="button"
@@ -466,7 +471,7 @@ function readArtifactViewMode(): ArtifactViewMode {
 
 function artifactTabClass(active: boolean, wrapping = false): string {
   const edge = wrapping ? "-ml-px -mt-px border" : "border-r last:border-r-0";
-  return `${edge} border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] ${
+  return `${edge} border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-label ${
     active
       ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
       : "text-[var(--color-text-secondary)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
@@ -649,7 +654,7 @@ function ArtifactCard({
               src={artifactHref}
             />
             {previewState !== "ready" ? (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
                 {previewState === "error" ? (
                   "Preview unavailable"
                 ) : (
@@ -674,7 +679,7 @@ function ArtifactCard({
               src={artifactHref}
             />
             {previewState !== "ready" ? (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
                 {previewState === "error" ? (
                   "Preview unavailable"
                 ) : (
@@ -697,7 +702,7 @@ function ArtifactCard({
               onPreviewReady={onPreviewReady}
             />
             {previewState !== "ready" ? (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
                 {previewState === "error" ? (
                   "Preview unavailable"
                 ) : (
@@ -713,7 +718,7 @@ function ArtifactCard({
         {artifact.kind !== "image" && artifact.kind !== "video" && !htmlThumbnail ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
             <ArtifactFileIcon />
-            <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+            <span className="font-mono text-label uppercase tracking-label text-[var(--color-text-secondary)]">
               {artifactExtension(artifact.name)}
             </span>
           </div>
@@ -721,10 +726,10 @@ function ArtifactCard({
 
         {polishedAttachedImage ? (
           <div className="pointer-events-none absolute left-2 top-2 flex flex-wrap gap-1.5">
-            <span className="border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]">
+            <span className="border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] px-2 py-1 text-label font-bold uppercase tracking-label text-[var(--color-text-primary)]">
               Attached Image
             </span>
-            <span className="border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+            <span className="border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] px-2 py-1 text-label font-bold uppercase tracking-label text-[var(--color-text-secondary)]">
               {artifactExtension(artifact.name)}
             </span>
           </div>
@@ -776,15 +781,15 @@ function ArtifactCard({
         </div>
         {polishedAttachedImage ? (
           <div className="flex flex-wrap gap-1.5">
-            <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+            <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-label uppercase tracking-label text-[var(--color-text-secondary)]">
               {formatBytes(artifact.size)}
             </span>
-            <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+            <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
               {formatRelativeTime(artifact.updatedAt)}
             </span>
           </div>
         ) : (
-          <div className="overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--color-text-tertiary)]">
+          <div className="overflow-hidden text-ellipsis whitespace-nowrap text-label text-[var(--color-text-tertiary)]">
             {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
             {formatRelativeTime(artifact.updatedAt)}
           </div>
@@ -1210,7 +1215,7 @@ function ArtifactLightbox({
           ? `Copying ${artifact.name}`
           : `Copy ${artifact.name}`;
   const phoneImage = isPhone && artifact.kind === "image";
-  const phoneNavButtonClass = `${overlayButtonClass()} disabled:cursor-not-allowed disabled:opacity-40`;
+  const phoneNavButtonClass = `${overlayButtonClass()} disabled:cursor-not-allowed disabled:opacity-50`;
   const headerClassName = !isPhone
     ? "mb-4 flex items-center justify-between gap-3"
     : phoneImage
@@ -1226,25 +1231,25 @@ function ArtifactLightbox({
       }}
       role="dialog"
     >
-      <div className="flex h-full w-full flex-col overflow-hidden border-0 border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-0 max-sm:relative sm:border sm:p-5 sm:shadow-[0_20px_60px_var(--color-shadow-modal-lg)]">
+      <div className="flex h-full w-full flex-col overflow-hidden border-0 border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-0 max-sm:relative sm:border sm:p-5 sm:shadow-modal">
         {phoneImage && chromeHidden ? null : (
           <div className={headerClassName}>
             <div className="min-w-0">
               <h2
-                className="truncate text-left font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+                className="truncate text-left font-bold uppercase tracking-label text-[var(--color-text-primary)]"
                 dir="rtl"
                 title={artifact.name}
               >
                 <bdi dir="ltr">{artifact.name}</bdi>
               </h2>
-              <div className="mt-1 hidden text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] sm:block">
+              <div className="mt-1 hidden text-label uppercase tracking-label text-[var(--color-text-tertiary)] sm:block">
                 {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
                 {formatRelativeTime(artifact.updatedAt)}
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {isPhone && position ? (
-                <span className="whitespace-nowrap font-bold tracking-[0.12em] text-[var(--color-text-secondary)]">
+                <span className="whitespace-nowrap font-bold tracking-label text-[var(--color-text-secondary)]">
                   {position.index} / {position.total}
                 </span>
               ) : null}
@@ -1356,7 +1361,7 @@ function ArtifactLightbox({
           {isPhone ? null : (
             <button
               aria-label="Previous artifact"
-              className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+              className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={!canGoPrevious}
               onClick={onPrevious}
               type="button"
@@ -1375,7 +1380,7 @@ function ArtifactLightbox({
             onPointerUp={handlePreviewPointerUp}
           >
             {previewStatus ? (
-              <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
                 {previewStatus === "error" ? (
                   "Preview unavailable"
                 ) : (
@@ -1425,7 +1430,7 @@ function ArtifactLightbox({
                 data-artifact-lightbox-interactive
               >
                 {textPreviewState === "oversize" ? (
-                  <div className="flex h-full items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  <div className="flex h-full items-center justify-center px-4 text-center text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
                     File exceeds 1 MiB preview limit. Download to view the full content.
                   </div>
                 ) : null}
@@ -1449,7 +1454,7 @@ function ArtifactLightbox({
                 >
                   <bdi dir="ltr">{artifact.name}</bdi>
                 </div>
-                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                <div className="text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
                   {artifactExtension(artifact.name)} · {artifact.mimeType}
                 </div>
                 <a
@@ -1466,7 +1471,7 @@ function ArtifactLightbox({
           {isPhone ? null : (
             <button
               aria-label="Next artifact"
-              className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+              className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={!canGoNext}
               onClick={onNext}
               type="button"
@@ -1601,7 +1606,7 @@ function LogEntryRow({
     <article
       className={`border-l-2 border-y border-r border-[var(--color-border-default)] bg-[var(--color-bg-surface)] ${logRowAccent(entry.level)}`}
     >
-      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border-subtle)] px-3 py-2 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border-subtle)] px-3 py-2 text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
         <span>{formatAbsoluteTime(entry.timestamp)}</span>
         <span className={`border px-2 py-0.5 ${logBadgeClass(entry.level)}`}>{entry.level}</span>
         <span className="border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)]">
@@ -1627,7 +1632,7 @@ function LogEntryRow({
           </div>
           {showHistorySnapshot ? (
             <a
-              className="ml-auto border border-[var(--color-border-strong)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+              className="ml-auto border border-[var(--color-border-strong)] px-2 py-1 text-label font-bold uppercase tracking-label text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
               download={historyArtifactId}
               href={artifactUrl(sessionId, historyArtifactId)}
             >
@@ -1637,7 +1642,7 @@ function LogEntryRow({
         </div>
       ) : isUserInput ? (
         <div className="px-3 py-3">
-          <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
             <span className="border border-[var(--color-status-working)] px-2 py-0.5 text-[var(--color-status-working)]">
               User input
             </span>
@@ -1648,7 +1653,7 @@ function LogEntryRow({
             ) : null}
           </div>
           {inputText ? (
-            <pre className="whitespace-pre-wrap break-words border-l-2 border-[var(--color-status-working)] pl-3 font-mono text-[11px] leading-5 text-[var(--color-text-primary)]">
+            <pre className="whitespace-pre-wrap break-words border-l-2 border-[var(--color-status-working)] pl-3 font-mono text-meta leading-5 text-[var(--color-text-primary)]">
               {inputText}
             </pre>
           ) : null}
@@ -1656,7 +1661,7 @@ function LogEntryRow({
             <div className="mt-3 flex flex-wrap gap-2">
               {inputAttachments.map((attachment) => (
                 <span
-                  className="border border-[var(--color-border-default)] px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]"
+                  className="border border-[var(--color-border-default)] px-2 py-1 text-label uppercase tracking-label text-[var(--color-text-secondary)]"
                   key={attachment.id}
                 >
                   Attachment {attachment.name}
@@ -1669,7 +1674,7 @@ function LogEntryRow({
         <div className="px-3 py-3">
           {entry.message ? (
             <pre
-              className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5"
+              className="whitespace-pre-wrap break-words font-mono text-meta leading-5"
               style={{
                 color: LOG_LEVEL_COLORS[entry.level] ?? "var(--color-text-primary)",
               }}
@@ -2843,7 +2848,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         <>
           {/* Header */}
           <header className="mt-4 border-b border-[var(--color-border-default)] pb-3">
-            <div className="flex flex-wrap items-center gap-2 text-[var(--color-text-tertiary)] uppercase tracking-[0.1em]">
+            <div className="flex flex-wrap items-center gap-2 text-[var(--color-text-tertiary)] uppercase tracking-label">
               <span>{session.projectName}</span>
               <span>•</span>
               <span>{getAgentDisplayName(session.agent)}</span>
@@ -2857,7 +2862,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               ) : null}
             </div>
 
-            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
+            <h1 className="mt-2 min-w-0 text-display font-bold tracking-display text-[var(--color-text-primary)] uppercase [overflow-wrap:anywhere]">
               {title}
             </h1>
             {titleEditing ? (
@@ -2881,7 +2886,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       key={m.id}
                       aria-current={selected ? "page" : undefined}
                       aria-label={`${m.agent} ${m.id}`}
-                      className={`inline-flex items-center gap-1 border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
+                      className={`inline-flex items-center gap-1 border-b-2 px-1.5 pb-0.5 text-label font-bold uppercase tracking-label transition ${
                         selected
                           ? "border-[var(--color-accent)] text-[var(--color-text-primary)]"
                           : "border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
@@ -2904,7 +2909,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     aria-label={
                       showAllDeskMembers ? "Hide closed desk agents" : "Show closed desk agents"
                     }
-                    className="border-b-2 border-transparent px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    className="border-b-2 border-transparent px-1.5 pb-0.5 text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
                     onClick={() => setShowAllDeskMembers((current) => !current)}
                   >
                     ...
@@ -2944,12 +2949,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
                 ))}
                 {!session.runtimeAlive && !isTerminalSession(session) ? (
-                  <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
+                  <span className="border border-[var(--color-status-error-border)] px-2 py-0.5 text-[var(--color-status-error)]">
                     offline
                   </span>
                 ) : null}
                 {hasServiceProblems(session) ? (
-                  <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">
+                  <span className="border border-[var(--color-status-attention-border)] px-2 py-0.5 text-[var(--color-status-attention)]">
                     service issue
                   </span>
                 ) : null}
@@ -3038,7 +3043,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 aria-haspopup="menu"
                 aria-label="More session actions"
                 disabled={busyAction !== null}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                className={`${FOCUS_RING_CLASS} border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50`}
                 onClick={() => setSessionMenuOpen((value) => !value)}
                 ref={sessionMenu.buttonRef}
                 type="button"
@@ -3048,7 +3053,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {sessionMenuOpen ? (
                 <div
                   aria-label="Session actions"
-                  className="fixed z-30 max-h-[calc(100dvh-1rem)] w-56 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)] [&>button]:block [&>button]:w-full [&>button]:px-3 [&>button]:py-1.5 [&>button]:text-left [&>button]:font-bold [&>button]:uppercase [&>button]:text-[var(--color-text-primary)] [&>button:hover]:bg-[var(--color-hover-overlay)] [&>button:disabled]:opacity-50"
+                  className="fixed z-30 max-h-[calc(100dvh-1rem)] w-56 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-overlay [&>button]:block [&>button]:w-full [&>button]:px-3 [&>button]:py-1.5 [&>button]:text-left [&>button]:font-bold [&>button]:uppercase [&>button]:text-[var(--color-text-primary)] [&>button:hover]:bg-[var(--color-hover-overlay)] [&>button:disabled]:opacity-50"
                   ref={sessionMenu.menuRef}
                   role="menu"
                   style={sessionMenu.menuStyle}
@@ -3074,6 +3079,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <button
                     type="button"
                     role="menuitem"
+                    className={FOCUS_RING_CLASS}
                     disabled={
                       busyAction !== null ||
                       actionDialogs.deskSpawning ||
@@ -3097,6 +3103,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       role="menuitem"
                       aria-busy={busyAction === "handoff" || undefined}
                       aria-label={busyAction === "handoff" ? "Handing off session" : undefined}
+                      className={FOCUS_RING_CLASS}
                       disabled={busyAction !== null}
                       title="Pass this task to another agent in the same workspace"
                       onClick={() => {
@@ -3113,6 +3120,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       role="menuitem"
                       disabled={busyAction !== null}
                       title="Switch credentials in place — the live process rereads the new account on its next request"
+                      className={FOCUS_RING_CLASS}
                       onClick={() => {
                         closeSessionMenu();
                         actionDialogs.openSwitchAuth(session);
@@ -3127,6 +3135,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       role="menuitem"
                       aria-busy={busyAction === "pause" || undefined}
                       aria-label={busyAction === "pause" ? "Pausing session" : undefined}
+                      className={FOCUS_RING_CLASS}
                       disabled={busyAction !== null}
                       onClick={() => {
                         closeSessionMenu();
@@ -3145,6 +3154,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       }}
                       role="menuitem"
                       type="button"
+                      className={FOCUS_RING_CLASS}
                     >
                       Restart session
                     </button>
@@ -3156,12 +3166,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     }}
                     role="menuitem"
                     type="button"
+                    className={FOCUS_RING_CLASS}
                   >
                     Change title
                   </button>
                   <button
                     type="button"
                     role="menuitem"
+                    className={FOCUS_RING_CLASS}
                     onClick={() => {
                       closeSessionMenu();
                       void openLogs();
@@ -3175,6 +3187,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       role="menuitem"
                       aria-busy={busyAction === "complete" || undefined}
                       aria-label={busyAction === "complete" ? "Closing session" : undefined}
+                      className={FOCUS_RING_CLASS}
                       disabled={busyAction !== null}
                       title={CLOSE_SESSION_TOOLTIP}
                       onClick={() => {
@@ -3192,7 +3205,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       aria-busy={busyAction === "kill" || undefined}
                       aria-label={busyAction === "kill" ? "Killing session" : undefined}
                       disabled={busyAction !== null}
-                      className="!text-[var(--color-status-error)]"
+                      className={`${FOCUS_RING_CLASS} !text-[var(--color-status-error)]`}
                       onClick={() => {
                         closeSessionMenu();
                         void handleAction("kill", { force: true });
@@ -3209,7 +3222,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {session.error ? (
             <div
               role="alert"
-              className={`mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-2 text-[var(--color-chip-error-text)] ${HARD_WRAP_TEXT_CLASS}`}
+              className={`mt-3 border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2.5 py-2 text-[var(--color-status-error)] ${HARD_WRAP_TEXT_CLASS}`}
             >
               {session.error}
             </div>
@@ -3246,7 +3259,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {session.queuedMessages.messages.length > 0 ||
               (session.queuedMessages.pipelineMessages?.length ?? 0) > 0 ? (
                 <section>
-                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                  <h2 className="flex items-center gap-2 py-2 text-label font-bold uppercase tracking-caps text-[var(--color-text-tertiary)]">
                     Queued messages
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
@@ -3261,7 +3274,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2"
                           >
                             <div className="flex items-start justify-between gap-2">
-                              <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                              <div className="text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
                                 #{index + 1}
                               </div>
                               <div className="flex shrink-0 gap-1.5">
@@ -3314,7 +3327,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ) : null}
                   {(session.queuedMessages.pipelineMessages?.length ?? 0) > 0 ? (
                     <div className="mt-2">
-                      <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                      <div className="text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
                         Auto steps
                       </div>
                       <ol aria-label="Auto pipeline steps list" className="mt-1 space-y-2">
@@ -3338,7 +3351,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
               {/* Message */}
               <section>
-                <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                <h2 className="flex items-center gap-2 py-2 text-label font-bold uppercase tracking-caps text-[var(--color-text-tertiary)]">
                   Message
                   <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                 </h2>
@@ -3384,12 +3397,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       voice={voice}
                     />
                     {voice.voiceError ? (
-                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+                      <div className="border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2.5 py-1.5 text-[var(--color-status-error)]">
                         {voice.voiceError}
                       </div>
                     ) : null}
                     <div className="flex flex-wrap items-start justify-between gap-2">
-                      <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
+                      <span className="min-w-0 flex-1 text-label text-[var(--color-text-tertiary)]">
                         {voice.voiceBusy && !voice.recording ? (
                           <VoiceStatusHint voice={voice} />
                         ) : sessionStarting ? (
@@ -3439,7 +3452,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             <span>Send now</span>
                             <span
                               aria-hidden="true"
-                              className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                              className="ml-2 whitespace-nowrap font-mono text-label font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                             >
                               {PRIMARY_SUBMIT_HINT}
                             </span>
@@ -3460,7 +3473,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {/* Links */}
               {visibleLinks.length > 0 ? (
                 <section>
-                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                  <h2 className="flex items-center gap-2 py-2 text-label font-bold uppercase tracking-caps text-[var(--color-text-tertiary)]">
                     Links
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
@@ -3482,7 +3495,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
               {genericArtifacts.length > 0 || session.artifactsTruncated ? (
                 <section>
-                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                  <h2 className="flex items-center gap-2 py-2 text-label font-bold uppercase tracking-caps text-[var(--color-text-tertiary)]">
                     Artifacts
                     <span className="text-[var(--color-text-secondary)]">
                       {filteredArtifacts.length}
@@ -3640,7 +3653,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {/* Services */}
               {session.services.length > 0 ? (
                 <section>
-                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                  <h2 className="flex items-center gap-2 py-2 text-label font-bold uppercase tracking-caps text-[var(--color-text-tertiary)]">
                     Services
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
@@ -3677,14 +3690,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   key={`task-${session.id}`}
                   className="order-3 min-w-0 border-t border-[var(--color-border-default)]"
                 >
-                  <summary className="cursor-pointer py-3 font-bold uppercase tracking-[0.1em] text-[var(--color-text-secondary)]">
+                  <summary
+                    className={`${FOCUS_RING_CLASS} cursor-pointer py-3 font-bold uppercase tracking-label text-[var(--color-text-secondary)]`}
+                  >
                     Task &amp; Handoff
                   </summary>
                   <div className="space-y-3 pb-3">
                     {promptView.task ? (
                       <div>
                         <div className="flex items-center justify-between gap-2">
-                          <span className="font-bold uppercase text-[var(--color-text-secondary)]">
+                          <span className="text-label font-bold uppercase tracking-label text-[var(--color-text-secondary)]">
                             Task
                           </span>
                           <PromptSectionCopyButton
@@ -3703,7 +3718,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     {promptView.handoff ? (
                       <div>
                         <div className="flex items-center justify-between gap-2">
-                          <span className="font-bold uppercase text-[var(--color-text-secondary)]">
+                          <span className="text-label font-bold uppercase tracking-label text-[var(--color-text-secondary)]">
                             Handoff
                           </span>
                           <PromptSectionCopyButton
@@ -3735,7 +3750,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     {promptView.selfDestructLabel ? (
                       <div>
                         <div className="flex items-center justify-between gap-2 [&>button]:text-[var(--color-text-secondary)] [&>button]:opacity-100">
-                          <span className="font-bold uppercase text-[var(--color-text-secondary)]">
+                          <span className="text-label font-bold uppercase tracking-label text-[var(--color-text-secondary)]">
                             Auto-close conditions
                           </span>
                           <PromptSectionCopyButton
@@ -3760,7 +3775,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 key={`runtime-${session.id}`}
                 className="order-5 min-w-0 border-t border-[var(--color-border-default)]"
               >
-                <summary className="cursor-pointer py-3 font-bold uppercase tracking-[0.1em] text-[var(--color-text-secondary)]">
+                <summary
+                  className={`${FOCUS_RING_CLASS} cursor-pointer py-3 font-bold uppercase tracking-label text-[var(--color-text-secondary)]`}
+                >
                   Runtime &amp; Access
                 </summary>
                 <dl className="space-y-2 text-[var(--color-text-secondary)]">
@@ -3797,7 +3814,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </dl>
 
                 <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
-                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  <div className="text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
                     Worktree path
                   </div>
                   <div className="mt-1 font-mono text-[var(--color-text-secondary)]">
@@ -3807,7 +3824,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
                 {wakeSummary?.stopCondition ? (
                   <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
-                    <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    <div className="text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
                       Wake stop condition
                     </div>
                     <div className="mt-1 text-[var(--color-text-secondary)]">
@@ -3818,7 +3835,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
                 {workspaceAccessItems.length > 0 ? (
                   <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
-                    <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    <div className="text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
                       Workspace Access
                     </div>
                     <div className="mt-2 space-y-2">
@@ -3829,14 +3846,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         >
                           <div className="flex items-center justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="truncate text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]">
+                              <div className="truncate text-label font-bold uppercase tracking-label text-[var(--color-text-primary)]">
                                 {item.label}
                               </div>
                             </div>
                             {item.kind === "link" ? (
                               <a
                                 aria-label={`Open ${item.label}`}
-                                className="border border-[var(--color-border-strong)] px-2 py-0.5 text-[10px] font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 text-label font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
                                 href={item.value}
                                 rel="noreferrer"
                                 target="_blank"
@@ -3867,7 +3884,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {/* Sidecars */}
               {session.sidecars.length > 0 ? (
                 <section className="order-4 min-w-0">
-                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                  <h2 className="flex items-center gap-2 py-2 text-label font-bold uppercase tracking-caps text-[var(--color-text-tertiary)]">
                     Sidecars
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
@@ -3882,7 +3899,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           <div className="flex flex-wrap items-start justify-between gap-2">
                             <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
                               <span
-                                className={`inline-block h-2 w-2 shrink-0 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                                className={`inline-block h-2 w-2 shrink-0 rounded-dot ${sc.alive ? "bg-[var(--color-status-ready)]" : "bg-[var(--color-text-tertiary)]"}`}
                                 data-testid={`sidecar-status-${sc.name}`}
                               />
                               <span className="min-w-0 break-all text-[var(--color-text-secondary)]">
@@ -3986,15 +4003,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     role="alert"
                     className={`flex h-full min-w-0 flex-col items-center justify-center gap-3 border px-4 text-center ${
                       logsError.status === 404
-                        ? "border-[var(--color-chip-warn-border)] bg-[var(--color-bg-surface)]"
-                        : "border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)]"
+                        ? "border-[var(--color-status-attention-border)] bg-[var(--color-bg-surface)]"
+                        : "border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)]"
                     }`}
                   >
                     <div
-                      className={`flex items-center gap-2 font-bold uppercase tracking-[0.1em] ${
+                      className={`flex items-center gap-2 font-bold uppercase tracking-label ${
                         logsError.status === 404
-                          ? "text-[var(--color-chip-warn-text)]"
-                          : "text-[var(--color-chip-error-text)]"
+                          ? "text-[var(--color-status-attention)]"
+                          : "text-[var(--color-status-error)]"
                       }`}
                     >
                       <span
@@ -4091,11 +4108,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }}
               role="dialog"
             >
-              <div className="w-full max-w-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)]">
+              <div className="w-full max-w-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-modal">
                 <div className="mb-4 flex items-center justify-between gap-3">
                   <div>
                     <h2
-                      className="font-bold uppercase tracking-[0.1em] text-[var(--color-status-attention)]"
+                      className="font-bold uppercase tracking-label text-[var(--color-status-attention)]"
                       id="sidecar-port-conflict-title"
                     >
                       Port busy
@@ -4123,7 +4140,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </div>
                 <div className="space-y-3">
                   <label className="block">
-                    <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    <span className="mb-1 block text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
                       Port
                     </span>
                     <select

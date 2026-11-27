@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
 import { startServer, type StartedServer } from "../../src/server.js";
@@ -11,14 +12,15 @@ import {
   TodoTransitionConflictError,
 } from "../../src/todo.js";
 import { SessionService } from "../../src/session-service.js";
-import { findFreePort } from "../helpers/common.js";
+import { startOnFreePort } from "../helpers/common.js";
 
-async function setupConfig(): Promise<{ configPath: string; dataDir: string; port: number }> {
+async function setupConfig(
+  port: number,
+): Promise<{ configPath: string; dataDir: string; port: number }> {
   const root = await mkdtemp(join(tmpdir(), "spur-server-todo-events-test-"));
   const repoDir = join(root, "repo");
   const dataDir = join(root, "data");
   const worktreeDir = join(root, "worktrees");
-  const port = await findFreePort();
   await mkdir(repoDir, { recursive: true });
   const configPath = join(root, "spur.yaml");
   await writeFile(
@@ -47,6 +49,16 @@ async function setupConfig(): Promise<{ configPath: string; dataDir: string; por
 // unless each case resets the collapse state itself.
 const runningServers: StartedServer[] = [];
 
+async function startTestServer(configure = setupConfig) {
+  const { server, port } = await startOnFreePort(
+    (_port, configPath) =>
+      startServer(configPath, { info: () => undefined, warn: () => undefined }),
+    async (candidate) => (await configure(candidate)).configPath,
+  );
+  runningServers.push(server);
+  return { dataDir: server.config.dataDir, port };
+}
+
 afterAll(async () => {
   for (const server of runningServers) {
     await server.stop();
@@ -62,18 +74,35 @@ describe("todo error branches log http.request.failed", () => {
     resetEventLogCollapse();
   });
 
+  it("serves requests after retrying an occupied startup port", async () => {
+    const blocker = createServer();
+    let attempts = 0;
+    try {
+      const { port } = await startTestServer(async (candidate) => {
+        attempts += 1;
+        const config = await setupConfig(candidate);
+        if (attempts === 1) {
+          await new Promise<void>((resolve, reject) => {
+            blocker.once("error", reject);
+            blocker.listen(config.port, "127.0.0.1", resolve);
+          });
+        }
+        return config;
+      });
+      expect(attempts).toBeGreaterThanOrEqual(2);
+      expect((await fetch(`http://127.0.0.1:${port}/info`)).status).toBe(200);
+    } finally {
+      if (blocker.listening) await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  });
+
   it("logs a warn event for todo_open_work", async () => {
-    const { configPath, dataDir, port } = await setupConfig();
     const originalComplete = SessionService.prototype.complete;
     SessionService.prototype.complete = async function mockComplete(sessionId: string) {
       throw new TodoOpenWorkError([{ sessionId, openItemIds: ["item-1"], heldItemIds: [] }]);
     };
     try {
-      const server = await startServer(configPath, {
-        info: () => undefined,
-        warn: () => undefined,
-      });
-      runningServers.push(server);
+      const { dataDir, port } = await startTestServer();
       const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
         method: "POST",
       });
@@ -101,17 +130,12 @@ describe("todo error branches log http.request.failed", () => {
   });
 
   it("logs a warn event for todo_ledger_empty", async () => {
-    const { configPath, dataDir, port } = await setupConfig();
     const originalComplete = SessionService.prototype.complete;
     SessionService.prototype.complete = async function mockComplete(sessionId: string) {
       throw new TodoEmptyLedgerError([sessionId]);
     };
     try {
-      const server = await startServer(configPath, {
-        info: () => undefined,
-        warn: () => undefined,
-      });
-      runningServers.push(server);
+      const { dataDir, port } = await startTestServer();
       const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
         method: "POST",
       });
@@ -137,9 +161,7 @@ describe("todo error branches log http.request.failed", () => {
   });
 
   it("logs a warn event for invalid_todo_request driven by a real bad body", async () => {
-    const { configPath, dataDir, port } = await setupConfig();
-    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
-    runningServers.push(server);
+    const { dataDir, port } = await startTestServer();
     const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/todo`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-spur-origin": "ui" },
@@ -164,17 +186,12 @@ describe("todo error branches log http.request.failed", () => {
   });
 
   it("logs a warn event for todo_transition_conflict", async () => {
-    const { configPath, dataDir, port } = await setupConfig();
     const originalMutateTodo = SessionService.prototype.mutateTodo;
     SessionService.prototype.mutateTodo = async function mockMutateTodo(sessionId: string) {
       throw new TodoTransitionConflictError(sessionId, "item-1", "item already resolved");
     };
     try {
-      const server = await startServer(configPath, {
-        info: () => undefined,
-        warn: () => undefined,
-      });
-      runningServers.push(server);
+      const { dataDir, port } = await startTestServer();
       const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/todo`, {
         method: "POST",
         headers: { "content-type": "application/json", "x-spur-origin": "ui" },
@@ -202,17 +219,12 @@ describe("todo error branches log http.request.failed", () => {
   });
 
   it("logs an error event for todo_ledger_corrupt", async () => {
-    const { configPath, dataDir, port } = await setupConfig();
     const originalMutateTodo = SessionService.prototype.mutateTodo;
     SessionService.prototype.mutateTodo = async function mockMutateTodo(sessionId: string) {
       throw new TodoLedgerCorruptError(sessionId, "unparsable line", 3);
     };
     try {
-      const server = await startServer(configPath, {
-        info: () => undefined,
-        warn: () => undefined,
-      });
-      runningServers.push(server);
+      const { dataDir, port } = await startTestServer();
       const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/todo`, {
         method: "POST",
         headers: { "content-type": "application/json", "x-spur-origin": "ui" },
@@ -240,9 +252,7 @@ describe("todo error branches log http.request.failed", () => {
   });
 
   it("logs a warn event for an auto-ping failure", async () => {
-    const { configPath, dataDir, port } = await setupConfig();
-    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
-    runningServers.push(server);
+    const { dataDir, port } = await startTestServer();
     const response = await fetch(
       `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/mute`,
       {

@@ -221,7 +221,7 @@ describe("closeout archive", () => {
 
   it("records an error and keeps partial files when the walk budget is exhausted", async () => {
     for (let i = 0; i < CLOSEOUT_WALK_MAX_ENTRIES + 1; i += 1)
-      put(join(artifacts, `f${i}.txt`), "");
+      put(join(artifacts, `f${i}.txt`), "x");
     const manifest = await write();
     expect(manifest.error).toContain(String(CLOSEOUT_WALK_MAX_ENTRIES));
     expect(manifest.files.length).toBeGreaterThan(0);

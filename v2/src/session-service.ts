@@ -157,6 +157,7 @@ import {
   codexUsesCustomProvider,
   findLatestCodexSessionFile,
   readCodexConversationTail,
+  readCodexResumeProvider,
   readCodexRolloutState,
   readCodexTranscriptEntries,
   readCodexUserConfig,
@@ -1475,6 +1476,11 @@ const RESTRICT_WRITES_PROMPT_SUFFIX =
   "Restricted writes mode: do not modify, create, or delete files in the workspace. You may still post GitHub PR review comments via `gh` and call any MCP tool. Use these to communicate review feedback.";
 type ManualSessionStatus = "stopped" | "completed";
 type ManualStatusAction = "complete" | "pause" | "self_destruct" | "desk_complete" | "handoff";
+type AuthorizationSelection = Parameters<AuthProxy["registerSession"]>[0];
+type RestoreAuthorizationPlan = {
+  selection: AuthorizationSelection | undefined;
+  checkedCodexResumeId: string | null | undefined;
+};
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 /**
@@ -7691,6 +7697,23 @@ export class SessionService {
     accountId: string | null | undefined,
     managedBinding: boolean,
   ): Promise<AuthRegistration | undefined> {
+    const selection = await this.selectSessionAuthorization(
+      sessionId,
+      agent,
+      project,
+      accountId,
+      managedBinding,
+    );
+    return selection ? this.authProxy.registerSession(selection) : undefined;
+  }
+
+  private async selectSessionAuthorization(
+    sessionId: string,
+    agent: AgentName,
+    project: ProjectConfig,
+    accountId: string | null | undefined,
+    managedBinding: boolean,
+  ): Promise<AuthorizationSelection | undefined> {
     if (agent !== "claude" && agent !== "codex") {
       if (accountId !== undefined && accountId !== null) {
         throw new AuthorizationError(`Saved authorization is not supported for ${agent}`, 400);
@@ -7721,10 +7744,75 @@ export class SessionService {
       // No ready managed account: launch with host authorization, as before managed pools.
       return undefined;
     }
-    return this.authProxy.registerSession({
+    return {
       sessionId,
       provider: agent,
       accountId: accountId ?? null,
+    };
+  }
+
+  private async prepareRestoreAuthorization(
+    current: SessionRecord,
+    project: ProjectConfig,
+    operation?: RestoreOperationContext,
+  ): Promise<RestoreAuthorizationPlan> {
+    const wait = <T>(pending: Promise<T>): Promise<T> => operation?.wait(pending) ?? pending;
+    try {
+      const selection = await wait(
+        this.selectSessionAuthorization(
+          current.id,
+          current.agent,
+          project,
+          current.auth ? current.auth.accountId : current.claudeAccountId,
+          current.auth !== undefined,
+        ),
+      );
+      operation?.assertActive();
+      let checkedCodexResumeId: string | null | undefined;
+      if (selection && current.agent === "codex") {
+        const sessionRootDir = join(
+          codexHookHomePath(slotToolDir(this.config.dataDir, current.id)),
+          "sessions",
+        );
+        checkedCodexResumeId =
+          current.agentSessionId ??
+          (await wait(
+            findAgentSessionId("codex", current.worktreePath, {
+              codexSessionRootDir: sessionRootDir,
+            }),
+          ));
+        operation?.assertActive();
+        if (checkedCodexResumeId) {
+          const provider = await wait(
+            readCodexResumeProvider(checkedCodexResumeId, { sessionRootDir }),
+          );
+          operation?.assertActive();
+          if (provider !== "spur_managed") {
+            const reason = provider
+              ? `saved provider ${provider} cannot change to spur_managed`
+              : "saved provider cannot be verified for spur_managed";
+            throw new AuthorizationError(
+              `Cannot restore Codex thread ${checkedCodexResumeId}: ${reason}. ` +
+                `Preserve its history and use spur handoff ${current.id} --agent codex.`,
+              400,
+            );
+          }
+        }
+      }
+      return { selection, checkedCodexResumeId };
+    } catch (error) {
+      this.logRestoreAuthorizationFailure(current, error);
+      throw error;
+    }
+  }
+
+  private logRestoreAuthorizationFailure(current: SessionRecord, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.logEvent("session.restore.failed", {
+      level: "error",
+      sessionId: current.id,
+      projectId: current.project,
+      message: `Failed to restore ${current.id}: ${message}`,
     });
   }
 
@@ -15204,12 +15292,12 @@ export class SessionService {
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchOptions = {
         ...planOptions,
-        ...managedAuthLaunch(
+        ...(await managedAuthLaunch(
           authRegistration,
           sessionToolDir,
           planOptions.codexArgs,
           workspacePath,
-        ),
+        )),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -15263,7 +15351,7 @@ export class SessionService {
         agentLaunchId,
         extraEnv: {
           ...sessionAgentConfig.env,
-          ...managedAuthLaunch(authRegistration, sessionToolDir).env,
+          ...(await managedAuthLaunch(authRegistration, sessionToolDir)).env,
         },
       });
       const launchAgent = agent;
@@ -15316,6 +15404,9 @@ export class SessionService {
         stage = "tmux.ready";
         await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers, undefined, {
           agent: launchAgent,
+          ...(launchPlan.claudeRegistration
+            ? { claudeRegistration: launchPlan.claudeRegistration }
+            : {}),
         });
         this.assertSpawnNotKilled(launchSessionId);
         this.logEvent("session.spawn.ready", {
@@ -16998,7 +17089,7 @@ export class SessionService {
           : requestedAuthAccount(request, agent),
         prepared.placeholder.auth !== undefined,
       );
-      const managedLaunch = managedAuthLaunch(
+      const managedLaunch = await managedAuthLaunch(
         authRegistration,
         sessionToolDir,
         project.codexArgs,
@@ -17167,7 +17258,12 @@ export class SessionService {
           launchSessionId,
           launchPlan.readyMarkers,
           attempt === 1 ? BACKGROUND_SPAWN_READY_TIMEOUT_MS : undefined,
-          { agent: launchAgent },
+          {
+            agent: launchAgent,
+            ...(launchPlan.claudeRegistration
+              ? { claudeRegistration: launchPlan.claudeRegistration }
+              : {}),
+          },
         );
         this.logEvent("session.spawn.ready", {
           level: "info",
@@ -24146,7 +24242,7 @@ export class SessionService {
           true,
         )
       : undefined;
-    const managedLaunch = managedAuthLaunch(
+    const managedLaunch = await managedAuthLaunch(
       authRegistration,
       sessionToolDir,
       project.codexArgs,
@@ -24416,7 +24512,13 @@ export class SessionService {
           session.tmuxSession,
           recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
           undefined,
-          { agent: session.agent, ...(operation ? { operation } : {}) },
+          {
+            agent: session.agent,
+            ...(operation ? { operation } : {}),
+            ...((recoveryPlan ?? baseLaunchPlan).claudeRegistration
+              ? { claudeRegistration: (recoveryPlan ?? baseLaunchPlan).claudeRegistration }
+              : {}),
+          },
         );
         assertActive();
         if (
@@ -24520,6 +24622,9 @@ export class SessionService {
           await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
             agent: session.agent,
             ...(operation ? { operation } : {}),
+            ...(freshPlan.claudeRegistration
+              ? { claudeRegistration: freshPlan.claudeRegistration }
+              : {}),
           });
           assertActive();
           if (
@@ -24673,6 +24778,7 @@ export class SessionService {
     return this.withPaneWriteLock(
       hint.tmuxSession,
       async () => {
+        let preparedAuthorization: RestoreAuthorizationPlan | undefined;
         const claim = await this.withSessionLifecycleLocks(
           this.lifecycleIdsFor(hint),
           async () => {
@@ -24691,6 +24797,19 @@ export class SessionService {
               }
               this.assertTokenBudgetAllowsActivation(current);
               this.assertAdmissible(current.project, "restore", { replacingSessionId: current.id });
+              const sourceStamp = this.lifecycleStamp(current);
+              preparedAuthorization = await this.prepareRestoreAuthorization(
+                current,
+                this.getProject(current.project),
+                operation,
+              );
+              operation?.assertActive();
+              const latest = readSession(this.config.dataDir, sessionId);
+              if (!latest || !this.lifecycleStampMatches(latest, sourceStamp)) {
+                const error = new Error(`Session ${sessionId} changed before restart teardown`);
+                this.logRestoreAuthorizationFailure(current, error);
+                throw error;
+              }
               await this.applyManualStatusLocked(
                 sessionId,
                 "stopped",
@@ -24709,7 +24828,13 @@ export class SessionService {
         );
         try {
           this.launchesInFlight.add(sessionId);
-          return await this.restoreLocked(sessionId, request, claim, operation);
+          return await this.restoreLocked(
+            sessionId,
+            request,
+            claim,
+            operation,
+            preparedAuthorization,
+          );
         } finally {
           this.launchesInFlight.delete(sessionId);
         }
@@ -24723,6 +24848,7 @@ export class SessionService {
     request: RestoreSessionRequest,
     claim: SessionLifecycleStamp,
     operation?: RestoreOperationContext,
+    preparedAuthorization?: RestoreAuthorizationPlan,
   ): Promise<SessionView> {
     operation?.assertActive();
     const wait = <T>(pending: Promise<T>): Promise<T> => operation?.wait(pending) ?? pending;
@@ -24941,6 +25067,21 @@ export class SessionService {
       : null;
     operation?.assertActive();
     if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
+    const authorization =
+      preparedAuthorization ??
+      (await this.prepareRestoreAuthorization(current, restoreProjectConfig, operation));
+    operation?.assertActive();
+    const checkedCodexResumeId = authorization.checkedCodexResumeId;
+    let authRegistration: AuthRegistration | undefined;
+    try {
+      authRegistration = authorization.selection
+        ? await wait(this.authProxy.registerSession(authorization.selection))
+        : undefined;
+      operation?.assertActive();
+    } catch (error) {
+      this.logRestoreAuthorizationFailure(current, error);
+      throw error;
+    }
     const codexRestoreStartedAt = current.agent === "codex" ? nowIso() : null;
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
@@ -24961,14 +25102,7 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
-      const authRegistration = await this.prepareSessionAuthorization(
-        current.id,
-        current.agent,
-        restoreProjectConfig,
-        current.auth ? current.auth.accountId : current.claudeAccountId,
-        current.auth !== undefined,
-      );
-      const managedLaunch = managedAuthLaunch(
+      const managedLaunch = await managedAuthLaunch(
         authRegistration,
         sessionToolDir,
         restoreProjectConfig.codexArgs,
@@ -25064,17 +25198,18 @@ export class SessionService {
         return this.lifecycleStamp(latest);
       });
       const pinnedCodexId =
-        current.agent === "codex" && current.agentSessionId ? current.agentSessionId : undefined;
-      const launchPlan = pinnedCodexId
-        ? null
-        : await wait(
-            waitForRestorePlan(
-              current.agent,
-              current.worktreePath,
-              restorePrompt,
-              launchPlanOptions,
-            ),
-          );
+        current.agent === "codex" ? (checkedCodexResumeId ?? current.agentSessionId) : undefined;
+      const launchPlan =
+        pinnedCodexId || checkedCodexResumeId === null
+          ? null
+          : await wait(
+              waitForRestorePlan(
+                current.agent,
+                current.worktreePath,
+                restorePrompt,
+                launchPlanOptions,
+              ),
+            );
       const effectivePlan =
         launchPlan ?? buildAgentLaunchPlan(current.agent, freshLaunchPrompt, launchPlanOptions);
       operation?.assertActive();
@@ -25091,6 +25226,7 @@ export class SessionService {
       });
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
+      let restoreClaudeRegistration = effectivePlan.claudeRegistration;
       const pinnedClaudeId =
         current.agent === "claude" && current.agentSessionId ? current.agentSessionId : undefined;
       const pinnedOpenCodeId =
@@ -25142,6 +25278,7 @@ export class SessionService {
         );
         restoreLaunchCommand = resumePlan.launchCommand;
         restoreReadyMarkers = resumePlan.readyMarkers;
+        restoreClaudeRegistration = resumePlan.claudeRegistration;
       }
       restoredLaunchCommand = restoreLaunchCommand;
       operation?.assertActive();
@@ -25207,6 +25344,7 @@ export class SessionService {
           waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
             agent: current.agent,
             ...(operation ? { operation } : {}),
+            ...(restoreClaudeRegistration ? { claudeRegistration: restoreClaudeRegistration } : {}),
           }),
         );
       } catch (error) {

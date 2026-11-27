@@ -237,7 +237,7 @@ test.describe("SC1: Sidecar terminal buttons", () => {
       /color-text-tertiary/,
     );
     await expect(sidecarSection.getByTestId("sidecar-status-dev")).not.toHaveClass(
-      /color-chip-alive/,
+      /color-status-ready/,
     );
     await expect(sidecarSection.getByRole("button", { name: /terminal/i })).toBeVisible();
     await expect(sidecarSection.getByRole("link", { name: /open/i })).toHaveCount(0);
