@@ -72,7 +72,11 @@ export function resolveAgentExecutable(agent: AgentName): AgentExecutableResolut
       source: override ? "environment" : "path",
     };
   }
-  return { command, path: findExecutableOnPath(command), source: override ? "environment" : "path" };
+  return {
+    command,
+    path: findExecutableOnPath(command),
+    source: override ? "environment" : "path",
+  };
 }
 
 export function missingAgentExecutableMessage(agent: AgentName): string {
