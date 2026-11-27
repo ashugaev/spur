@@ -186,6 +186,32 @@ describe("full-view list cache", () => {
     expect(await activity("idle")).toBe(raised);
   });
 
+  it("keeps the activity floor when a same-directory reload overlaps a list", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "run" }));
+    const internals = sessionServiceInternals(service);
+    const original = internals.readRuntimeSnapshot.bind(internals);
+    const later = new Date("2026-03-18T10:30:00.000Z");
+    let tmuxActivityAt: Date | null = later;
+    vi.spyOn(internals, "readRuntimeSnapshot").mockImplementation(async (session, ...rest) => ({
+      ...(await original(session, ...rest)),
+      tmuxActivityAt,
+    }));
+    const activity = async () =>
+      ((await service.list()) as SessionView[]).find((view) => view.id === "run")?.lastActivityAt;
+    expect(await activity()).toBe(later.toISOString());
+    tmuxActivityAt = null;
+    const enrich = service as unknown as {
+      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+    };
+    const enrichOriginal = enrich.enrichWithClassified.bind(enrich);
+    vi.spyOn(enrich, "enrichWithClassified").mockImplementationOnce(async (record, ...rest) => {
+      const result = await enrichOriginal(record, ...rest);
+      service.applyConfig(config, []);
+      return result;
+    });
+    expect(await activity()).toBe(later.toISOString());
+  });
+
   it("serves a queue write made while the startup warm is still running", async () => {
     writeFleet(2, 0);
     await service.list();

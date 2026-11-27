@@ -13000,7 +13000,8 @@ export class SessionService {
     // Before the listing snapshot: a record written during the warm must not hit.
     if (options?.view !== "dashboard" && this.fullViewCacheReady) await this.fullViewCacheReady;
     const allSessions = listSessions(this.config.dataDir);
-    const configGeneration = this.configGeneration;
+    // The binding is replaced only when the data directory is rebound.
+    const binding = this.transitionsBinding;
     const listedIds = new Set(allSessions.map((session) => session.id));
     this.lifecycle.prune(listedIds);
     this.pruneFullViewCache(listedIds);
@@ -13098,7 +13099,7 @@ export class SessionService {
     for (const view of views) {
       // A reload during this list may have rebound the data directory: these
       // rows belong to the old store and must not feed the new high-water marks.
-      if (this.configGeneration === configGeneration) this.keepListedActivityMonotonic(view);
+      if (this.transitionsBinding === binding) this.keepListedActivityMonotonic(view);
       this.guardSidecarViews(view.id, view.sidecars);
     }
     return views.filter((view) => included(view) && matchesLinks(view));
