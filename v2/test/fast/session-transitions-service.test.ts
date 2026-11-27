@@ -13,6 +13,7 @@ import {
   sessionServiceInternals,
   sessionMetadataModule,
   logSpurEventMock,
+  enrichedIds as harnessEnrichedIds,
 } from "../helpers/session-service-harness.js";
 import { appendFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import type * as Fs from "node:fs";
@@ -80,18 +81,7 @@ const binding = () =>
       transitionsBinding: { store: { observedState(id: string): SessionState | undefined } };
     }
   ).transitionsBinding;
-function enrichedIds() {
-  const internals = service as unknown as {
-    enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
-  };
-  const original = internals.enrichWithClassified.bind(internals);
-  const ids: string[] = [];
-  const spy = vi.spyOn(internals, "enrichWithClassified").mockImplementation((record, ...rest) => {
-    ids.push(record.id);
-    return original(record, ...rest);
-  });
-  return { ids, restore: () => spy.mockRestore() };
-}
+const enrichedIds = () => harnessEnrichedIds(service);
 
 beforeEach(async () => {
   await resetSessionServiceHarness(() => []);

@@ -13092,11 +13092,7 @@ export class SessionService {
     entry: FullViewCacheEntry,
     claudeAccounts: { id: string; label?: string; authenticated: boolean }[],
     listing: SessionRecord[],
-  ): Promise<{
-    view: Omit<SessionListItemView, "lifecycle">;
-    source: SessionRecord | null;
-    receipt: SessionLifecycleSnapshot;
-  }> {
+  ): Promise<Pick<FullViewCacheEntry, "view" | "source" | "receipt">> {
     const { view } = entry;
     const scoped = await this.requestScopedFields(
       record,

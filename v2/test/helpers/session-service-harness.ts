@@ -1552,6 +1552,21 @@ function sessionServiceInternals(service: unknown): SessionServiceInternals {
   return service as SessionServiceInternals;
 }
 
+// Records the ids `enrichWithClassified` runs for; `onEnrich` fires per call.
+function enrichedIds(service: unknown, onEnrich?: () => void) {
+  const internals = service as {
+    enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+  };
+  const original = internals.enrichWithClassified.bind(internals);
+  const ids: string[] = [];
+  const spy = vi.spyOn(internals, "enrichWithClassified").mockImplementation((record, ...rest) => {
+    ids.push(record.id);
+    onEnrich?.();
+    return original(record, ...rest);
+  });
+  return { ids, restore: () => spy.mockRestore() };
+}
+
 // Typed, because vitest's `toBe` accepts any expected value: renaming an outcome
 // in the source has to fail the typecheck, not only the next test run.
 const SUBMITTED: AgentSendOutcome = "submitted";
@@ -2461,6 +2476,7 @@ export {
   findLatestClaudeSessionFileMock,
   runningSession,
   sessionServiceInternals,
+  enrichedIds,
   SUBMITTED,
   SUBMIT_UNCONFIRMED,
 };

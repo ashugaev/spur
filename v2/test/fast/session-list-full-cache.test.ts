@@ -13,6 +13,7 @@ import {
   sessionMetadataModule,
   probeWorkspaceMock,
   logSpurEventMock,
+  enrichedIds as harnessEnrichedIds,
 } from "../helpers/session-service-harness.js";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -38,18 +39,7 @@ function record(overrides: Partial<SessionRecord> = {}) {
 function stopped(id: string, overrides: Partial<SessionRecord> = {}) {
   return record({ id, status: "stopped", stopReason: "manual_pause", ...overrides });
 }
-function enrichedIds() {
-  const internals = service as unknown as {
-    enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
-  };
-  const original = internals.enrichWithClassified.bind(internals);
-  const ids: string[] = [];
-  const spy = vi.spyOn(internals, "enrichWithClassified").mockImplementation((record, ...rest) => {
-    ids.push(record.id);
-    return original(record, ...rest);
-  });
-  return { ids, restore: () => spy.mockRestore() };
-}
+const enrichedIds = (onEnrich?: () => void) => harnessEnrichedIds(service, onEnrich);
 function writeFleet(stoppedCount: number, runningCount: number) {
   const runningIds: string[] = [];
   for (let index = 0; index < stoppedCount; index += 1)
@@ -125,22 +115,15 @@ describe("full-view list cache", () => {
     for (let index = 0; index < 20; index += 1)
       metadata.writeSession(TEST_DATA_DIR, record({ id: `run-${index}` }));
     const controller = new AbortController();
-    const internals = service as unknown as {
-      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
-    };
-    const original = internals.enrichWithClassified.bind(internals);
-    let enrichments = 0;
-    vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (record, ...rest) => {
-      enrichments += 1;
-      if (enrichments === 1) controller.abort();
-      return original(record, ...rest);
+    const enrich = enrichedIds(() => {
+      if (enrich.ids.length === 1) controller.abort();
     });
     await expect(service.list({ signal: controller.signal })).rejects.toMatchObject({
       name: "AbortError",
     });
     await service.settleBackgroundSpawns();
-    expect(enrichments).toBeGreaterThan(0);
-    expect(enrichments).toBeLessThanOrEqual(8);
+    expect(enrich.ids.length).toBeGreaterThan(0);
+    expect(enrich.ids.length).toBeLessThanOrEqual(8);
   });
 
   it("answers the first full list after restart with running-row enrichments only", async () => {
