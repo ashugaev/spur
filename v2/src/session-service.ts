@@ -13159,9 +13159,10 @@ export class SessionService {
       if (!listedIds.has(id)) this.listedActivityHighWater.delete(id);
     }
     for (const id of this.statusEpochs.keys()) {
-      if (listedIds.has(id)) continue;
-      this.statusEpochs.delete(id);
-      this.lastWrittenStatuses.delete(id);
+      if (!listedIds.has(id)) this.statusEpochs.delete(id);
+    }
+    for (const id of this.lastWrittenStatuses.keys()) {
+      if (!listedIds.has(id)) this.lastWrittenStatuses.delete(id);
     }
   }
 

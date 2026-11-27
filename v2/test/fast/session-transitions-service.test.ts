@@ -1237,6 +1237,19 @@ describe("session transitions service", () => {
     expect(epochs.get("api-1") ?? 0).toBe(before);
   });
 
+  it("prunes seeded last written statuses of removed sessions", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "gone", status: "completed" }));
+    await restart();
+    const internals = service as unknown as {
+      lastWrittenStatuses: Map<string, string>;
+      pruneFullViewCache(listedIds: ReadonlySet<string>): void;
+    };
+    expect([...internals.lastWrittenStatuses.keys()].sort()).toEqual(["api-1", "gone"]);
+    internals.pruneFullViewCache(new Set(["api-1"]));
+    expect([...internals.lastWrittenStatuses.keys()]).toEqual(["api-1"]);
+  });
+
   it("counts a status change after a failed journal append", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     const epochs = (service as unknown as { statusEpochs: Map<string, number> }).statusEpochs;
