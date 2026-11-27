@@ -1865,10 +1865,12 @@ export function runNpmInit(
   if (options.tailscale !== undefined) {
     args.push(NPM_INIT_TAILSCALE_FLAGS[options.tailscale]);
   }
+  execFileSync("bash", [script, ...args], { stdio: "inherit" });
+  // Both agent-integration writes follow the script so its plan announces them
+  // before they happen.
   if (!ensureCursorTokenUsageHook()) {
     writeStderr("spur: Cursor token hook setup skipped; existing hooks were preserved");
   }
-  execFileSync("bash", [script, ...args], { stdio: "inherit" });
   // Refreshes ~/.claude/skills and ~/.codex/skills for every `spur init` /
   // `update` / `reinit` / `POST /deploy/switch` / auto-update tick — the
   // callers that all funnel through this function. Never allowed to fail

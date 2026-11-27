@@ -51,6 +51,7 @@ const { npmGlobalPrefix, npmPinConfigPath } = await import("../../src/npm-prefix
 
 beforeEach(() => {
   findExecutableOnPathMock.mockReset();
+  failingCommand = null;
 });
 
 function tailscaleFlags(args: ReadonlyArray<string>): string[] {
@@ -89,6 +90,13 @@ describe("runNpmInit --tailscale forwarding", () => {
     if (originalHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = originalHome;
     await rm(fakeHome, { recursive: true, force: true });
+  });
+
+  it("writes the Cursor hook only after the script succeeds", async () => {
+    failingCommand = "bash";
+    expect(() => runNpmInit(cliEntrypoint, { noStart: true })).toThrow("bash failed");
+    await expect(readFile(join(fakeHome, ".cursor", "hooks.json"))).rejects.toThrow();
+    expect(installHostSkillsMock).not.toHaveBeenCalled();
   });
 
   it("forwards no Tailscale flag when tailscale is unset", () => {

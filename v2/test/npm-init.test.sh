@@ -202,6 +202,7 @@ assert_out "$OUT_FILE" "npm-init: plan (units, linger, services, Tailscale):"
 assert_out "$OUT_FILE" "npm-init:   install user units spur-daemon, spur-web, spur-mcp, spur-mcp-tunnel in $UNIT_DIR"
 assert_out "$OUT_FILE" "npm-init:   enable linger for $USER if allowed (best effort, no sudo): services keep running after logout and start at boot"
 assert_out "$OUT_FILE" "npm-init:   leave services stopped (--no-start)"
+assert_out "$OUT_FILE" "npm-init:   agent integrations: skill links, Cursor hook"
 assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped; web UI stays on 127.0.0.1 (pass --tailscale for private remote access)"
 assert_out "$OUT_FILE" "npm-init:   units installed: spur-daemon spur-web spur-mcp spur-mcp-tunnel in $UNIT_DIR"
 assert_out "$OUT_FILE" "npm-init:   started: none (--no-start)"
@@ -679,9 +680,26 @@ assert_no_log "$FAKE_BIN" curl
 assert_no_log "$FAKE_BIN" sudo
 assert_loopback
 assert_out "$OUT_FILE" "npm-init:   Tailscale: not found, bind skipped"
-assert_out "$OUT_FILE" "npm-init: info: Tailscale is not installed; web UI stays on 127.0.0.1. To install it: spur init --tailscale"
+assert_out "$OUT_FILE" "npm-init: info: Tailscale is not installed; web UI is now on 127.0.0.1 only. To restore the tailnet bind: spur init --tailscale"
 refute_out "$OUT_FILE" "Tailscale is not up"
 echo "npm-init.test.sh: keep-bind-binary-missing scenario OK"
+
+# keep-bind-down: --keep-tailscale, Tailscale installed but not up.
+new_isolated_scenario keep-bind-down
+cat >"$FAKE_BIN/tailscale" <<'EOF'
+#!/usr/bin/env bash
+echo "NoState"
+exit 1
+EOF
+chmod +x "$FAKE_BIN/tailscale"
+write_logging_stub "$FAKE_BIN" curl
+run_isolated_init --no-start --keep-tailscale
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "keep-bind-down exited $rc"; }
+assert_no_log "$FAKE_BIN" curl
+assert_loopback
+assert_out "$OUT_FILE" "npm-init:   Tailscale: not up"
+assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI is now on 127.0.0.1 only. To restore the tailnet bind: sudo tailscale up, then spur init --tailscale"
+echo "npm-init.test.sh: keep-bind-down scenario OK"
 
 # keep-bind-up: --keep-tailscale rebinds when Tailscale is up; never installs.
 new_isolated_scenario keep-bind-up
@@ -707,7 +725,7 @@ chmod +x "$FAKE_BIN/curl"
 run_isolated_init --no-start --tailscale
 [ "$rc" -eq 1 ] || { cat "$OUT_FILE" >&2; fail "opt-in-install-fail must exit 1, got $rc"; }
 grep -q 'tailscale.com/install.sh' "$FAKE_BIN/../curl.log" || fail "--tailscale must run the install script"
-assert_out "$OUT_FILE" "npm-init: Tailscale install failed; no units changed. Install it manually (https://tailscale.com/download), then re-run: spur init --tailscale"
+assert_out "$OUT_FILE" "npm-init: Tailscale install failed; units not installed, web UI not started. Install Tailscale manually (https://tailscale.com/download), then re-run: spur init --tailscale"
 [ ! -e "$UNIT_DIR" ] || fail "units must not be written when the Tailscale install fails"
 refute_out "$OUT_FILE" "npm-init: summary:"
 echo "npm-init.test.sh: opt-in-install-fail scenario OK"

@@ -133,13 +133,14 @@ if [[ "$NO_START" -eq 1 ]]; then
 else
   echo "npm-init:   start ${started_names// /, }"
 fi
+echo "npm-init:   agent integrations: skill links, Cursor hook"
 echo "npm-init:   Tailscale: $tailscale_plan"
 
 tailscale_install_result="already installed"
 if [[ "$EXPOSE_WEB" -eq 0 && "$TAILSCALE" == "install" ]] && ! command -v tailscale >/dev/null 2>&1; then
   echo "npm-init: tailscale not found, installing (curl -fsSL https://tailscale.com/install.sh | sh)"
   curl -fsSL https://tailscale.com/install.sh | sh ||
-    die "Tailscale install failed; no units changed. Install it manually (https://tailscale.com/download), then re-run: spur init --tailscale"
+    die "Tailscale install failed; units not installed, web UI not started. Install Tailscale manually (https://tailscale.com/download), then re-run: spur init --tailscale"
   tailscale_install_result="installed"
 fi
 
@@ -220,10 +221,14 @@ elif [[ "$TAILSCALE" != "off" ]]; then
     fi
   elif [[ "$have_tailscale" -eq 1 ]]; then
     tailscale_result="not up"
-    info_lines+=("Tailscale is not up; web UI stays on 127.0.0.1. For remote access: sudo tailscale up, then spur init --tailscale")
+    if [[ "$TAILSCALE" == "keep" ]]; then
+      info_lines+=("Tailscale is not up; web UI is now on 127.0.0.1 only. To restore the tailnet bind: sudo tailscale up, then spur init --tailscale")
+    else
+      info_lines+=("Tailscale is not up; web UI stays on 127.0.0.1. For remote access: sudo tailscale up, then spur init --tailscale")
+    fi
   else
     tailscale_result="not found, bind skipped"
-    info_lines+=("Tailscale is not installed; web UI stays on 127.0.0.1. To install it: spur init --tailscale")
+    info_lines+=("Tailscale is not installed; web UI is now on 127.0.0.1 only. To restore the tailnet bind: spur init --tailscale")
   fi
 fi
 
