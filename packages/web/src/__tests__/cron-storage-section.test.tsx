@@ -82,6 +82,7 @@ describe("CronStorageSection", () => {
     renderSection();
     const toggle = await screen.findByRole("button", { name: "Note" });
     expect(toggle.querySelector("svg, span")).toBeNull();
+    expect(toggle).not.toHaveAttribute("aria-controls");
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     const textbox = screen.getByRole("textbox", { name: "Storage note" });
@@ -89,6 +90,7 @@ describe("CronStorageSection", () => {
     fireEvent.change(textbox, { target: { value: "draft" } });
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).not.toHaveAttribute("aria-controls");
     expect(screen.queryByRole("textbox")).toBeNull();
     fireEvent.click(toggle);
     expect(screen.getByRole("textbox", { name: "Storage note" })).toHaveValue("draft");
@@ -152,13 +154,17 @@ describe("CronStorageSection", () => {
     renderSection();
     fireEvent.click(await screen.findByRole("button", { name: "Clear storage" }));
     expect(screen.getByRole("alert")).toHaveTextContent("Delete note and 2 files?");
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("alert")).toBeNull();
     expect(noteToggle("Note")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Clear storage" })).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "Clear storage" }));
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     expect(await screen.findByText("Empty")).toBeInTheDocument();
     expect(noteToggle("Add note")).toBeInTheDocument();
+    expect(noteToggle("Add note")).toHaveFocus();
     expect(screen.queryByRole("button", { name: "Clear storage" })).toBeNull();
     expect(fetchMock).toHaveBeenCalledWith(STORAGE_URL, { method: "DELETE" });
   });

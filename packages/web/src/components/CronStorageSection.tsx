@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   ArtifactList,
   DEFAULT_ARTIFACT_SORT,
@@ -16,6 +16,7 @@ import {
 } from "@/lib/cron-jobs";
 import {
   DANGER_BUTTON_CLASS,
+  HARD_WRAP_TEXT_CLASS,
   ICON_BUTTON_CLASS,
   INPUT_CLASS,
   SECONDARY_BUTTON_CLASS,
@@ -30,7 +31,7 @@ type LoadState =
 
 const SECONDARY_TEXT = "text-[var(--color-text-secondary)]";
 const ERROR_TEXT = "text-[var(--color-status-error)]";
-const TRASH_BUTTON_CLASS = `${ICON_BUTTON_CLASS} h-7 w-7 text-[var(--color-text-secondary)]`;
+const TRASH_BUTTON_CLASS = `${ICON_BUTTON_CLASS} h-7 w-7 text-[var(--color-text-secondary)] border-[var(--color-border-default)]! hover:border-[var(--color-status-error)]! focus-visible:border-[var(--color-status-error)]!`;
 // Restyles ArtifactList through descendant variants; the list component stays unchanged.
 const FILES_CLASS = [
   "[&_thead_tr]:border-[var(--color-border-subtle)]",
@@ -69,6 +70,20 @@ export function CronStorageSection({
   const [confirming, setConfirming] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [sort, setSort] = useState<ArtifactSortState>(DEFAULT_ARTIFACT_SORT);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const trashRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  // Keyed header branches remount on confirm toggle; the target resolves after render.
+  const returnFocusRef = useRef<typeof toggleRef | null>(null);
+
+  useEffect(() => {
+    if (confirming) {
+      cancelRef.current?.focus();
+      return;
+    }
+    returnFocusRef.current?.current?.focus();
+    returnFocusRef.current = null;
+  }, [confirming]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -104,6 +119,7 @@ export function CronStorageSection({
 
   const clear = async () => {
     if (!(await run(() => clearCronStorage(projectId, triggerId)))) return;
+    returnFocusRef.current = toggleRef;
     setConfirming(false);
     setNoteOpen(false);
   };
@@ -117,7 +133,7 @@ export function CronStorageSection({
 
   return (
     <section className={SECTION_CLASS}>
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex min-h-7 items-center justify-between gap-3">
         <div className="flex min-w-0 items-baseline gap-3">
           <h3 className={SECTION_HEADING_CLASS}>Storage</h3>
           <span className={`truncate ${SECONDARY_TEXT}`}>
@@ -131,14 +147,18 @@ export function CronStorageSection({
           </span>
         </div>
         {view === null ? null : confirming ? (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2" key="confirm">
             <span className={ERROR_TEXT} role="alert">
               {confirmText(view)}
             </span>
             <button
               className={SECONDARY_BUTTON_CLASS}
               disabled={busy}
-              onClick={() => setConfirming(false)}
+              onClick={() => {
+                returnFocusRef.current = trashRef;
+                setConfirming(false);
+              }}
+              ref={cancelRef}
               type="button"
             >
               Cancel
@@ -153,12 +173,13 @@ export function CronStorageSection({
             </button>
           </div>
         ) : (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2" key="actions">
             <button
-              aria-controls={noteId}
+              aria-controls={noteOpen ? noteId : undefined}
               aria-expanded={noteOpen}
               className={`${SECONDARY_BUTTON_CLASS} ${noteOpen ? "border-[var(--color-accent)]! text-[var(--color-text-primary)]" : ""}`}
               onClick={() => setNoteOpen((open) => !open)}
+              ref={toggleRef}
               type="button"
             >
               {view.note === "" ? "Add note" : "Note"}
@@ -172,6 +193,7 @@ export function CronStorageSection({
                   setActionError(null);
                   setConfirming(true);
                 }}
+                ref={trashRef}
                 title="Clear storage"
                 type="button"
               >
@@ -182,7 +204,7 @@ export function CronStorageSection({
         )}
       </div>
       {error ? (
-        <span className={ERROR_TEXT} role="alert">
+        <span className={`${HARD_WRAP_TEXT_CLASS} ${ERROR_TEXT}`} role="alert">
           {error}
         </span>
       ) : null}
