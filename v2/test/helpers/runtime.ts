@@ -194,12 +194,12 @@ export interface RuntimeTestContext {
 // GitHub Actions run 33044875236). Poll the session's ToDo projection until
 // the fixture has populated it and resolved all open or held items before the gated call.
 export async function waitForCleanTodoLedger(
-  context: Pick<RuntimeTestContext, "fetchJson">,
+  context: { fetchJson(path: string): Promise<TodoProjection> },
   sessionId: string,
   opts: { timeoutMs?: number } = {},
 ): Promise<void> {
   const { timeoutMs = 15_000 } = opts;
-  await pollUntil(async () => context.fetchJson<TodoProjection>(`/sessions/${sessionId}/todo`), {
+  await pollUntil(async () => context.fetchJson(`/sessions/${sessionId}/todo`), {
     timeoutMs,
     accept: (projection) =>
       projection.counts.total > 0 && projection.counts.open === 0 && projection.counts.held === 0,

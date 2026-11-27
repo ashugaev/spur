@@ -5614,7 +5614,7 @@ projects:
       finishOverrides: [],
     };
     const fetchTodo = vi
-      .fn<RuntimeTestContext["fetchJson"]>()
+      .fn<(path: string) => Promise<TodoProjection>>()
       .mockResolvedValueOnce(empty)
       .mockResolvedValueOnce({
         ...empty,
