@@ -191,7 +191,16 @@ describe("auth terminal logins", () => {
   });
 
   it("credential written and pane dead in the same tick -> import wins, verifying then ready", async () => {
-    const s = await setup();
+    let releaseCleanup: (() => void) | undefined;
+    let kills = 0;
+    const s = await setup({
+      killTmuxSession: async () => {
+        if (++kills === 2)
+          await new Promise<void>((resolve) => {
+            releaseCleanup = resolve;
+          });
+      },
+    });
     s.deps.importNativeLogin.mockResolvedValueOnce(login("pending", { stage: "verifying" }));
     s.deps.tmuxPaneDead.mockResolvedValue(true);
     const started = await s.terminals.start({ accountId: ACCOUNT });
@@ -199,7 +208,10 @@ describe("auth terminal logins", () => {
     expect(s.terminals.get(started.id).status).toBe("verifying");
     expect(s.deps.importNativeLogin).toHaveBeenCalledTimes(1);
     expect(s.deps.tmuxPaneDead).not.toHaveBeenCalled();
-    expect(existsSync(s.managedHome)).toBe(false);
+    expect(releaseCleanup).toBeDefined();
+    if (!releaseCleanup) throw new Error("Cleanup did not start");
+    releaseCleanup();
+    await vi.waitFor(() => expect(existsSync(s.managedHome)).toBe(false));
     s.deps.loginStatus.mockResolvedValueOnce(login("ready"));
     await s.advance();
     expect(s.terminals.get(started.id)).toMatchObject({ status: "ready" });
