@@ -208,7 +208,7 @@ export function CronJobEditor({
           className="min-w-0 flex-1 truncate font-bold text-[var(--color-text-primary)]"
           id="cron-modal-title"
         >
-          <span className="uppercase tracking-[0.1em]">Cron</span> / {identity.triggerId}
+          <span className="uppercase tracking-label">Cron</span> / {identity.triggerId}
         </h2>
         <button
           aria-label="Close cron editor"
@@ -277,7 +277,7 @@ export function CronJobEditor({
           ) : null}
           <fieldset className="flex min-w-0 flex-col gap-4" disabled={state.saving}>
             <label className={LABEL_CLASS}>
-              <span className="uppercase tracking-[0.1em]">Schedule</span>
+              <span className="uppercase tracking-label">Schedule</span>
               <input
                 aria-invalid={state.errorField === "schedule" || undefined}
                 className={`${INPUT_CLASS} w-full font-mono`}
@@ -296,12 +296,12 @@ export function CronJobEditor({
                 className="flex min-w-0 flex-col gap-3 border-t border-[var(--color-border-subtle)] pt-3"
                 key={index}
               >
-                <h3 className="uppercase tracking-[0.1em] text-[var(--color-text-secondary)]">
+                <h3 className="uppercase tracking-label text-[var(--color-text-secondary)]">
                   Block {index + 1}
                 </h3>
                 <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-3">
                   <label className={LABEL_CLASS}>
-                    <span className="uppercase tracking-[0.1em]">Agent</span>
+                    <span className="uppercase tracking-label">Agent</span>
                     <select
                       aria-label={`Block ${index + 1} agent`}
                       className={`${INPUT_CLASS} w-full`}
@@ -322,7 +322,7 @@ export function CronJobEditor({
                     </select>
                   </label>
                   <label className={LABEL_CLASS}>
-                    <span className="uppercase tracking-[0.1em]">Model</span>
+                    <span className="uppercase tracking-label">Model</span>
                     <input
                       aria-label={`Block ${index + 1} model`}
                       className={`${INPUT_CLASS} w-full`}
@@ -334,7 +334,7 @@ export function CronJobEditor({
                     />
                   </label>
                   <label className={LABEL_CLASS}>
-                    <span className="uppercase tracking-[0.1em]">Effort</span>
+                    <span className="uppercase tracking-label">Effort</span>
                     <select
                       aria-label={`Block ${index + 1} effort`}
                       className={`${INPUT_CLASS} w-full`}
@@ -363,7 +363,7 @@ export function CronJobEditor({
                   </p>
                 ) : null}
                 <label className={LABEL_CLASS}>
-                  <span className="uppercase tracking-[0.1em]">Prompt</span>
+                  <span className="uppercase tracking-label">Prompt</span>
                   <textarea
                     aria-label={`Block ${index + 1} prompt`}
                     aria-invalid={state.errorField === `blocks[${index}].prompt` || undefined}
@@ -391,7 +391,7 @@ export function CronJobEditor({
             <button
               aria-busy={state.saving || undefined}
               aria-label={state.saving ? "Saving YAML" : undefined}
-              className="bg-[var(--color-accent)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] outline-none transition hover:bg-[var(--color-accent-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
+              className="bg-[var(--color-accent)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] outline-none transition hover:bg-[var(--color-accent-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={state.saving || state.conflict || !dirty || invalid}
               type="submit"
             >

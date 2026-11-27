@@ -69,7 +69,7 @@ export function PagesCatalog({ projectId }: { projectId?: string }) {
             </p>
           ) : null}
         </div>
-        <Zone label="Pages" color="var(--color-accent)" count={pages.data?.length ?? 0}>
+        <Zone label="Pages" tone="accent" count={pages.data?.length ?? 0}>
           {pages.isPending ? (
             <div role="status" aria-label="Loading pages" className="space-y-px">
               {[0, 1, 2].map((key) => (

@@ -61,7 +61,7 @@ export function SetDefaultDialog({
     >
       <div
         ref={panelRef}
-        className="max-h-[calc(100dvh-2rem)] w-[min(28rem,calc(100vw-2rem))] overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]"
+        className="max-h-[calc(100dvh-2rem)] w-[min(28rem,calc(100vw-2rem))] overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-dialog"
       >
         <div className="mb-3 flex items-start gap-2">
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -108,7 +108,7 @@ export function SetDefaultDialog({
             Replaces {replaces}.
           </p>
         ) : null}
-        <div className="mb-1 uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">
+        <div className="mb-1 uppercase tracking-meta text-[var(--color-text-secondary)]">
           Running sessions
         </div>
         <div
