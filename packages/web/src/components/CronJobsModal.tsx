@@ -4,6 +4,12 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { CronJobEditor } from "@/components/CronJobEditor";
+import { CronStorageSection } from "@/components/CronStorageSection";
+import {
+  SECTION_BUTTON_CLASS,
+  SECTION_CLASS,
+  SECTION_HEADING_CLASS,
+} from "@/components/cron-job-classes";
 import {
   buildCronRows,
   fetchCronJobs,
@@ -27,9 +33,6 @@ type LoadState =
   | { status: "ready"; data: CronJobsResponse };
 
 const LABEL_CLASS = "text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]";
-const SECTION_HEADING_CLASS =
-  "text-[11px] uppercase tracking-[0.1em] text-[var(--color-text-secondary)]";
-const SECTION_CLASS = "flex flex-col gap-2 border-t border-[var(--color-border-subtle)] pt-3";
 const GRID_CLASS =
   "grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 sm:grid-cols-[minmax(0,1fr)_9.5rem_5.5rem_minmax(0,1fr)]";
 const PRIMARY_TEXT = "text-[var(--color-text-primary)]";
@@ -191,7 +194,7 @@ function JobDetail({
           <h3 className={SECTION_HEADING_CLASS}>Settings</h3>
           {action?.kind === "spawn" ? (
             <button
-              className="border border-[var(--color-border-default)] px-2 py-1 font-bold uppercase text-[var(--color-text-primary)] outline-none hover:border-[var(--color-accent)] focus-visible:border-[var(--color-accent)]"
+              className={SECTION_BUTTON_CLASS}
               onClick={(event) => onEdit(row, event.currentTarget)}
               type="button"
             >
@@ -221,6 +224,9 @@ function JobDetail({
           ) : null}
         </dl>
       </section>
+      {action?.kind === "spawn" && row.trigger ? (
+        <CronStorageSection projectId={row.projectId} triggerId={row.trigger.triggerId} />
+      ) : null}
       <section className={SECTION_CLASS}>
         <h3 className={SECTION_HEADING_CLASS}>Recent runs</h3>
         {row.runs.length === 0 ? (
