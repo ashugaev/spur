@@ -938,6 +938,26 @@ describe("session transitions service", () => {
     expect((await poll({ since: cursor })).entries).toEqual([]);
   });
 
+  it("repairs a state left behind a committed status at boot", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
+    const cursor = (await poll()).nextCursor;
+    vi.spyOn(
+      binding().store as unknown as { observeState(): void },
+      "observeState",
+    ).mockImplementationOnce(() => {
+      throw new Error("state append lost");
+    });
+    expect(() => metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }))).toThrow(
+      "state append lost",
+    );
+    expect(binding().store.observedState("api-1")).toBe("working");
+    await restart();
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed"]);
+  });
+
   it("replays no state edge on restart for a completed record with a persistent workspace stat failure", async () => {
     metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
     probeWorkspaceMock.mockReturnValue({

@@ -6788,11 +6788,12 @@ export class SessionService {
       });
       this.transitionsBinding = binding;
       for (const record of listSessions(dataDir)) {
-        // An unchanged status with an observed state keeps that state: the
-        // earlier observer had better evidence than the status-derived one.
+        // An unchanged status keeps an observed `error`: a workspace diagnostic is
+        // better evidence than the status-derived state. Any other divergence is
+        // a lost append and gets repaired.
         const keepObserved =
           store.observedStatus(record.id) === record.status &&
-          store.observedState(record.id) !== undefined;
+          store.observedState(record.id) === "error";
         publishEdges(
           record,
           this.isLiveSessionRecord(record) || keepObserved ? undefined : statusDerivedState(record),
