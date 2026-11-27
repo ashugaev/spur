@@ -118,7 +118,7 @@ for unit in "${required_units[@]}"; do
   started_names+="${started_names:+ }${unit%.service}"
 done
 
-tailscale_plan="skipped; web UI stays on 127.0.0.1 (pass --tailscale for private remote access)"
+tailscale_plan="skipped; web UI is on 127.0.0.1 (pass --tailscale for private remote access)"
 if [[ "$EXPOSE_WEB" -eq 1 ]]; then
   tailscale_plan="skipped (--expose-web binds 0.0.0.0)"
 elif [[ "$TAILSCALE" == "install" ]]; then
@@ -194,8 +194,10 @@ tailscale_result="not requested"
 info_lines=()
 # With --no-start the unit is rewritten but the running web process is not.
 keep_web_state="web UI is now on 127.0.0.1 only"
+install_web_state="web UI is on 127.0.0.1"
 if [[ "$NO_START" -eq 1 ]]; then
   keep_web_state="web UI moves to 127.0.0.1 only when spur-web restarts"
+  install_web_state="$keep_web_state"
 fi
 if [[ "$EXPOSE_WEB" -eq 1 ]]; then
   tailscale_result="skipped (--expose-web)"
@@ -235,7 +237,7 @@ elif [[ "$TAILSCALE" != "off" ]]; then
     if [[ "$TAILSCALE" == "keep" ]]; then
       info_lines+=("Tailscale is not up; $keep_web_state. To restore the tailnet bind: sudo tailscale up, then spur init --tailscale")
     else
-      info_lines+=("Tailscale is not up; web UI stays on 127.0.0.1. For remote access: sudo tailscale up, then spur init --tailscale")
+      info_lines+=("Tailscale is not up; $install_web_state. For remote access: sudo tailscale up, then spur init --tailscale")
     fi
   else
     tailscale_result="not found, bind skipped"

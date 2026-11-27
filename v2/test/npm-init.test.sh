@@ -208,7 +208,7 @@ assert_out "$OUT_FILE" "npm-init:   install user units spur-daemon, spur-web, sp
 assert_out "$OUT_FILE" "npm-init:   enable linger for $(id -un) if allowed (best effort, no sudo): services keep running after logout and start at boot"
 assert_out "$OUT_FILE" "npm-init:   leave services stopped (--no-start)"
 assert_out "$OUT_FILE" "npm-init:   agent integrations: skill links, Cursor hook"
-assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped; web UI stays on 127.0.0.1 (pass --tailscale for private remote access)"
+assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped; web UI is on 127.0.0.1 (pass --tailscale for private remote access)"
 assert_out "$OUT_FILE" "npm-init:   units installed: spur-daemon spur-web spur-mcp spur-mcp-tunnel in $UNIT_DIR"
 assert_out "$OUT_FILE" "npm-init:   started: none (--no-start)"
 assert_out "$OUT_FILE" "npm-init:   linger: enabled"
@@ -352,7 +352,7 @@ set -e
 UNIT_DIR="$FAKE_HOME/.config/systemd/user"
 grep -q '^Environment=WEB_HOST=127\.0\.0\.1$' "$UNIT_DIR/spur-web.service" ||
   fail "an unresolved tailnet must leave WEB_HOST on loopback only"
-assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI stays on 127.0.0.1. For remote access: sudo tailscale up, then spur init --tailscale"
+assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI moves to 127.0.0.1 only when spur-web restarts. For remote access: sudo tailscale up, then spur init --tailscale"
 assert_out "$OUT_FILE" "npm-init:   Tailscale: not up"
 refute_out "$OUT_FILE" "Tailscale is not installed"
 grep -qi "unexpected curl invocation" "$OUT_FILE" &&
@@ -400,7 +400,7 @@ set -e
 UNIT_DIR="$FAKE_HOME/.config/systemd/user"
 grep -q '^Environment=WEB_HOST=127\.0\.0\.1$' "$UNIT_DIR/spur-web.service" ||
   fail "a non-100.x tailscale IP must be rejected, leaving WEB_HOST on loopback only"
-assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI stays on 127.0.0.1."
+assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI moves to 127.0.0.1 only when spur-web restarts."
 grep -qi "unexpected curl invocation" "$OUT_FILE" &&
   fail "npm-init.sh invoked curl even though tailscale was already installed"
 
@@ -657,7 +657,7 @@ assert_no_log "$FAKE_BIN" curl
 assert_no_log "$FAKE_BIN" sudo
 assert_no_log "$FAKE_BIN" tailscale
 assert_loopback
-assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped; web UI stays on 127.0.0.1 (pass --tailscale for private remote access)"
+assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped; web UI is on 127.0.0.1 (pass --tailscale for private remote access)"
 assert_out "$OUT_FILE" "npm-init:   Tailscale: not requested"
 refute_out "$OUT_FILE" "npm-init: info: Tailscale"
 echo "npm-init.test.sh: default-no-install scenario OK"
@@ -702,6 +702,18 @@ run_isolated_init --keep-tailscale
 [ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "keep-bind-started exited $rc"; }
 assert_out "$OUT_FILE" "npm-init: info: Tailscale is not installed; web UI is now on 127.0.0.1 only. To restore the tailnet bind: spur init --tailscale"
 echo "npm-init.test.sh: keep-bind-started scenario OK"
+
+# install-not-up-started: --tailscale with Tailscale down and services restarted.
+new_isolated_scenario install-not-up-started
+rm -f "$FAKE_BIN/sleep"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_BIN/sleep"
+printf '#!/usr/bin/env bash\necho 200\n' >"$FAKE_BIN/curl"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$FAKE_BIN/tailscale"
+chmod +x "$FAKE_BIN/sleep" "$FAKE_BIN/curl" "$FAKE_BIN/tailscale"
+run_isolated_init --tailscale
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "install-not-up-started exited $rc"; }
+assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI is on 127.0.0.1. For remote access: sudo tailscale up, then spur init --tailscale"
+echo "npm-init.test.sh: install-not-up-started scenario OK"
 
 # keep-bind-down: --keep-tailscale, Tailscale installed but not up.
 new_isolated_scenario keep-bind-down
