@@ -18,7 +18,7 @@ raw file, never a summary of it — then install and run Spur on this machine en
 guide. Do the steps yourself; don't ask me to run what you can run.
 ```
 
-`spur init` installs systemd user units, enables linger so services keep running after logout and start at boot, starts them, and prints a plan before changes and a summary after. It installs Tailscale only with `spur init --tailscale`.
+`spur init` installs systemd user units, enables linger so services keep running after logout and start at boot, starts them, and prints a plan before installing units, linger, services, Tailscale and agent integrations, then a summary. Spur's own files (npm prefix pin, npmrc prefix repair, instance config) are written first. It installs Tailscale only with `spur init --tailscale`.
 
 Everything — ports, Tailscale, verification — is in that guide. Tested on Ubuntu; elsewhere, expect to sort out host differences yourself.
 
