@@ -20899,6 +20899,10 @@ export class SessionService {
     if (!sourcePath) {
       return null;
     }
+    const current = readSession(this.config.dataDir, session.id);
+    if (!current || isTerminalSessionStatus(current.status)) {
+      return null;
+    }
     const stampKey = historyStampKey(session.id, sourcePath);
     try {
       const artifactId = stateTransitionArtifactId(

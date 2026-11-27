@@ -35960,6 +35960,57 @@ describe("SessionService", () => {
     );
   });
 
+  it("does not recreate artifacts when a pending history capture resumes after complete", async () => {
+    const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-pending-transition.jsonl");
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    writeFileSync(sourceHistoryPath, '{"type":"assistant","message":"done"}\n', "utf8");
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      clone(sessionRecord({ id: "api-1", agent: "claude", status: "running" })),
+    );
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: sourceHistoryPath, lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    let releaseLookup: (path: string) => void = () => {};
+    const lookup = new Promise<string>((resolve) => {
+      releaseLookup = resolve;
+    });
+    let lookupEntered: () => void = () => {};
+    const entered = new Promise<void>((resolve) => {
+      lookupEntered = resolve;
+    });
+    let pendingRead: Promise<SessionView> | undefined;
+    try {
+      expect((await service.get("api-1")).state).toBe("waiting");
+      vi.setSystemTime(Date.now() + 4_001);
+      setSessionArtifactOriginMock.mockClear();
+      readClaudeJsonlStateMock.mockResolvedValue(null);
+      findLatestClaudeSessionFileMock.mockImplementationOnce(async () => {
+        lookupEntered();
+        return lookup;
+      });
+      pendingRead = service.get("api-1");
+      await entered;
+
+      await service.complete("api-1");
+      expect(sessions.get("api-1")?.status).toBe("completed");
+      expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
+      releaseLookup(sourceHistoryPath);
+      await pendingRead;
+
+      expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
+      expect(setSessionArtifactOriginMock).not.toHaveBeenCalled();
+    } finally {
+      releaseLookup(sourceHistoryPath);
+      if (pendingRead) await Promise.allSettled([pendingRead]);
+      service.dispose();
+    }
+  });
+
   it("writes an agent history delta per transition instead of a full copy", async () => {
     const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-delta-source.jsonl");
     mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
