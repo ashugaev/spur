@@ -201,6 +201,19 @@ describe("published interface contracts", () => {
     expect(agentSkill).toBe(claudeSkill);
   });
 
+  it("documents the four cron storage daemon routes", async () => {
+    const daemonApi = await readRepoFile("docs/daemon-api.md");
+
+    for (const route of [
+      "GET /projects/:projectId/cron/:triggerId/storage`",
+      "GET /projects/:projectId/cron/:triggerId/storage/files/:path`",
+      "PATCH /projects/:projectId/cron/:triggerId/storage/note`",
+      "DELETE /projects/:projectId/cron/:triggerId/storage`",
+    ]) {
+      expect(daemonApi).toContain(route);
+    }
+  });
+
   it("documents auto-ping CLI names, daemon routes, source support, and agent interface", async () => {
     const [commands, daemonApi, configuration, agentSkill, claudeSkill] = await Promise.all([
       readRepoFile("docs/commands.md"),

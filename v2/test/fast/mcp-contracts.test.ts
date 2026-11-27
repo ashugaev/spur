@@ -26,7 +26,7 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "cbb577ed8b94cea18c7fe215cf796dc1ad5e265d5324b55de728707d611ff714",
+  "server.ts": "d1969e0eafd27c6aed1a6480504d844489da27bdd5ab444dc88a8115b3a10c45",
   "types.ts": "ba3d5dd9f96fbfb0a3f6dd3655bbedecac3f0bf01ac8177365399becb1e05951",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
   "session-service.ts": "75a688d187bf5fc5f8ac2b923e768c90834c2d2891b7ed7500a6d931ba9b4261",
@@ -74,9 +74,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(126);
+    expect(routes).toHaveLength(130);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(126);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(130);
     expect(getDaemonOperation("get_latest_snapshots_by_link")?.query).toContainEqual(
       expect.objectContaining({ name: "link", type: "string[]", required: true }),
     );
@@ -487,7 +487,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(126);
+      expect(page.total).toBe(130);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
@@ -769,6 +769,32 @@ describe("catalog examples at the real daemon router", () => {
         schedule: "0 1 1 1 *",
       });
       expect(await (await request("list_sessions")).json()).toEqual(sessionsBefore);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("executes Cron storage note, list, file and clear catalog requests", async () => {
+    const { server, request } = await fixture(true);
+    const params = { projectId: "test", triggerId: "audit" };
+    try {
+      const saved = await request("update_cron_storage_note", { note: "carry over" }, params);
+      expect(saved.status).toBe(200);
+      expect(await saved.json()).toMatchObject({ note: "carry over", files: [] });
+      expect(await (await request("get_cron_storage", undefined, params)).json()).toMatchObject({
+        note: "carry over",
+      });
+      const file = await request("get_cron_storage_file", undefined, {
+        ...params,
+        path: "note.md",
+      });
+      expect(file.status).toBe(200);
+      expect(await file.text()).toBe("carry over");
+      expect((await request("clear_cron_storage", undefined, params)).status).toBe(200);
+      expect(await (await request("get_cron_storage", undefined, params)).json()).toMatchObject({
+        note: "",
+        noteUpdatedAt: null,
+      });
     } finally {
       await server.stop();
     }
