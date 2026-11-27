@@ -31,8 +31,8 @@ command -v codex    >/dev/null || npm install -g --prefix ~/.local @openai/codex
 command -v opencode >/dev/null || npm install -g --prefix ~/.local opencode-ai
 mkdir -p ~/.claude/skills ~/.codex/skills   # Spur links its skills here, never creates the dirs
 
-spur init                           # installs + starts the systemd user units, links host skills, installs Tailscale
-                                    # never add --no-tailscale unless the user asked for it — no auth key is fine
+spur init                           # installs + starts the systemd user units, enables linger, links host skills
+                                    # add --tailscale only when the user wants private remote web access
 ```
 
 Four non-obvious points:
@@ -40,7 +40,7 @@ Four non-obvious points:
 - Node must live at `/usr/bin/node`. The units ship `ExecStart=/usr/bin/node ...`; nothing rewrites that path. A node under `nvm`, `fnm`, or `~/.local` crash-loops the units on `status=203/EXEC` with a correct npm prefix. Only the npm prefix moves to `~/.local` — the runtime stays system-wide. nvm host: `sudo ln -s "$(command -v node)" /usr/bin/node`.
 
 - Prefix must be `~/.local` — a system prefix (`/usr`) fails install with `EACCES` and makes the units exec the wrong path. Put `~/.local/bin` on PATH, persisted for new logins. The `npm config set prefix ~/.local` above writes into `~/.npmrc`, needed once to land the very first `npm install -g @shugaev/spur` before Spur exists to pin anything. After the daemon's first boot (`spur init`/`update`/`reinit`, a reboot, or `systemctl restart`), the pin moves to Spur's own `~/.spur/npmrc` as npm's `--globalconfig` — never `~/.npmrc`, which `nvm` refuses to load once it carries a `prefix=`/`globalconfig=` line. `spur init`/`update`/`reinit` strip that line back out of `~/.npmrc` only on hosts with nvm installed — on a host without nvm the line stays, since it's what makes a bare `npm install -g` (outside any agent session) land in `~/.local` at all, and nothing there conflicts with it. A plain daemon boot leaves `~/.npmrc` alone either way. `spur doctor`'s `npmrc-nvm-conflict` check applies the same nvm gate and gives the one-liner to remove a leftover line (system-unit hosts, see below, can't run `spur reinit`).
-- `npm install` only unpacks — it starts nothing and won't survive reboot. `spur init` installs the units, starts them, and enables linger. `spur init` also links the packaged Spur agent skills into `~/.claude/skills` and `~/.codex/skills` when that `skills` directory already exists — never creating an absent one — replacing its own links (including a dangling one under any `.../skills/<name>` path) on every release, and leaving a real file, directory, or foreign symlink untouched. An absent dir is skipped with a warning naming the path and the fix (`mkdir -p <path> && spur reinit`). See [Doctor](commands.md#doctor)'s `skills-symlinks` check.
+- `npm install` only unpacks — it starts nothing and won't survive reboot. `spur init` prints a plan of what it will change (units, linger, services, Tailscale), installs the units, enables linger, starts them, and ends with a summary; labels: [init](commands.md#init). Linger is unprivileged and best effort; a refusal prints an `info:` line with the manual `sudo loginctl enable-linger` command. `spur init` also links the packaged Spur agent skills into `~/.claude/skills` and `~/.codex/skills` when that `skills` directory already exists — never creating an absent one — replacing its own links (including a dangling one under any `.../skills/<name>` path) on every release, and leaving a real file, directory, or foreign symlink untouched. An absent dir is skipped with an `info:` line naming the path and the fix (`mkdir -p <path> && spur reinit`). See [Doctor](commands.md#doctor)'s `skills-symlinks` check.
 - Every agent session carries `NPM_CONFIG_GLOBALCONFIG=~/.spur/npmrc` (both env casings) in its env, so `claude`/`codex` self-update (`npm install -g ...`) resolves `~/.local` even mid-session. That only holds as long as `~/.npmrc` carries no `prefix=` line pointing anywhere other than `~/.local` — a Spur-authored `prefix=~/.local` line left there (non-nvm hosts, see above) is harmless since it resolves to the same value; an operator-set line to any other value outranks this pin and self-update would follow that instead. Sidecars, project services, and the Claude OAuth login pane do NOT inherit this pin — Spur strips it (along with `NPM_CONFIG_PREFIX`/`PREFIX`) so those panes can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards; a bare `npm install -g` in one of those panes falls back to npm's system prefix. A bare `npm install -g` in a plain login shell (not an agent session) needs an explicit `--prefix ~/.local`, or use `spur update` (below), which derives it automatically.
 
 For a nondefault instance, run `spur --config <instance-config> init`.
@@ -74,25 +74,28 @@ Claude and Codex still need a login under your own account (`claude`, or `codex 
 
 ### init flags
 
-| Flag                | Effect                                            |
-| ------------------- | ------------------------------------------------- |
-| `--no-start`        | install units + linger, don't start               |
-| `--expose-web`      | bind web to `0.0.0.0` (default `127.0.0.1`)       |
-| `--web-port <port>` | web port (default `5555`)                         |
-| `--no-tailscale`    | skip Tailscale (on by default); user request only |
+| Flag                | Effect                                                                      |
+| ------------------- | --------------------------------------------------------------------------- |
+| `--no-start`        | install units + linger, don't start                                         |
+| `--expose-web`      | bind web to `0.0.0.0` (default `127.0.0.1`)                                 |
+| `--web-port <port>` | web port (default `5555`)                                                   |
+| `--tailscale`       | install Tailscale if missing, bind web to the tailnet IP                    |
+| `--no-tailscale`    | skip Tailscale, drop an existing tailnet bind; conflicts with `--tailscale` |
 
-## Private access (Tailscale, default on)
+## Private access (Tailscale, opt-in)
 
-`spur init` sets up private web access over your tailnet — your devices only, never public. Opt out with `--no-tailscale`.
+Plain `spur init` never installs Tailscale and never calls sudo; web stays on `127.0.0.1`. `spur init --tailscale` sets up private web access over your tailnet — your devices only, never public.
 
-No auth key is no reason to opt out: plain `spur init` never waits on a login — it installs Tailscale, stays loopback-only, and leaves `sudo tailscale up` to the operator TODO. `--no-tailscale` skips the install, so that TODO step has no `tailscale` binary to run.
+`--tailscale` needs root or sudo when Tailscale is not installed; without a terminal it needs passwordless sudo. It checks this before changing anything. Re-running plain `spur init` keeps an existing tailnet bind.
+
+No auth key is fine: `spur init --tailscale` never waits on a login — it installs Tailscale, stays loopback-only until the tailnet is up, and leaves `sudo tailscale up` to the operator TODO.
 
 Auth is yours — two ways to bring the tailnet up:
 
 - Human: `sudo tailscale up`, sign in at the printed URL.
 - Unattended (agent / scripted): `sudo tailscale up --authkey <tskey-...>` — no browser. Mint a key at `https://login.tailscale.com/admin/settings/keys`. This login is the only step that otherwise blocks a hands-off install; an agent handed a key does the whole thing end to end.
 
-Then re-run `spur init` — it resolves your tailnet IPv4 and widens `spur-web`'s `WEB_HOST` to `127.0.0.1,<tailnet-ip>`. Until the tailnet is up it stays loopback-only. `--expose-web` (public `0.0.0.0`) is a separate explicit override that supersedes Tailscale.
+Then re-run `spur init --tailscale` — it resolves your tailnet IPv4 and widens `spur-web`'s `WEB_HOST` to `127.0.0.1,<tailnet-ip>`. Until the tailnet is up it stays loopback-only. `--expose-web` (public `0.0.0.0`) is a separate explicit override that supersedes Tailscale.
 
 ### HTTPS (voice input only)
 
@@ -105,11 +108,11 @@ Skip too when another service holds 443 — never displace it. On failure report
 A few steps use your own accounts and each needs one interactive action — they can't be scripted, and a setup agent must not hack around them. Do everything else first, then hand the operator this list:
 
 - Log in an agent — `claude` (sign in) or `codex login` — then run it once interactively to completion. A logged-in-but-never-run-interactively `claude` still breaks the first spawn: Spur's injected prompt lands in the unfinished first-run onboarding screen instead of the agent, surfacing as `OAuth error: Invalid code`. At least one agent, fully onboarded, is required before Spur can spawn sessions.
-- Bring up private web access — `sudo tailscale up` (browser login), then re-run `spur init`. Skip only if you used `--authkey` (above) or `--expose-web`.
+- Only when the user wants private remote web access (`spur init --tailscale`) — `sudo tailscale up` (browser login), then re-run `spur init --tailscale`. Skip if you used `--authkey` (above) or `--expose-web`.
 - Trust each connected repo for Claude — [Connect a project](#connect-a-project).
 - Voice input only: enable MagicDNS and HTTPS Certificates for the tailnet — admin console → DNS, owner/admin only. Nothing else needs them.
 
-Spur installs and its services start without these; until the first two are done it stays loopback-only and can't spawn sessions. Where a non-interactive credential exists (Tailscale `--authkey`, an agent API key via `codex login --with-api-key`), an unattended install uses it instead of deferring.
+Spur installs and its services start without these; until the agent login is done it can't spawn sessions, and without `--tailscale` it stays loopback-only. Where a non-interactive credential exists (Tailscale `--authkey`, an agent API key via `codex login --with-api-key`), an unattended install uses it instead of deferring.
 
 ## Verify
 
@@ -189,7 +192,7 @@ Pin first and the flag is still armed: within the next 5-minute tick the daemon 
 | units die after SSH logout                          | linger off: `loginctl enable-linger $USER`                                                                    |
 | web terminal `/ws` won't connect                    | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                    |
 | `/ws` closes immediately                            | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
-| web unreachable over Tailscale                      | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                  |
+| web unreachable over Tailscale                      | tailnet not up: `sudo tailscale up`, then re-run `spur init --tailscale`                                      |
 | mic button dead on the tailnet URL                  | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                        |
 | first spawn: `OAuth error: Invalid code`            | `claude` logged in but never run interactively to completion — run it once to finish onboarding               |
 | `Timed out waiting for agent submit acknowledgment` | pane shows "Yes, I trust this folder": `cd <project repo> && claude`, accept trust, exit, re-spawn            |
