@@ -196,7 +196,7 @@ info_lines=()
 keep_web_state="web UI is now on 127.0.0.1 only"
 install_web_state="web UI is on 127.0.0.1"
 if [[ "$NO_START" -eq 1 ]]; then
-  keep_web_state="web UI moves to 127.0.0.1 only when spur-web restarts"
+  keep_web_state="web UI listens on 127.0.0.1 only when spur-web next starts"
   install_web_state="$keep_web_state"
 fi
 if [[ "$EXPOSE_WEB" -eq 1 ]]; then
