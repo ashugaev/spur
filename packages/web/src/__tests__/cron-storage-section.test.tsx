@@ -169,6 +169,23 @@ describe("CronStorageSection", () => {
     expect(fetchMock).toHaveBeenCalledWith(STORAGE_URL, { method: "DELETE" });
   });
 
+  it("S11 shows a truncated listing as a lower bound and confirms clearing all files", async () => {
+    stubFetch(() => jsonResponse({ ...FILLED, truncated: true }));
+    renderSection();
+    expect(await screen.findByText("2+ files · 16.7 KB+")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear storage" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Delete note and all files?");
+  });
+
+  it("S12 keeps Clear for a truncated listing with no visible files or note", async () => {
+    stubFetch(() => jsonResponse({ ...EMPTY, truncated: true }));
+    renderSection();
+    expect(await screen.findByText("0+ files · 0 B+")).toBeInTheDocument();
+    expect(screen.queryByText("Empty")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Clear storage" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Delete all files?");
+  });
+
   it("S8 disables actions in flight and shows load and save errors", async () => {
     let finish: ((response: Response) => void) | undefined;
     stubFetch((init) =>

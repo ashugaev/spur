@@ -48,7 +48,18 @@ function countText(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+// A truncated listing undercounts files and bytes; Clear removes the whole dir.
+function summaryText(view: CronStorageView): string {
+  if (!view.truncated) {
+    return `${countText(view.files.length, "file")} · ${formatBytes(view.totalBytes)}`;
+  }
+  return `${view.files.length}+ files · ${formatBytes(view.totalBytes)}+`;
+}
+
 function confirmText(view: CronStorageView): string {
+  if (view.truncated) {
+    return view.note === "" ? "Delete all files?" : "Delete note and all files?";
+  }
   const parts = [
     ...(view.note !== "" ? ["note"] : []),
     ...(view.files.length > 0 ? [countText(view.files.length, "file")] : []),
@@ -126,7 +137,7 @@ export function CronStorageSection({
   };
 
   const view = load.status === "ready" ? load.view : null;
-  const empty = view !== null && view.note === "" && view.files.length === 0;
+  const empty = view !== null && view.note === "" && view.files.length === 0 && !view.truncated;
   const noteText = draft ?? view?.note ?? "";
   const dirty = view !== null && draft !== null && draft !== view.note;
   const error = load.status === "error" ? load.message : actionError;
@@ -145,9 +156,7 @@ export function CronStorageSection({
             ) : null
           ) : (
             <span className={`truncate ${SECONDARY_TEXT}`}>
-              {empty
-                ? "Empty"
-                : `${countText(view.files.length, "file")} · ${formatBytes(view.totalBytes)}`}
+              {empty ? "Empty" : summaryText(view)}
             </span>
           )}
         </div>
