@@ -77,8 +77,12 @@ describe("SessionTodo", () => {
   });
 
   it("shows compact human action and expands immutable audit detail", async () => {
+    const fullId = "12345678-1234-1234-1234-123456789012";
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify(projection), { status: 200 }),
+      new Response(
+        JSON.stringify({ ...projection, items: [{ ...projection.items[0], id: fullId }] }),
+        { status: 200 },
+      ),
     );
     render(<SessionTodo sessionId="api-1" />);
 
@@ -88,7 +92,8 @@ describe("SessionTodo", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("item-12345678")).toBeInTheDocument();
+    expect(within(toggle).getByText(fullId, { exact: true })).toBeInTheDocument();
+    expect(toggle).toHaveAttribute("aria-controls", `todo-audit-${fullId}`);
     expect(screen.getAllByText("Need product input").length).toBeGreaterThan(0);
     expect(
       screen.queryByRole("button", { name: /delete|complete|cancel|resume/i }),

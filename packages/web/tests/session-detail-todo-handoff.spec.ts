@@ -4,6 +4,7 @@ const system = { kind: "system", source: "handoff" } as const;
 const at = "2026-11-01T10:00:00.000Z";
 const longReason =
   "Waiting for the product owner to confirm the public command name before any code lands";
+const fullItemId = "12345678-1234-1234-1234-123456789012";
 
 function todoItem(
   id: string,
@@ -22,7 +23,7 @@ function todoItem(
 }
 
 const items = [
-  todoItem("inherited-open", "Inherited open item", "open", {
+  todoItem(fullItemId, "Inherited open item", "open", {
     handoffFrom: { sessionId: "api-1", itemId: "old-1" },
   }),
   todoItem("inherited-moved", "Inherited item with a transition", "open", {
@@ -90,6 +91,55 @@ function row(page: Page, title: string) {
 }
 
 test.describe("Spur ToDo handoff provenance", () => {
+  for (const theme of ["dark", "light"] as const) {
+    for (const width of [1133, 390]) {
+      test(`wraps the full expanded item ID inside its row at ${width}px in ${theme}`, async ({
+        page,
+      }) => {
+        await page.setViewportSize({ width, height: 900 });
+        await mockTodoPage(page, "todo-full-id");
+        await page.goto("/sessions/todo-full-id");
+        await page.evaluate((value) => {
+          document.documentElement.setAttribute("data-theme", value);
+        }, theme);
+
+        const item = row(page, "Inherited open item");
+        await item.click();
+        await expect(item).toHaveAttribute("aria-expanded", "true");
+        const id = item.getByText(fullItemId, { exact: true });
+        await expect(id).toBeVisible();
+        const metrics = await id.evaluate((element) => {
+          const button = element.closest("button");
+          if (!button) throw new Error("Expected the ToDo row button");
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          const bounds = element.getBoundingClientRect();
+          const rowBounds = button.getBoundingClientRect();
+          return {
+            text: element.textContent,
+            whiteSpace: getComputedStyle(element).whiteSpace,
+            clientWidth: button.clientWidth,
+            scrollWidth: button.scrollWidth,
+            left: Math.max(bounds.left, rowBounds.left),
+            right: Math.min(bounds.right, rowBounds.right),
+            textRects: [...range.getClientRects()].map((rect) => ({
+              left: rect.left,
+              right: rect.right,
+            })),
+          };
+        });
+        expect(metrics.text).toBe(fullItemId);
+        expect(metrics.whiteSpace).not.toBe("nowrap");
+        expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth);
+        expect(metrics.textRects.length).toBeGreaterThan(0);
+        for (const rect of metrics.textRects) {
+          expect(rect.left).toBeGreaterThanOrEqual(metrics.left - 1);
+          expect(rect.right).toBeLessThanOrEqual(metrics.right + 1);
+        }
+      });
+    }
+  }
+
   test("shows the source on inherited items and the right glyph on cancelled ones", async ({
     page,
   }) => {

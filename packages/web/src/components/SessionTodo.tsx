@@ -67,7 +67,9 @@ function TodoItem({
         </span>
         <span className="min-w-0 flex-1">
           {!compact || expanded ? (
-            <span className="block break-all font-mono text-[var(--color-text-secondary)]">
+            <span
+              className={`block font-mono text-[var(--color-text-secondary)] ${HARD_WRAP_TEXT_CLASS}`}
+            >
               {expanded ? item.id : item.id.slice(0, 8)}
             </span>
           ) : null}
