@@ -760,6 +760,8 @@ import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./up
 const SNAPSHOT_READ_CONCURRENCY = 4;
 // Concurrent session enrichments across all full-view list requests.
 const FULL_LIST_ENRICH_CONCURRENCY = 8;
+// The boot error repair runs alone, off the full-list gate.
+const BOOT_REPAIR_ENRICH_CONCURRENCY = 1;
 // Full-view fields recomputed on every cache hit; the rest is cached with the row.
 const REQUEST_SCOPED_KEYS = [
   "pr",
@@ -4221,6 +4223,7 @@ export class SessionService {
   // Non-live full-view rows, so `list` classifies live rows and misses only.
   private readonly fullViewCache = new Map<string, FullViewCacheEntry>();
   private readonly fullListGate = createConcurrencyGate(FULL_LIST_ENRICH_CONCURRENCY);
+  private readonly bootRepairGate = createConcurrencyGate(BOOT_REPAIR_ENRICH_CONCURRENCY);
   private fullViewCacheReady: Promise<void> | null = null;
   private readonly listedActivityHighWater = new Map<string, string>();
   // Bumped by applyConfig: an enrichment started before a reload never serves after it.
@@ -13194,6 +13197,7 @@ export class SessionService {
     return this.enrichNonLiveRecords(
       (record) => isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false),
       "warm_failed",
+      this.fullListGate,
     );
   }
 
@@ -13209,12 +13213,14 @@ export class SessionService {
         store?.observedState(record.id) === "error" &&
         !isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false),
       "repair_failed",
+      this.bootRepairGate,
     );
   }
 
   private async enrichNonLiveRecords(
     pick: (record: SessionRecord) => boolean,
     failureEvent: "warm_failed" | "repair_failed",
+    gate: ReturnType<typeof createConcurrencyGate>,
   ): Promise<void> {
     try {
       const listing = listSessions(this.config.dataDir);
@@ -13223,7 +13229,7 @@ export class SessionService {
       const claudeAccounts = await this.computeClaudeAccountsView();
       await Promise.all(
         records.map((record) =>
-          this.fullListGate.run(async () => {
+          gate.run(async () => {
             if (this.isDeliveryStopped()) return;
             try {
               await this.enrichFullView(record, claudeAccounts, listing);

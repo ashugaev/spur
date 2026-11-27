@@ -377,6 +377,33 @@ describe("full-view list cache", () => {
     expect(enrich.ids).toEqual(["hidden"]);
   });
 
+  it("answers a full list while the boot error repair holds enrichments open", async () => {
+    for (let index = 0; index < 9; index += 1)
+      metadata.writeSession(TEST_DATA_DIR, record({ id: `hidden-${index}`, status: "killed" }));
+    writeFleet(1, 0);
+    const store = (service as unknown as { transitionsBinding: { store: object } })
+      .transitionsBinding.store as { observedState(id: string): string | undefined };
+    vi.spyOn(store, "observedState").mockImplementation((id) =>
+      id.startsWith("hidden-") ? "error" : undefined,
+    );
+    const internals = service as unknown as {
+      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+    };
+    const original = internals.enrichWithClassified.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (record, ...rest) => {
+      if (record.id.startsWith("hidden-")) await held;
+      return original(record, ...rest);
+    });
+    const repair = sessionServiceInternals(service).repairBootKeptErrors();
+    expect((await service.list()).map((view) => view.id)).toEqual(["idle-0"]);
+    release();
+    await repair;
+  });
+
   it("keeps the startup warm from rejecting when the listing fails", async () => {
     listSessionsMock.mockImplementationOnce(() => {
       throw new Error("listing unavailable");
