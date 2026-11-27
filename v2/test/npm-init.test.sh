@@ -212,7 +212,7 @@ assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped; the spur-web unit binds 
 assert_out "$OUT_FILE" "npm-init:   units installed: spur-daemon spur-web spur-mcp spur-mcp-tunnel in $UNIT_DIR"
 assert_out "$OUT_FILE" "npm-init:   started: none (--no-start)"
 assert_out "$OUT_FILE" "npm-init:   linger: enabled"
-assert_out "$OUT_FILE" "npm-init:   web UI: 127.0.0.1:5555"
+assert_out "$OUT_FILE" "npm-init:   web UI: 127.0.0.1:5555 (on next start)"
 assert_out "$OUT_FILE" "npm-init:   Tailscale: not requested"
 plan_line="$(grep -n '^npm-init: plan' "$OUT_FILE" | head -1 | cut -d: -f1)"
 summary_line="$(grep -n '^npm-init: summary:' "$OUT_FILE" | head -1 | cut -d: -f1)"
@@ -306,7 +306,7 @@ grep -q '^Environment=WEB_HOST=127\.0\.0\.1,100\.64\.11\.22$' "$UNIT_DIR/spur-we
   fail "tailscale IP was not applied to WEB_HOST (expected 127.0.0.1,100.64.11.22)"
 grep -qi "unexpected curl invocation" "$OUT_FILE" &&
   fail "npm-init.sh invoked curl even though tailscale was already installed"
-assert_out "$OUT_FILE" "npm-init:   web UI: 127.0.0.1,100.64.11.22:5555"
+assert_out "$OUT_FILE" "npm-init:   web UI: 127.0.0.1,100.64.11.22:5555 (on next start)"
 assert_out "$OUT_FILE" "npm-init:   Tailscale: already installed, bound on next start"
 assert_out "$OUT_FILE" "npm-init:   linger: already enabled"
 assert_no_log "$FAKE_BIN" sudo
@@ -499,6 +499,7 @@ grep -q '^Environment=PORT=6200$' "$FAKE_HOME/.config/systemd/user/spur-web.serv
   fail "configured web port was not preserved in the installed unit"
 assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped (--expose-web binds 0.0.0.0)"
 assert_out "$OUT_FILE" "npm-init:   web UI: 0.0.0.0:6200"
+refute_out "$OUT_FILE" "(on next start)"
 assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped (--expose-web)"
 assert_no_log "$FAKE_BIN" tailscale
 assert_no_log "$FAKE_BIN" sudo
@@ -817,7 +818,7 @@ grep -q 'tailscale.com/install.sh' "$FAKE_BIN/../curl.log" || fail "--install-ta
 grep -q '^Environment=WEB_HOST=127\.0\.0\.1,100\.64\.11\.22$' "$UNIT_DIR/spur-web.service" ||
   fail "installed Tailscale must bind the tailnet IP"
 assert_out "$OUT_FILE" "npm-init:   Tailscale: installed, bound on next start"
-assert_out "$OUT_FILE" "npm-init:   web UI: 127.0.0.1,100.64.11.22:5555"
+assert_out "$OUT_FILE" "npm-init:   web UI: 127.0.0.1,100.64.11.22:5555 (on next start)"
 echo "npm-init.test.sh: opt-in-install-ok scenario OK"
 
 # linger-refused: loginctl refuses => info line, rc 0, units still installed.

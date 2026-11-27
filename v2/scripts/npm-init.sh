@@ -271,7 +271,7 @@ web_port="$(grep -E '^Environment=PORT=' "$UNIT_DIR/spur-web.service" | tail -1 
 [[ -n "$web_port" ]] || web_port=5555
 
 print_summary() {
-  local web_host line
+  local web_host line pending
   web_host="$(grep -E '^Environment=WEB_HOST=' "$UNIT_DIR/spur-web.service" | tail -1 | cut -d= -f3-)"
   echo "npm-init: summary:"
   echo "npm-init:   units installed: spur-daemon spur-web spur-mcp spur-mcp-tunnel in $UNIT_DIR"
@@ -281,7 +281,12 @@ print_summary() {
     echo "npm-init:   started: $started_names"
   fi
   echo "npm-init:   linger: $linger_result"
-  echo "npm-init:   web UI: ${web_host}:${web_port}"
+  # The unit file is the source; with --no-start nothing serves it yet.
+  pending=""
+  if [[ "$NO_START" -eq 1 ]]; then
+    pending=" (on next start)"
+  fi
+  echo "npm-init:   web UI: ${web_host}:${web_port}${pending}"
   echo "npm-init:   Tailscale: $tailscale_result"
   for line in "${info_lines[@]}"; do
     echo "npm-init: info: $line"
