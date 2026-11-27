@@ -23,7 +23,7 @@ import type { AuthAccountSummary, AuthPool, AuthProvider } from "@/lib/types";
 
 const NOTE_CLASS = "normal-case tracking-normal";
 const ROW_CLASS = `grid grid-cols-[minmax(0,1fr)_auto_5rem_1.75rem] items-center gap-x-2 border-b border-[var(--color-border-subtle)] py-1.5 last:border-b-0 ${NOTE_CLASS}`;
-const SIGN_IN_BUTTON_CLASS = `${SECONDARY_BUTTON_CLASS} border-[var(--color-status-attention)]! text-[var(--color-chip-warn-text)]!`;
+const SIGN_IN_BUTTON_CLASS = `${SECONDARY_BUTTON_CLASS} border-[var(--color-status-attention)]! text-[var(--color-status-attention)]!`;
 
 type SignInRequest = Extract<SignInTarget, { kind: "account" }>;
 
@@ -320,7 +320,7 @@ function ProviderSection({
       <button
         ref={addRef}
         aria-busy={addMutation.isPending || undefined}
-        className={`self-start py-1 uppercase tracking-[0.08em] text-[var(--color-text-secondary)] outline-hidden transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50`}
+        className={`self-start py-1 uppercase tracking-meta text-[var(--color-text-secondary)] outline-hidden transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50`}
         data-testid={`add-account-${provider}`}
         disabled={busy}
         type="button"
@@ -366,7 +366,7 @@ export function AuthAccountsMenu() {
       </button>
       {popover.open ? (
         <div
-          className="absolute inset-x-2 bottom-full z-50 mb-1.5 flex max-h-[70vh] flex-col gap-3 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] sm:inset-x-auto sm:right-0 sm:w-[min(26rem,calc(100vw-1rem))]"
+          className="absolute inset-x-2 bottom-full z-50 mb-1.5 flex max-h-[70vh] flex-col gap-3 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-raised sm:inset-x-auto sm:right-0 sm:w-[min(26rem,calc(100vw-1rem))]"
           data-testid="auth-accounts-popover"
         >
           {accountsQuery.isPending ? (

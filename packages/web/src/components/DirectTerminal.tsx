@@ -962,7 +962,7 @@ export function DirectTerminal({
           <TerminalStatusDot activity={activity} error={error} wsStatus={status} />
           {title ? (
             <div
-              className="min-w-0 flex-1 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
+              className="min-w-0 flex-1 overflow-hidden whitespace-normal text-label leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
               data-testid="direct-terminal-header-title"
               title={title}
             >
@@ -971,7 +971,7 @@ export function DirectTerminal({
           ) : null}
           {/* Never truncates: the title yields space, this label just butts against it. */}
           <div
-            className="ml-auto shrink-0 whitespace-nowrap text-[10px] leading-4 text-[var(--color-text-tertiary)]"
+            className="ml-auto shrink-0 whitespace-nowrap text-label leading-4 text-[var(--color-text-tertiary)]"
             data-testid="direct-terminal-header-agent"
           >
             {getAgentDisplayName(agent)}
@@ -1018,7 +1018,7 @@ export function DirectTerminal({
           {TERMINAL_KEY_BAR.map((key) => (
             <button
               aria-label={key.name}
-              className="h-8 flex-1 border border-[var(--color-border-default)] font-mono text-[10px] uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] active:bg-[var(--color-hover-overlay)]"
+              className="h-8 flex-1 border border-[var(--color-border-default)] font-mono text-label uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] active:bg-[var(--color-hover-overlay)]"
               key={key.name}
               onClick={() => sendTerminalInput(key.sequence)}
               type="button"
@@ -1029,7 +1029,7 @@ export function DirectTerminal({
         </div>
       ) : null}
       {(voice.voiceError ?? submitError) ? (
-        <div className="border-t border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
+        <div className="border-t border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-3 py-2 text-[var(--color-status-error)]">
           {voice.voiceError ?? submitError}
         </div>
       ) : null}
@@ -1044,7 +1044,7 @@ export function DirectTerminal({
               aria-expanded={hotkeysOpen}
               aria-haspopup="menu"
               aria-label={`Open ${agent} shortcuts`}
-              className={cn(terminalControlButtonClass, "w-8 px-0 text-sm sm:w-10")}
+              className={cn(terminalControlButtonClass, "w-8 px-0 text-title sm:w-10")}
               onClick={() => setHotkeysOpen((current) => !current)}
               type="button"
             >
@@ -1053,10 +1053,10 @@ export function DirectTerminal({
             {hotkeysOpen ? (
               <div
                 aria-label={`${agent} shortcuts`}
-                className="absolute bottom-9 left-0 z-20 flex max-h-72 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                className="absolute bottom-9 left-0 z-20 flex max-h-72 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-overlay"
                 role="menu"
               >
-                <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
                   {getAgentDisplayName(agent)}
                 </div>
                 {hotkeys.map((hotkey) => (
@@ -1074,12 +1074,12 @@ export function DirectTerminal({
                       <span className="block truncate font-bold uppercase text-[var(--color-text-primary)]">
                         {hotkey.label}
                       </span>
-                      <span className="block text-[10px] text-[var(--color-text-secondary)]">
+                      <span className="block text-label text-[var(--color-text-secondary)]">
                         {hotkey.detail}
                       </span>
                     </span>
                     {hotkey.shortcut ? (
-                      <span className="self-start font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-accent)]">
+                      <span className="self-start font-mono text-label uppercase tracking-meta text-[var(--color-accent)]">
                         {hotkey.shortcut}
                       </span>
                     ) : null}
@@ -1089,7 +1089,7 @@ export function DirectTerminal({
             ) : null}
           </div>
           <SlashSuggestions
-            buttonClassName={cn(terminalControlButtonClass, "text-[10px] tracking-[0.1em]")}
+            buttonClassName={cn(terminalControlButtonClass, "text-label tracking-label")}
             endpoint={
               agentInputEnabled
                 ? `/api/sessions/${encodeURIComponent(sessionApiId)}/slash-commands`
@@ -1098,7 +1098,7 @@ export function DirectTerminal({
             onSelect={(entry) => void submitSlash(entry.insertText)}
           />
           <button
-            className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
+            className={cn(terminalControlButtonClass, "font-mono text-label tracking-label")}
             onClick={() => sendTerminalInput("\r")}
             type="button"
           >
@@ -1112,7 +1112,7 @@ export function DirectTerminal({
                 aria-label="Open terminal links"
                 className={cn(
                   terminalControlButtonClass,
-                  "gap-1 px-2 text-[10px] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-accent)] focus-visible:outline-none",
+                  "gap-1 px-2 text-label focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-accent)] focus-visible:outline-none",
                   terminalLinksOpen &&
                     "border-[var(--color-accent)] bg-[var(--color-hover-overlay)] text-[var(--color-accent)]",
                 )}
@@ -1126,7 +1126,7 @@ export function DirectTerminal({
               {terminalLinksOpen ? (
                 <div
                   aria-label="Terminal links"
-                  className="fixed z-30 max-h-[min(24rem,calc(100vh-1rem))] w-96 max-w-[calc(100vw-1rem)] overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                  className="fixed z-30 max-h-[min(24rem,calc(100vh-1rem))] w-96 max-w-[calc(100vw-1rem)] overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-overlay"
                   id="terminal-links-panel"
                   onKeyDown={(event) => {
                     if (event.key !== "Escape") return;
@@ -1156,7 +1156,7 @@ export function DirectTerminal({
                           <span className="block truncate font-bold text-[var(--color-text-primary)]">
                             {link.hostname}
                           </span>
-                          <span className="block truncate font-mono text-[10px] text-[var(--color-text-secondary)]">
+                          <span className="block truncate font-mono text-label text-[var(--color-text-secondary)]">
                             {link.url}
                           </span>
                         </a>

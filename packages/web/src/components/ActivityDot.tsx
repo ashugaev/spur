@@ -1,61 +1,23 @@
 "use client";
 
+import { type StatusTone, toneBg, toneColor } from "@/design/tone";
 import { cn } from "@/lib/cn";
 
-type ActivityConfig = { label: string; dot: string; bg: string; text: string; pulse?: boolean };
-
-const errorConfig: ActivityConfig = {
-  label: "error",
-  dot: "var(--color-status-error)",
-  bg: "var(--color-dot-bg-error)",
-  text: "var(--color-status-error)",
-};
-
-const inactiveConfig: ActivityConfig = {
-  label: "paused",
-  dot: "var(--color-text-tertiary)",
-  bg: "var(--color-dot-bg-inactive)",
-  text: "var(--color-text-secondary)",
-};
-
-const workingConfig: ActivityConfig = {
-  label: "working",
-  dot: "var(--color-status-working)",
-  bg: "var(--color-dot-bg-working)",
-  text: "var(--color-status-working)",
-  pulse: true,
-};
+type ActivityConfig = { label: string; tone: StatusTone; pulse?: boolean };
 
 const activityConfig: Record<string, ActivityConfig> = {
-  working: workingConfig,
-  starting: { ...workingConfig, label: "starting" },
-  waiting: {
-    label: "waiting",
-    dot: "var(--color-status-attention)",
-    bg: "var(--color-dot-bg-waiting)",
-    text: "var(--color-status-attention)",
-  },
-  completed: {
-    label: "completed",
-    dot: "var(--color-status-ready)",
-    bg: "var(--color-dot-bg-ready)",
-    text: "var(--color-status-ready)",
-  },
-  closed: { ...inactiveConfig, label: "closed" },
-  needs_input: { ...errorConfig, label: "needs input" },
-  rate_limited: {
-    label: "rate limited",
-    dot: "var(--color-status-attention)",
-    bg: "var(--color-dot-bg-waiting)",
-    text: "var(--color-status-attention)",
-  },
-  error: errorConfig,
-  budget_limited: { ...errorConfig, label: "BUDGET LIMITED" },
-  stopped: { ...inactiveConfig, label: "stopped" },
-  killed: { ...inactiveConfig, label: "killed" },
+  working: { label: "working", tone: "working", pulse: true },
+  starting: { label: "starting", tone: "working", pulse: true },
+  waiting: { label: "waiting", tone: "attention" },
+  completed: { label: "completed", tone: "ready" },
+  closed: { label: "closed", tone: "inactive" },
+  needs_input: { label: "needs input", tone: "error" },
+  rate_limited: { label: "rate limited", tone: "attention" },
+  error: { label: "error", tone: "error" },
+  budget_limited: { label: "BUDGET LIMITED", tone: "error" },
+  stopped: { label: "stopped", tone: "inactive" },
+  killed: { label: "killed", tone: "inactive" },
 };
-
-const fallbackConfig: ActivityConfig = { ...inactiveConfig, label: "unknown" };
 
 interface ActivityDotProps {
   activity: string | null;
@@ -64,33 +26,34 @@ interface ActivityDotProps {
 }
 
 export function ActivityDot({ activity, dotOnly = false, size = 6 }: ActivityDotProps) {
-  const config = (activity !== null && activityConfig[activity]) || {
-    ...fallbackConfig,
-    label: activity ?? fallbackConfig.label,
+  const config: ActivityConfig = (activity !== null && activityConfig[activity]) || {
+    label: activity ?? "unknown",
+    tone: "inactive",
   };
+  const dot = toneColor(config.tone);
 
   if (dotOnly) {
     return (
       <div
-        className={cn("shrink-0 rounded-full", config.pulse && "dot-pulse")}
-        style={{ width: size, height: size, background: config.dot }}
+        className={cn("shrink-0 rounded-dot", config.pulse && "dot-pulse")}
+        style={{ width: size, height: size, background: dot }}
       />
     );
   }
 
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1.5 rounded-sm border px-2 py-1"
+      className="inline-flex shrink-0 items-center gap-1.5 border px-2 py-1"
       style={{
-        background: config.bg,
+        background: toneBg(config.tone),
         borderColor: "color-mix(in srgb, var(--color-border-default) 85%, transparent)",
       }}
     >
       <span
-        className={cn("h-1.5 w-1.5 shrink-0 rounded-full", config.pulse && "dot-pulse")}
-        style={{ background: config.dot }}
+        className={cn("h-1.5 w-1.5 shrink-0 rounded-dot", config.pulse && "dot-pulse")}
+        style={{ background: dot }}
       />
-      <span className="text-[10px] font-medium" style={{ color: config.text }}>
+      <span className="text-label font-medium" style={{ color: dot }}>
         {config.label}
       </span>
     </span>

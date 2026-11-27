@@ -1652,7 +1652,8 @@ export async function startServer(
       // Cursors survive restart; invalid/foreign/future -> 400, expired -> 410
       // with floorCursor/latestCursor (resync through a full sessions list).
       // Retention: hot + five uncompressed 16 MiB segments, entry overshoot;
-      // no minimum time window. A fresh observation failure fails the request.
+      // no minimum time window. Answers from the journal; a journal append
+      // failure fails the request.
       if (method === "GET" && path === "/sessions/transitions") {
         let query: ReturnType<typeof parseSessionTransitionsQuery>;
         try {

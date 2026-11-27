@@ -82,7 +82,7 @@ export function SlashSuggestions({
       {open ? (
         <div
           aria-label="Slash suggestions"
-          className="fixed z-20 flex max-h-80 w-max min-w-[min(20rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] flex-col overflow-hidden border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+          className="fixed z-20 flex max-h-80 w-max min-w-[min(20rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] flex-col overflow-hidden border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-overlay"
           ref={menuRef}
           role="menu"
           style={menuStyle}
@@ -102,17 +102,17 @@ export function SlashSuggestions({
                 <Skeleton className="h-4 w-36" label="Loading suggestions" />
               </div>
             ) : error ? (
-              <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-status-error)]">
+              <div className="px-2 py-2 text-label uppercase tracking-label text-[var(--color-status-error)]">
                 {error}
               </div>
             ) : sections.length === 0 ? (
-              <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
+              <div className="px-2 py-2 text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
                 {emptyLabel}
               </div>
             ) : (
               sections.map((section) => (
                 <div key={section.label}>
-                  <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
                     {section.label}
                   </div>
                   {section.items.map((item) => {
@@ -157,14 +157,14 @@ export function SlashSuggestions({
                             {item.label}
                           </span>
                           <span
-                            className="block truncate text-[10px] text-[var(--color-text-secondary)]"
+                            className="block truncate text-label text-[var(--color-text-secondary)]"
                             title={item.detail}
                           >
                             {item.detail}
                           </span>
                         </button>
                         <span
-                          className="max-w-24 truncate px-2 py-2 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]"
+                          className="max-w-24 truncate px-2 py-2 text-label uppercase tracking-meta text-[var(--color-text-tertiary)]"
                           title={item.source}
                         >
                           {item.source}

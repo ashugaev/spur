@@ -24239,6 +24239,194 @@ describe("SessionService", () => {
       },
     );
 
+    async function checkUnboundAuthRollback(
+      scenario:
+        | "post-write"
+        | "pre-write"
+        | "binding"
+        | "owner"
+        | "proxy"
+        | "later"
+        | "rotation"
+        | "compensation-pre-write"
+        | "compensation-post-write",
+    ): Promise<void> {
+      seedManagedAccounts("claude");
+      const original = runningSession({
+        status: "stopped",
+        stopReason: "manual_pause",
+        agentSessionId: "native-session-uuid",
+        claudeAccountId: "primary",
+      });
+      const sessions = createSessionStore(original);
+      const persist = writeSessionMock.getMockImplementation();
+      if (!persist) throw new Error("Missing session store write");
+      const own = registration("claude", "backup");
+      const { endpoint: _endpoint, token: _token, ...expectedAuth } = own;
+      authProxyRegisterSessionMock.mockResolvedValue(own);
+      const service = await createDisposedSessionService();
+      const refresh = vi.spyOn(
+        service as unknown as {
+          refreshDashboardCacheEntry: (record: SessionRecord) => Promise<void>;
+        },
+        "refreshDashboardCacheEntry",
+      );
+      const proxy =
+        scenario === "proxy"
+          ? { ...expectedAuth, generation: expectedAuth.generation + 1 }
+          : scenario === "rotation"
+            ? { ...expectedAuth, effectiveAccountId: "rotated-account" }
+            : expectedAuth;
+      authProxyGetStateMock.mockResolvedValue({
+        accounts: ["primary", "backup"].map((id) => ({ id, provider: "claude", status: "ready" })),
+        sessions: [proxy],
+      });
+      let attempted = false;
+      let persisted = false;
+      let replacement: SessionRecord | undefined;
+      let compensation: SessionRecord | undefined;
+      const failure = new Error("binding write failed");
+      writeSessionMock.mockImplementation((dataDir: string, record: SessionRecord) => {
+        if (!attempted && record.auth?.accountId === "backup") {
+          attempted = true;
+          if (scenario === "pre-write") throw failure;
+          persist(dataDir, { ...record, prompt: "latest unrelated prompt" });
+          persisted = true;
+          if (scenario === "binding" || scenario === "owner") {
+            replacement = {
+              ...record,
+              prompt: "replacement prompt",
+              claudeAccountId: "replacement-legacy",
+              ...(scenario === "binding"
+                ? { auth: { ...expectedAuth, generation: 9, accountId: "replacement" } }
+                : { createdAt: "2026-03-19T10:00:00.000Z", tmuxSession: "replacement-pane" }),
+            };
+            persist(dataDir, replacement);
+          } else if (scenario === "later") {
+            persist(dataDir, {
+              ...record,
+              prompt: "latest unrelated prompt",
+              claudeAccountId: "later-legacy",
+              status: "errored",
+              error: "later runtime error",
+              agentLaunchId: "later-launch",
+              sidecarProcs: { preview: { pid: 71, pgid: 71, starttime: 81 } },
+            });
+          }
+          throw failure;
+        }
+        if (attempted && persisted && !compensation && record.auth === undefined) {
+          if (scenario === "compensation-pre-write") throw new Error("rollback before persist");
+          persist(dataDir, record);
+          compensation = structuredClone(sessions.get("api-1"));
+          if (scenario === "compensation-post-write") throw new Error("rollback after persist");
+          return;
+        }
+        persist(dataDir, record);
+      });
+      try {
+        await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toBe(
+          failure,
+        );
+        expect(attempted).toBe(true);
+        expect(persisted).toBe(scenario !== "pre-write");
+        if (scenario === "binding" || scenario === "owner") {
+          expect(sessions.get("api-1")).toEqual(replacement);
+          expect(writeSessionMock).toHaveBeenCalledTimes(1);
+          expect(authProxyRevokeSessionMock).not.toHaveBeenCalled();
+          expect(refresh).not.toHaveBeenCalled();
+        } else if (scenario === "pre-write") {
+          expect(sessions.get("api-1")).toEqual(original);
+          expect(writeSessionMock).toHaveBeenCalledTimes(1);
+          expect(refresh).not.toHaveBeenCalled();
+          expect(authProxyRevokeSessionMock).toHaveBeenCalledExactlyOnceWith("api-1");
+        } else if (scenario === "compensation-pre-write") {
+          expect(sessions.get("api-1")).toMatchObject({
+            auth: expectedAuth,
+            agentSessionId: "native-session-uuid",
+            prompt: "latest unrelated prompt",
+          });
+          expect(sessions.get("api-1")).not.toHaveProperty("claudeAccountId");
+          expect(compensation).toBeUndefined();
+          expect(authProxyRevokeSessionMock).not.toHaveBeenCalled();
+          expect(refresh).not.toHaveBeenCalled();
+        } else {
+          const after = sessions.get("api-1");
+          expect(after).not.toHaveProperty("auth");
+          expect(after).toMatchObject({
+            agentSessionId: "native-session-uuid",
+            claudeAccountId: scenario === "later" ? "later-legacy" : "primary",
+            prompt: "latest unrelated prompt",
+          });
+          if (scenario === "later") {
+            expect(compensation).toMatchObject({
+              status: "errored",
+              stopReason: "manual_pause",
+              error: "later runtime error",
+              agentSessionId: "native-session-uuid",
+              claudeAccountId: "later-legacy",
+              prompt: "latest unrelated prompt",
+              agentLaunchId: "later-launch",
+              sidecarProcs: { preview: { pid: 71, pgid: 71, starttime: 81 } },
+            });
+            expect(compensation).not.toHaveProperty("auth");
+            expect(after).toMatchObject({
+              status: "running",
+              error: "later runtime error",
+              agentLaunchId: "later-launch",
+              sidecarProcs: { preview: { pid: 71, pgid: 71, starttime: 81 } },
+            });
+            expect(after).not.toHaveProperty("stopReason");
+          }
+          if (scenario === "proxy") expect(authProxyRevokeSessionMock).not.toHaveBeenCalled();
+          else expect(authProxyRevokeSessionMock).toHaveBeenCalledExactlyOnceWith("api-1");
+          expect(refresh).toHaveBeenCalledTimes(1);
+        }
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        writeSessionMock.mockImplementation(persist);
+        refresh.mockRestore();
+        service.dispose();
+      }
+    }
+
+    it("unbound auth rollback repairs its durable binding after a post-write throw", async () => {
+      await checkUnboundAuthRollback("post-write");
+    });
+
+    it("unbound auth rollback leaves metadata untouched after a pre-write throw", async () => {
+      await checkUnboundAuthRollback("pre-write");
+    });
+
+    it("unbound auth rollback preserves a replacement binding and legacy selection", async () => {
+      await checkUnboundAuthRollback("binding");
+    });
+
+    it("unbound auth rollback preserves a replacement session owner", async () => {
+      await checkUnboundAuthRollback("owner");
+    });
+
+    it("unbound auth rollback does not revoke a replacement proxy registration", async () => {
+      await checkUnboundAuthRollback("proxy");
+    });
+
+    it("unbound auth rollback preserves a later legacy selection and runtime fields", async () => {
+      await checkUnboundAuthRollback("later");
+    });
+
+    it("unbound auth rollback revokes its registration after a same-generation effective-account rotation", async () => {
+      await checkUnboundAuthRollback("rotation");
+    });
+
+    it("unbound auth rollback retains its registration when compensation fails before persistence", async () => {
+      await checkUnboundAuthRollback("compensation-pre-write");
+    });
+
+    it("unbound auth rollback revokes its registration when compensation throws after persistence", async () => {
+      await checkUnboundAuthRollback("compensation-post-write");
+    });
+
     it("rolls the binding back when relaunching an unbound session fails", async () => {
       seedManagedAccounts("claude");
       const original = runningSession({
@@ -24251,6 +24439,15 @@ describe("SessionService", () => {
       isProcessRunningInTmuxMock.mockResolvedValue(false);
       createTmuxSessionMock.mockRejectedValue(new Error("tmux launch failed"));
       const service = await createDisposedSessionService();
+      const {
+        endpoint: _endpoint,
+        token: _token,
+        ...proxySession
+      } = registration("claude", "backup");
+      authProxyGetStateMock.mockResolvedValue({
+        accounts: ["primary", "backup"].map((id) => ({ id, provider: "claude", status: "ready" })),
+        sessions: [proxySession],
+      });
       // The pane exists when the launch fails: the relaunch stores a retained error.
       vi.spyOn(
         service as unknown as { launchResourcesMayRemain: () => Promise<boolean> },
@@ -24294,6 +24491,15 @@ describe("SessionService", () => {
         created = false;
       });
       const service = await createDisposedSessionService();
+      const {
+        endpoint: _endpoint,
+        token: _token,
+        ...proxySession
+      } = registration("claude", "backup");
+      authProxyGetStateMock.mockResolvedValue({
+        accounts: ["primary", "backup"].map((id) => ({ id, provider: "claude", status: "ready" })),
+        sessions: [proxySession],
+      });
       const refresh = vi.spyOn(
         service as unknown as { refreshDashboardCacheEntry: (record: unknown) => Promise<void> },
         "refreshDashboardCacheEntry",
