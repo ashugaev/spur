@@ -192,16 +192,17 @@ export interface RuntimeTestContext {
 // caller that fires a ledger-gated manual status (e.g. `complete`) right
 // after spawn/resume can hit `todo_open_work` (PR #781 regression, see
 // GitHub Actions run 33044875236). Poll the session's ToDo projection until
-// it has no open or held items before issuing the gated call.
+// the fixture has populated it and resolved all open or held items before the gated call.
 export async function waitForCleanTodoLedger(
-  context: RuntimeTestContext,
+  context: Pick<RuntimeTestContext, "fetchJson">,
   sessionId: string,
   opts: { timeoutMs?: number } = {},
 ): Promise<void> {
   const { timeoutMs = 15_000 } = opts;
   await pollUntil(async () => context.fetchJson<TodoProjection>(`/sessions/${sessionId}/todo`), {
     timeoutMs,
-    accept: (projection) => projection.counts.open === 0 && projection.counts.held === 0,
+    accept: (projection) =>
+      projection.counts.total > 0 && projection.counts.open === 0 && projection.counts.held === 0,
     label: `clean Spur ToDo ledger for session ${sessionId}`,
   });
 }
