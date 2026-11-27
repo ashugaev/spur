@@ -4222,6 +4222,7 @@ export class SessionService {
   private readonly fullViewCache = new Map<string, FullViewCacheEntry>();
   private readonly fullListGate = createConcurrencyGate(FULL_LIST_ENRICH_CONCURRENCY);
   private fullViewCacheReady: Promise<void> | null = null;
+  private readonly listedActivityHighWater = new Map<string, string>();
   // Bumped by applyConfig: an enrichment started before a reload never serves after it.
   private configGeneration = 0;
   private reaperTimer: NodeJS.Timeout | null = null;
@@ -13069,14 +13070,31 @@ export class SessionService {
       (record, listing) => this.enrichWithClassified(record, undefined, listing),
       { includePending: true, onExhausted: "lastBuild", signal: options?.signal },
     );
-    for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
+    for (const view of views) {
+      this.keepListedActivityMonotonic(view);
+      this.guardSidecarViews(view.id, view.sidecars);
+    }
     return views.filter((view) => included(view) && matchesLinks(view));
+  }
+
+  // A listed row never reports an older lastActivityAt than an earlier full list
+  // did: tmux activity can drop out of the max once a pane dies.
+  private keepListedActivityMonotonic(view: { id: string; lastActivityAt: string }): void {
+    const previous = this.listedActivityHighWater.get(view.id);
+    if (previous !== undefined && Date.parse(previous) > Date.parse(view.lastActivityAt)) {
+      view.lastActivityAt = previous;
+    } else {
+      this.listedActivityHighWater.set(view.id, view.lastActivityAt);
+    }
   }
 
   // Takes every listed id, not the non-terminal set: ended rows stay cached.
   private pruneFullViewCache(listedIds: ReadonlySet<string>): void {
     for (const id of this.fullViewCache.keys()) {
       if (!listedIds.has(id)) this.fullViewCache.delete(id);
+    }
+    for (const id of this.listedActivityHighWater.keys()) {
+      if (!listedIds.has(id)) this.listedActivityHighWater.delete(id);
     }
   }
 

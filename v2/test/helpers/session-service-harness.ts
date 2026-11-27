@@ -1477,6 +1477,7 @@ type SessionServiceInternals = {
   warmFullViewCache(): Promise<void>;
   fullViewCache: Map<string, { input: SessionRecord }>;
   fullViewCacheReady: Promise<void> | null;
+  listedActivityHighWater: Map<string, string>;
   classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },

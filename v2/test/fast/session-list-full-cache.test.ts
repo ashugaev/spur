@@ -162,6 +162,30 @@ describe("full-view list cache", () => {
     expect(enrich.ids.length).toBe(3);
   });
 
+  it("keeps listed lastActivityAt monotonic per session across fresh and cached rows", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "run" }));
+    metadata.writeSession(TEST_DATA_DIR, stopped("idle"));
+    const internals = sessionServiceInternals(service);
+    const original = internals.readRuntimeSnapshot.bind(internals);
+    const later = new Date("2026-03-18T10:30:00.000Z");
+    let tmuxActivityAt: Date | null = later;
+    vi.spyOn(internals, "readRuntimeSnapshot").mockImplementation(async (session, ...rest) => ({
+      ...(await original(session, ...rest)),
+      tmuxActivityAt,
+    }));
+    const activity = async (id: string) =>
+      ((await service.list()) as SessionView[]).find((view) => view.id === id)?.lastActivityAt;
+    expect(await activity("run")).toBe(later.toISOString());
+    // The pane died: the fresh max falls back to the record's updatedAt.
+    tmuxActivityAt = null;
+    expect(await activity("run")).toBe(later.toISOString());
+    // A cached row older than an earlier answer reports the earlier one.
+    const idleBefore = await activity("idle");
+    const raised = new Date(Date.parse(idleBefore ?? "") + 60_000).toISOString();
+    internals.listedActivityHighWater.set("idle", raised);
+    expect(await activity("idle")).toBe(raised);
+  });
+
   it("keeps the startup warm from rejecting when the listing fails", async () => {
     listSessionsMock.mockImplementationOnce(() => {
       throw new Error("listing unavailable");
