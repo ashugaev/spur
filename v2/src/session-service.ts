@@ -790,6 +790,7 @@ type FullViewCacheEntry = {
   source: SessionRecord | null;
   receipt: SessionLifecycleSnapshot;
   clearRevision: number;
+  configGeneration: number;
   cachedAt: number;
 };
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
@@ -4221,6 +4222,8 @@ export class SessionService {
   private readonly fullViewCache = new Map<string, FullViewCacheEntry>();
   private readonly fullListGate = createConcurrencyGate(FULL_LIST_ENRICH_CONCURRENCY);
   private fullViewCacheReady: Promise<void> | null = null;
+  // Bumped by applyConfig: an enrichment started before a reload never serves after it.
+  private configGeneration = 0;
   private reaperTimer: NodeJS.Timeout | null = null;
   private reaperRunning = false;
   // Round-robin offset into the terminal-session list, advanced by each
@@ -6722,6 +6725,7 @@ export class SessionService {
     // every cached resolution is stale the moment the daemon config changes.
     this.sessionProjectCache.clear();
     this.fullViewCache.clear();
+    this.configGeneration += 1;
     this.registryPaths = nextRegistryPaths;
     setTmuxSocketName(this.config.tmux.socketName);
     mkdirSync(this.config.dataDir, { recursive: true });
@@ -8695,6 +8699,7 @@ export class SessionService {
       // risk of being evicted on this same pass.
       const liveIds = new Set(liveSessions.map((session) => session.id));
       this.pruneSessionScopedState(liveIds);
+      this.pruneFullViewCache(new Set(allSessions.map((session) => session.id)));
       const claudeAccounts = await this.computeClaudeAccountsView();
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
@@ -12973,7 +12978,9 @@ export class SessionService {
     signal?: AbortSignal | undefined;
   }): Promise<SessionListView[]> {
     const allSessions = listSessions(this.config.dataDir);
-    this.lifecycle.prune(new Set(allSessions.map((session) => session.id)));
+    const listedIds = new Set(allSessions.map((session) => session.id));
+    this.lifecycle.prune(listedIds);
+    this.pruneFullViewCache(listedIds);
     const included = (view: { id: string; status: SessionStatus; retainInList?: boolean }) =>
       isListedSessionView(
         view,
@@ -13027,10 +13034,6 @@ export class SessionService {
       return views.filter((view) => included(view) && matchesLinks(view));
     }
     const sessions = allSessions.filter(included);
-    const listedIds = new Set(allSessions.map((session) => session.id));
-    for (const id of this.fullViewCache.keys()) {
-      if (!listedIds.has(id)) this.fullViewCache.delete(id);
-    }
     if (this.fullViewCacheReady) await this.fullViewCacheReady;
     // Compute the claude accounts snapshot once for the whole batch instead of
     // per-session inside enrich.
@@ -13070,12 +13073,20 @@ export class SessionService {
     return views.filter((view) => included(view) && matchesLinks(view));
   }
 
+  // Takes every listed id, not the non-terminal set: ended rows stay cached.
+  private pruneFullViewCache(listedIds: ReadonlySet<string>): void {
+    for (const id of this.fullViewCache.keys()) {
+      if (!listedIds.has(id)) this.fullViewCache.delete(id);
+    }
+  }
+
   private fullViewHit(record: SessionRecord): FullViewCacheEntry | undefined {
     const entry = this.fullViewCache.get(record.id);
     if (!entry || entry.input !== record || this.isLiveSessionRecord(record)) return undefined;
     if (
       entry.receipt.revision !== this.lifecycle.snapshot(record.id).revision ||
-      entry.clearRevision !== (this.rateLimitClearRevisions.get(record.id) ?? 0)
+      entry.clearRevision !== (this.rateLimitClearRevisions.get(record.id) ?? 0) ||
+      entry.configGeneration !== this.configGeneration
     )
       return undefined;
     // The attention sweep skips ended records, so only age bounds their sidecars and services.
@@ -13119,6 +13130,7 @@ export class SessionService {
   > {
     const receipt = this.lifecycle.snapshot(record.id);
     const clearRevision = this.rateLimitClearRevisions.get(record.id) ?? 0;
+    const configGeneration = this.configGeneration;
     const enriched = await this.enrichWithClassified(record, claudeAccounts, listing);
     if (
       enriched.source !== null &&
@@ -13131,33 +13143,42 @@ export class SessionService {
         source: enriched.source,
         receipt,
         clearRevision,
+        configGeneration,
         cachedAt: Date.now(),
       });
     }
     return { ...enriched, receipt };
   }
 
+  // Never rejects: every full-view list awaits it.
   private async warmFullViewCache(): Promise<void> {
-    const listing = listSessions(this.config.dataDir);
-    const records = listing.filter(
-      (record) =>
-        !this.isLiveSessionRecord(record) &&
-        isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false),
-    );
-    if (records.length === 0) return;
-    const claudeAccounts = await this.computeClaudeAccountsView();
-    await Promise.all(
-      records.map((record) =>
-        this.fullListGate.run(async () => {
-          if (this.isDeliveryStopped()) return;
-          try {
-            await this.enrichFullView(record, claudeAccounts, listing);
-          } catch (error) {
-            this.logListEnrichFailed(record.id, error);
-          }
-        }),
-      ),
-    );
+    try {
+      const listing = listSessions(this.config.dataDir);
+      const records = listing.filter(
+        (record) =>
+          !this.isLiveSessionRecord(record) &&
+          isListedSessionView(record, this.lifecycle.snapshot(record.id).operation, false),
+      );
+      if (records.length === 0) return;
+      const claudeAccounts = await this.computeClaudeAccountsView();
+      await Promise.all(
+        records.map((record) =>
+          this.fullListGate.run(async () => {
+            if (this.isDeliveryStopped()) return;
+            try {
+              await this.enrichFullView(record, claudeAccounts, listing);
+            } catch (error) {
+              this.logListEnrichFailed(record.id, error);
+            }
+          }),
+        ),
+      );
+    } catch (error) {
+      this.logEvent("session.list.warm_failed", {
+        level: "warn",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async listSessionTransitions(

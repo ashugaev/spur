@@ -111,6 +111,67 @@ describe("full-view list cache", () => {
     expect([...enrich.ids].sort()).toEqual(["idle-0", "idle-1", "idle-2", ...runningIds].sort());
   });
 
+  it("does not serve a view whose enrichment began before a config reload", async () => {
+    writeFleet(2, 0);
+    const internals = service as unknown as {
+      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+    };
+    const original = internals.enrichWithClassified.bind(internals);
+    const spy = vi
+      .spyOn(internals, "enrichWithClassified")
+      .mockImplementation(async (record, ...rest) => {
+        const result = await original(record, ...rest);
+        if (record.id === "idle-0") service.applyConfig(config, []);
+        return result;
+      });
+    await service.list();
+    spy.mockRestore();
+    const enrich = enrichedIds();
+    await service.list();
+    expect(enrich.ids).toContain("idle-0");
+  });
+
+  it("prunes cache entries of deleted sessions on the attention sweep", async () => {
+    writeFleet(2, 0);
+    const internals = sessionServiceInternals(service);
+    await service.list();
+    expect([...internals.fullViewCache.keys()].sort()).toEqual(["idle-0", "idle-1"]);
+    rmSync(join(TEST_DATA_DIR, "sessions", "api", "idle-1.json"));
+    await internals.pollAttentionStates(false);
+    expect([...internals.fullViewCache.keys()]).toEqual(["idle-0"]);
+  });
+
+  it("awaits the startup warm before a full list", async () => {
+    writeFleet(2, 1);
+    const internals = sessionServiceInternals(service);
+    let release: () => void = () => {};
+    internals.fullViewCacheReady = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const enrich = enrichedIds();
+    let settled = false;
+    const pending = service.list().then((views) => {
+      settled = true;
+      return views;
+    });
+    for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(enrich.ids).toEqual([]);
+    release();
+    expect(await pending).toHaveLength(3);
+    expect(enrich.ids.length).toBe(3);
+  });
+
+  it("keeps the startup warm from rejecting when the listing fails", async () => {
+    listSessionsMock.mockImplementationOnce(() => {
+      throw new Error("listing unavailable");
+    });
+    await expect(sessionServiceInternals(service).warmFullViewCache()).resolves.toBeUndefined();
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.list.warm_failed"),
+    ).toBe(true);
+  });
+
   it("stops queued full-list enrichments when the request signal aborts", async () => {
     for (let index = 0; index < 20; index += 1)
       metadata.writeSession(TEST_DATA_DIR, record({ id: `run-${index}` }));
@@ -121,9 +182,11 @@ describe("full-view list cache", () => {
     await expect(service.list({ signal: controller.signal })).rejects.toMatchObject({
       name: "AbortError",
     });
-    await service.settleBackgroundSpawns();
-    expect(enrich.ids.length).toBeGreaterThan(0);
-    expect(enrich.ids.length).toBeLessThanOrEqual(8);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enrich.ids).toHaveLength(1);
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.list.enrich_failed"),
+    ).toBe(false);
   });
 
   it("answers the first full list after restart with running-row enrichments only", async () => {

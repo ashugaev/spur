@@ -1476,6 +1476,7 @@ type SessionServiceInternals = {
   startDashboardCacheLoop(): void;
   warmFullViewCache(): Promise<void>;
   fullViewCache: Map<string, { input: SessionRecord }>;
+  fullViewCacheReady: Promise<void> | null;
   classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },
