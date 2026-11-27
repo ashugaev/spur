@@ -13228,7 +13228,8 @@ export class SessionService {
     failureEvent: "warm_failed" | "repair_failed",
     gate: ReturnType<typeof createConcurrencyGate>,
     // A repair only publishes while the `error` it set out to repair is still
-    // the observed state of the same record in the same store.
+    // the observed state of the same record in the same store, with no state
+    // entry journaled since the job started.
     repairsObservedError = false,
   ): Promise<void> {
     try {
@@ -13242,10 +13243,14 @@ export class SessionService {
           gate.run(async () => {
             if (this.isDeliveryStopped() || this.configGeneration !== configGeneration) return;
             const revision = this.lifecycle.snapshot(record.id).revision;
+            const observation = repairsObservedError
+              ? this.transitionsBinding?.store.observedStateSequence(record.id)
+              : undefined;
             const stillCurrent = repairsObservedError
               ? () =>
                   this.configGeneration === configGeneration &&
                   this.transitionsBinding?.store.observedState(record.id) === "error" &&
+                  this.transitionsBinding.store.observedStateSequence(record.id) === observation &&
                   readSession(this.config.dataDir, record.id) === record &&
                   this.lifecycle.snapshot(record.id).revision === revision
               : undefined;

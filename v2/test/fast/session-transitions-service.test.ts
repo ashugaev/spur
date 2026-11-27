@@ -1054,6 +1054,42 @@ describe("session transitions service", () => {
     ]);
   });
 
+  it("drops a repair when the state went error, killed, error again while it waited", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    const diagnostic = { exists: false, missing: false, diagnostic: "workspace stat failed" };
+    probeWorkspaceMock.mockReturnValue(diagnostic);
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("error");
+    await restart();
+    const cursor = (await poll()).nextCursor;
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const repair = sessionServiceInternals(service).repairBootKeptErrors();
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("killed");
+    probeWorkspaceMock.mockReturnValue(diagnostic);
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("error");
+    release();
+    await repair;
+    expect(binding().store.observedState("api-1")).toBe("error");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed", "error"]);
+  });
+
   it("drops a repair whose observed error was already replaced by a list", async () => {
     metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
     probeWorkspaceMock.mockReturnValue({

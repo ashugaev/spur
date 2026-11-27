@@ -118,6 +118,7 @@ export class SessionTransitions {
   private checkpoint: Checkpoint;
   private segments: [number, ...number[]];
   private readonly segmentRanges = new Map<number, { first: number; last: number }>();
+  private readonly stateSequences = new Map<string, number>();
   private firstSequence = 1;
   private dirty = false;
   private readonly pending: PendingTransition[] = [];
@@ -227,6 +228,7 @@ export class SessionTransitions {
             ...(entry.successorId ? { successorId: entry.successorId } : {}),
           }
         : { ...old, state: entry.to, rateLimitResetAt: entry.rateLimitResetAt };
+    if (entry.kind === "state") this.stateSequences.set(entry.sessionId, sequence);
     this.checkpoint.sequence = sequence;
     this.dirty = true;
   }
@@ -336,6 +338,12 @@ export class SessionTransitions {
 
   observedStatus(sessionId: string): SessionRecord["status"] | undefined {
     return this.checkpoint.observations[sessionId]?.status;
+  }
+
+  // Journal sequence of the session's latest state entry, in memory only. Unlike
+  // the state value it differs after an error -> killed -> error round trip.
+  observedStateSequence(sessionId: string): number | undefined {
+    return this.stateSequences.get(sessionId);
   }
 
   observedState(sessionId: string): SessionState | undefined {
