@@ -7688,14 +7688,15 @@ export class SessionService {
         this.codexPaneLimitObservedAt.delete(sessionId);
         this.lastClassifiedLogStates.delete(sessionId);
         this.stateCache.delete(sessionId);
+        const statusEpoch = this.statusEpochs.get(sessionId) ?? 0;
         const classified = await this.classifySessionRecord(cleared, {
           bypassClearBarrier: true,
           suppressMenuConfirmation: true,
           reconcileRuntime: false,
         });
-        // Moved off `running` during the classification (it runs without runtime
+        // The status changed during the classification (it runs without runtime
         // reconcile, so it never changes status itself): the write hook already
-        // published the edge.
+        // published the edge, and this state is stale.
         const logCleared = () =>
           this.logEvent("session.rate_limit.cleared", {
             level: "info",
@@ -7705,7 +7706,7 @@ export class SessionService {
             details: { actor, force },
           });
         const ended = readSession(this.config.dataDir, sessionId);
-        if (ended && ended.status !== cleared.status) {
+        if (ended && (this.statusEpochs.get(sessionId) ?? 0) !== statusEpoch) {
           logCleared();
           return { sessionId, state: statusDerivedState(ended), deliveryScheduled: false };
         }
@@ -30944,10 +30945,6 @@ export class SessionService {
     return (await this.assembleDashboard(session))?.view;
   }
 
-  // State publication fence shared by enrichWithClassified and assembleDashboard:
-  // a status epoch change since the classification began means the in-hand state
-  // is stale (ABA-safe: pause then resume counts). One reclassification, then
-  // the publish is skipped: the write hook and background ticks publish the rest.
   private async assembleDashboard(
     session: SessionRecord,
     // Set on the one reclassification after a status move; a second move skips
@@ -30978,10 +30975,10 @@ export class SessionService {
 
     const hasServiceIssues = await this.hasServiceIssues(session);
     const latest = readSession(this.config.dataDir, session.id);
-    const recordMoved = (this.statusEpochs.get(session.id) ?? 0) !== statusEpoch;
+    const epochChanged = (this.statusEpochs.get(session.id) ?? 0) !== statusEpoch;
     if (
       (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
-      (recordMoved && !retried)
+      (epochChanged && !retried)
     ) {
       return latest ? this.assembleDashboard(latest, true) : undefined;
     }
@@ -31036,7 +31033,7 @@ export class SessionService {
         ? "task_status"
         : classified.source;
     // Moved again during the retry: the write hook and background ticks publish.
-    if (!recordMoved)
+    if (!epochChanged)
       await this.updateStateHistory(
         session,
         state,
@@ -31435,10 +31432,10 @@ export class SessionService {
     // A record whose status moved while this classification ran gets one
     // reclassification; the state is never published for a stale status.
     const latest = readSession(this.config.dataDir, session.id);
-    const recordMoved = (this.statusEpochs.get(session.id) ?? 0) !== statusEpoch;
+    const epochChanged = (this.statusEpochs.get(session.id) ?? 0) !== statusEpoch;
     if (
       (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
-      (recordMoved && !retried)
+      (epochChanged && !retried)
     ) {
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
       return this.enrichWithClassified(latest, claudeAccounts, sessionBatch, stillCurrent, true);
@@ -31460,7 +31457,7 @@ export class SessionService {
         ? "task_status"
         : classified.source;
     // Moved again during the retry: the write hook and background ticks publish.
-    if (!recordMoved)
+    if (!epochChanged)
       await this.updateStateHistory(
         session,
         state,
