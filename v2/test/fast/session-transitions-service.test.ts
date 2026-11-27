@@ -1054,6 +1054,39 @@ describe("session transitions service", () => {
     ]);
   });
 
+  it("keeps a boot repair running across a same-directory reload", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed",
+    });
+    await service.get("api-1");
+    await restart();
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const repair = sessionServiceInternals(service).repairBootKeptErrors();
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    service.applyConfig(config, []);
+    release();
+    await repair;
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed"]);
+  });
+
   it("drops a repair when the state went error, killed, error again while it waited", async () => {
     metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
     const diagnostic = { exists: false, missing: false, diagnostic: "workspace stat failed" };

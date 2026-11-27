@@ -13233,7 +13233,9 @@ export class SessionService {
     repairsObservedError = false,
   ): Promise<void> {
     try {
-      const configGeneration = this.configGeneration;
+      // Only a data-directory rebind replaces the binding; a same-store reload
+      // keeps the job, whose observation guard covers staleness.
+      const binding = this.transitionsBinding;
       const listing = listSessions(this.config.dataDir);
       const records = listing.filter((record) => !this.isLiveSessionRecord(record) && pick(record));
       if (records.length === 0) return;
@@ -13241,16 +13243,16 @@ export class SessionService {
       await Promise.all(
         records.map((record) =>
           gate.run(async () => {
-            if (this.isDeliveryStopped() || this.configGeneration !== configGeneration) return;
+            if (this.isDeliveryStopped() || this.transitionsBinding !== binding) return;
             const revision = this.lifecycle.snapshot(record.id).revision;
             const observation = repairsObservedError
-              ? this.transitionsBinding?.store.observedStateSequence(record.id)
+              ? binding?.store.observedStateSequence(record.id)
               : undefined;
             const stillCurrent = repairsObservedError
               ? () =>
-                  this.configGeneration === configGeneration &&
-                  this.transitionsBinding?.store.observedState(record.id) === "error" &&
-                  this.transitionsBinding.store.observedStateSequence(record.id) === observation &&
+                  this.transitionsBinding === binding &&
+                  binding?.store.observedState(record.id) === "error" &&
+                  binding.store.observedStateSequence(record.id) === observation &&
                   readSession(this.config.dataDir, record.id) === record &&
                   this.lifecycle.snapshot(record.id).revision === revision
               : undefined;
