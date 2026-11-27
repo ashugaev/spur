@@ -189,7 +189,7 @@ export function SnippetsSection({ sessionId, files, session }: SnippetsSectionPr
 
   return (
     <section aria-label="Snippets">
-      <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+      <h2 className="flex items-center gap-2 py-2 text-label font-bold uppercase tracking-caps text-[var(--color-text-tertiary)]">
         Snippets
         <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
         <span className="font-normal text-[var(--color-text-secondary)]">{files.length}</span>
@@ -254,7 +254,7 @@ export function SnippetsSection({ sessionId, files, session }: SnippetsSectionPr
         })}
         {excess.length > 0 ? (
           <div className="border border-[var(--color-border-subtle)] px-3 py-2">
-            <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+            <div className="text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
               Not mounted · limit {SNIPPET_MAX_MOUNTED}
             </div>
             <ul className="mt-1 space-y-0.5">

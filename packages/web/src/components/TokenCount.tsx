@@ -121,7 +121,7 @@ export function TokenCount({
           id={id}
           ref={cardRef}
           role="tooltip"
-          className={`absolute top-full z-50 block max-h-[calc(100dvh-16px)] w-72 overflow-auto border border-[var(--color-border-default)] bg-[var(--color-bg-base)] text-[var(--color-text-secondary)] shadow-[0_8px_30px_var(--color-shadow-menu)] ${align === "left" ? "left-0" : "right-0"}`}
+          className={`absolute top-full z-50 block max-h-[calc(100dvh-16px)] w-72 overflow-auto border border-[var(--color-border-default)] bg-[var(--color-bg-base)] text-[var(--color-text-secondary)] shadow-overlay ${align === "left" ? "left-0" : "right-0"}`}
         >
           <span className="block bg-[var(--color-bg-elevated)] p-3">
             {reportedRows.length > 0 ? (
@@ -129,10 +129,10 @@ export function TokenCount({
                 <thead>
                   <tr>
                     <th />
-                    <th className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    <th className="text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
                       Pre-flight
                     </th>
-                    <th className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    <th className="text-label font-bold uppercase tracking-label text-[var(--color-text-tertiary)]">
                       Main
                     </th>
                   </tr>
@@ -188,7 +188,7 @@ export function TokenCount({
             ) : null}
             {exceeded || unenforced || limit !== undefined || budget?.overridden ? (
               <span
-                className={`mt-2 block border-t border-[var(--color-border-subtle)] pt-2 text-left ${exceeded ? "text-[var(--color-status-error)]" : unenforced ? "text-[var(--color-chip-warn-text)]" : "text-[var(--color-text-tertiary)]"}`}
+                className={`mt-2 block border-t border-[var(--color-border-subtle)] pt-2 text-left ${exceeded ? "text-[var(--color-status-error)]" : unenforced ? "text-[var(--color-status-attention)]" : "text-[var(--color-text-tertiary)]"}`}
               >
                 {exceeded
                   ? blocked && session.status === "budget_limited"

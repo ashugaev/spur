@@ -97,7 +97,7 @@ export function FileAttachmentPreviewStrip({
             </span>
             <div className="flex min-w-0 flex-col">
               <span className="truncate leading-tight">{attachment.file.name}</span>
-              <span className="text-[10px] leading-tight text-[var(--color-text-secondary)]">
+              <span className="text-label leading-tight text-[var(--color-text-secondary)]">
                 {formatFileSize(attachment.file.size)}
               </span>
             </div>

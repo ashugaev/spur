@@ -83,7 +83,7 @@ export function SwitchVersionDialog({
     >
       <div
         ref={panelRef}
-        className="w-[min(22rem,calc(100vw-2rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]"
+        className="w-[min(22rem,calc(100vw-2rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-raised"
       >
         <h2
           className="mb-2 font-bold text-[var(--color-text-primary)]"

@@ -69,7 +69,6 @@ import {
   writeTelegramReplyTarget,
   writeSession,
   observeSessionWrites,
-  withSessionWriteGuard,
   updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
 import { appendEventLog, readEventLog } from "../../src/event-log.js";
@@ -1834,7 +1833,7 @@ describe("session workspaceId normalization", () => {
     expect(seen).toHaveLength(2);
   });
 
-  it("propagates observer failure after committed status and fences async stale writes before commit", async () => {
+  it("propagates observer failure after committed status", async () => {
     const dataDir = await newDataDir();
     const record: SessionRecord = { ...legacyBase, id: "api-1", tmuxSession: "api-1" };
     const unregister = observeSessionWrites(dataDir, () => {
@@ -1843,20 +1842,6 @@ describe("session workspaceId normalization", () => {
     expect(() => writeSession(dataDir, record)).toThrow("journal failed");
     expect(readSession(dataDir, record.id)?.status).toBe("running");
     unregister();
-    let current = true;
-    await expect(
-      withSessionWriteGuard(
-        () => {
-          if (!current) throw new Error("reloaded");
-        },
-        async () => {
-          await Promise.resolve();
-          current = false;
-          writeSession(dataDir, { ...record, status: "completed" });
-        },
-      ),
-    ).rejects.toThrow("reloaded");
-    expect(readSession(dataDir, record.id)?.status).toBe("running");
   });
 
   it("survives a write/read round-trip", async () => {

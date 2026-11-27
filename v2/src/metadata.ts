@@ -11,7 +11,6 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { authSessionSchema } from "./auth-proxy.js";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isCursorDeliveryId } from "./agents/cursor-submit-ack.js";
@@ -1910,12 +1909,6 @@ function normalizeServiceInstanceRecord(service: ServiceInstanceRecord): Service
 
 type SessionWriteObserver = (session: SessionRecord) => void;
 const sessionWriteObservers = new Map<string, Set<SessionWriteObserver>>();
-const sessionWriteGuard = new AsyncLocalStorage<() => void>();
-
-/** Fence writes made inside an asynchronous classification across config reloads. */
-export function withSessionWriteGuard<T>(guard: () => void, action: () => T): T {
-  return sessionWriteGuard.run(guard, action);
-}
 
 export function observeSessionWrites(dataDir: string, observer: SessionWriteObserver): () => void {
   const key = resolve(dataDir);
@@ -1929,7 +1922,6 @@ export function observeSessionWrites(dataDir: string, observer: SessionWriteObse
 }
 
 export function writeSession(dataDir: string, session: SessionRecord): void {
-  sessionWriteGuard.getStore()?.();
   const path = sessionFilePath(dataDir, session.project, session.id);
   const observers = sessionWriteObservers.get(resolve(dataDir));
   const normalized = normalizeSessionRecord(session);

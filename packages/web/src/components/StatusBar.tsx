@@ -144,7 +144,7 @@ function StatusDot({ level }: { level: HealthLevel }) {
   return (
     <span
       aria-hidden="true"
-      className="h-1.5 w-1.5 shrink-0 rounded-full"
+      className="h-1.5 w-1.5 shrink-0 rounded-dot"
       style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}` }}
     />
   );
@@ -225,7 +225,7 @@ function PlatformStatusButton({
         <StatusDot level={level} />
       </button>
       {popover.open ? (
-        <div className="absolute bottom-full left-0 z-50 mb-1.5 min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+        <div className="absolute bottom-full left-0 z-50 mb-1.5 min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-raised">
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
             <span className="text-[var(--color-text-secondary)]">{label}</span>
             <span className="font-bold" style={{ color: healthColor(level) }}>
@@ -288,7 +288,7 @@ export function StatusBar({
     gitlabStatus === null || gitlabStatus.configured === true || providersInUse.has("gitlab");
 
   return (
-    <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] py-1 pl-[max(0.5rem,calc(env(safe-area-inset-left)_+_2px))] pr-[max(0.5rem,calc(env(safe-area-inset-right)_+_2px))] text-[10px] uppercase tracking-[0.08em] sm:pl-[max(1rem,calc(env(safe-area-inset-left)_+_2px))] sm:pr-[max(1rem,calc(env(safe-area-inset-right)_+_2px))]">
+    <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] py-1 pl-[max(0.5rem,calc(env(safe-area-inset-left)_+_2px))] pr-[max(0.5rem,calc(env(safe-area-inset-right)_+_2px))] text-label uppercase tracking-meta sm:pl-[max(1rem,calc(env(safe-area-inset-left)_+_2px))] sm:pr-[max(1rem,calc(env(safe-area-inset-right)_+_2px))]">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 sm:gap-x-6">
         <div
           ref={onlinePopover.containerRef}
@@ -311,7 +311,7 @@ export function StatusBar({
 
           {onlinePopover.open ? (
             <div
-              className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
+              className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-raised"
               onClick={onlinePopover.dismiss}
             >
               <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">

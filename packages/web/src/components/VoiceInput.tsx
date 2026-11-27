@@ -436,12 +436,12 @@ export function VoiceConfirmModal({
           {(voice.recording ||
             voice.voiceBusy === "starting" ||
             voice.voiceBusy === "transcribing") && (
-            <p className="text-xs text-[var(--color-text-tertiary)]">
+            <p className="text-[var(--color-text-tertiary)]">
               <VoiceStatusHint voice={voice} />
             </p>
           )}
           {voice.voiceError ? (
-            <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+            <div className="border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2.5 py-1.5 text-[var(--color-status-error)]">
               {voice.voiceError}
             </div>
           ) : null}
@@ -487,7 +487,7 @@ export function VoiceConfirmModal({
                 <span>Insert</span>
                 <span
                   aria-hidden="true"
-                  className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/72"
+                  className="whitespace-nowrap font-mono text-label font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/72"
                 >
                   {PRIMARY_SUBMIT_HINT}
                 </span>

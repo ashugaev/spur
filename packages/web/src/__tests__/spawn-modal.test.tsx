@@ -2,8 +2,10 @@ import { createRef } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { SpawnModal, type SpawnModalMode } from "@/components/SpawnModal";
+import { PRIMARY_BUTTON_CLASS } from "@/design/classes";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import type { ReasoningIntent } from "@/lib/reasoning-effort";
+import { PRIMARY_SUBMIT_HINT } from "@/lib/submit-hotkeys";
 
 vi.mock("@/components/ModelReasoningField", () => ({
   ModelReasoningField: ({
@@ -286,6 +288,27 @@ describe("SpawnModal", () => {
     renderModal(deskMode, { showCancel: true, slashEndpoint: "/api/x" });
     expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Go/ })).toBeInTheDocument();
+  });
+
+  it("preserves primary recipe colors and submit shortcut foreground inheritance", () => {
+    renderModal(spawnMode);
+    const submit = screen.getByRole("button", { name: "Go" });
+    const hint = screen.getByText(PRIMARY_SUBMIT_HINT);
+    const recipeColors = PRIMARY_BUTTON_CLASS.split(/\s+/).filter((name) =>
+      /^(?:hover:)?(?:bg|text)-\[var\(--color-/.test(name),
+    );
+    expect(recipeColors).toHaveLength(3);
+    expect(submit).toHaveClass(...recipeColors);
+    expect(submit).toContainElement(hint);
+    expect(hint).toHaveAttribute("aria-hidden", "true");
+    for (
+      let element: HTMLElement | null = hint;
+      element && element !== submit;
+      element = element.parentElement
+    ) {
+      expect(element.className).not.toMatch(/(?:^|\s)(?:[a-z-]+:)*text-\[(?:color:)?var\(--color-/);
+      expect(element.style.color).toBe("");
+    }
   });
 
   it("disables close and cancel and gates backdrop click when canClose is false", () => {
