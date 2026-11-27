@@ -208,7 +208,7 @@ assert_out "$OUT_FILE" "npm-init:   install user units spur-daemon, spur-web, sp
 assert_out "$OUT_FILE" "npm-init:   enable linger for $(id -un) if allowed (best effort, no sudo): services keep running after logout and start at boot"
 assert_out "$OUT_FILE" "npm-init:   leave services stopped (--no-start)"
 assert_out "$OUT_FILE" "npm-init:   agent integrations: skill links, Cursor hook"
-assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped; web UI is on 127.0.0.1 (pass --tailscale for private remote access)"
+assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped; the spur-web unit binds 127.0.0.1 (pass --tailscale for private remote access)"
 assert_out "$OUT_FILE" "npm-init:   units installed: spur-daemon spur-web spur-mcp spur-mcp-tunnel in $UNIT_DIR"
 assert_out "$OUT_FILE" "npm-init:   started: none (--no-start)"
 assert_out "$OUT_FILE" "npm-init:   linger: enabled"
@@ -657,7 +657,7 @@ assert_no_log "$FAKE_BIN" curl
 assert_no_log "$FAKE_BIN" sudo
 assert_no_log "$FAKE_BIN" tailscale
 assert_loopback
-assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped; web UI is on 127.0.0.1 (pass --tailscale for private remote access)"
+assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped; the spur-web unit binds 127.0.0.1 (pass --tailscale for private remote access)"
 assert_out "$OUT_FILE" "npm-init:   Tailscale: not requested"
 refute_out "$OUT_FILE" "npm-init: info: Tailscale"
 echo "npm-init.test.sh: default-no-install scenario OK"

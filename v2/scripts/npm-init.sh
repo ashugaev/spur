@@ -120,7 +120,7 @@ for unit in "${required_units[@]}"; do
   started_names+="${started_names:+ }${unit%.service}"
 done
 
-tailscale_plan="skipped; web UI is on 127.0.0.1 (pass --tailscale for private remote access)"
+tailscale_plan="skipped; the spur-web unit binds 127.0.0.1 (pass --tailscale for private remote access)"
 if [[ "$EXPOSE_WEB" -eq 1 ]]; then
   tailscale_plan="skipped (--expose-web binds 0.0.0.0)"
 elif [[ "$TAILSCALE" == "install" ]]; then

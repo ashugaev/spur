@@ -2920,7 +2920,7 @@ export function createProgram(cliEntrypoint: string): Command {
     )
     .option(
       "--no-tailscale",
-      "Skip Tailscale and drop an existing tailnet bind; web UI is on 127.0.0.1 only",
+      "Skip Tailscale and drop an existing tailnet bind; the spur-web unit binds 127.0.0.1 only",
     )
     .on("option:tailscale", () => initTailscaleFlags.add("--tailscale"))
     .on("option:no-tailscale", () => initTailscaleFlags.add("--no-tailscale"))
