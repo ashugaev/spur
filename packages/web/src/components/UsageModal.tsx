@@ -88,7 +88,7 @@ function SectionHeader({
         data-testid={dot === "working" ? undefined : "quota-dot"}
         style={{ background: DOT_COLOR[dot] }}
       />
-      <span className={`font-bold uppercase tracking-[0.1em] ${SECONDARY_TEXT}`}>{label}</span>
+      <span className={`font-bold uppercase tracking-label ${SECONDARY_TEXT}`}>{label}</span>
       <span className="flex-1 border-t border-[var(--color-border-default)]" />
       {right}
     </div>
@@ -155,8 +155,8 @@ function QuotaSource({ quota }: { quota: QuotaSourceResult }) {
           <span
             className={
               errorKindTone(quota.error) === "warn"
-                ? "border border-[var(--color-chip-warn-border)] px-1.5 py-px text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--color-chip-warn-text)]"
-                : "border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-1.5 py-px text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--color-chip-error-text)]"
+                ? "border border-[var(--color-status-attention-border)] px-1.5 py-px text-label font-bold uppercase tracking-meta text-[var(--color-status-attention)]"
+                : "border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-1.5 py-px text-label font-bold uppercase tracking-meta text-[var(--color-status-error)]"
             }
           >
             {errorKindLabel(quota.error)}
@@ -179,7 +179,7 @@ function QuotaSource({ quota }: { quota: QuotaSourceResult }) {
 
 const CELL = "py-[5px] pr-[13px] text-right tabular-nums";
 const HEAD_CELL =
-  "border-b border-[var(--color-border-default)] py-1 pr-[13px] text-right text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]";
+  "border-b border-[var(--color-border-default)] py-1 pr-[13px] text-right text-label font-bold uppercase tracking-meta text-[var(--color-text-tertiary)]";
 const OPTIONAL_COL = "hidden sm:table-cell";
 
 function optionalCount(value: number | undefined): ReactNode {
@@ -304,7 +304,7 @@ function UsageContent({ data }: { data: UsageReport }) {
             {TOKEN_WINDOWS.map((entry, index) => (
               <button
                 aria-pressed={tab === entry.window}
-                className={`px-2 py-0.5 font-bold uppercase tracking-[0.08em] focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 ${
+                className={`px-2 py-0.5 font-bold uppercase tracking-meta focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 ${
                   index > 0 ? "border-l border-[var(--color-border-default)]" : ""
                 } ${
                   tab === entry.window
@@ -411,7 +411,7 @@ export function UsageModal({ onClose }: { onClose: () => void }) {
       <div className="flex max-h-[calc(100dvh-16px)] w-[min(720px,100%)] flex-col border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] sm:max-h-[80vh]">
         <div className="flex shrink-0 items-center gap-3 border-b border-[var(--color-border-default)] px-[13px] py-2">
           <h2
-            className={`font-bold uppercase tracking-[0.1em] ${PRIMARY_TEXT}`}
+            className={`font-bold uppercase tracking-label ${PRIMARY_TEXT}`}
             id="usage-modal-title"
           >
             Usage

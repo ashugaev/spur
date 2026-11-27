@@ -31,7 +31,7 @@ const nextConfig = {
   async rewrites() {
     return [
       { source: "/p/:id/_spur/sdk.js", destination: "/spur/spur-sdk.v2.js" },
-      { source: "/p/:id/_spur/theme.css", destination: "/spur/spur-page-theme.v2.css" },
+      { source: "/p/:id/_spur/theme.css", destination: "/spur/spur-page-theme.css" },
     ];
   },
   ...(sidecarDistDir ? { distDir: sidecarDistDir } : {}),

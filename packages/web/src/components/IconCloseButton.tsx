@@ -1,6 +1,7 @@
 "use client";
 
 import { CloseIcon } from "@/components/icons/CloseIcon";
+import { ICON_BUTTON_CLASS } from "@/design/classes";
 
 export function IconCloseButton({
   label,
@@ -16,7 +17,7 @@ export function IconCloseButton({
   return (
     <button
       aria-label={label}
-      className={`inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] ${idleTextClass} transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50`}
+      className={`${ICON_BUTTON_CLASS} h-8 w-8 ${idleTextClass}`}
       disabled={disabled}
       onClick={onClick}
       type="button"

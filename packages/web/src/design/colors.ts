@@ -3,7 +3,7 @@
  * compiled at build time and the xterm terminal theme that consumes JS objects.
  *
  * Every value here mirrors a `--color-*` token declared in
- * `src/app/globals.css` under `@theme`. Keep the two files in sync.
+ * `src/design/tokens.css`. design-system.test.ts enforces the match.
  *
  * Components must not import literal colors. They reference the CSS variables
  * directly (e.g. `bg-[var(--color-bg-base)]`).

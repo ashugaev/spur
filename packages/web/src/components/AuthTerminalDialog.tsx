@@ -188,7 +188,7 @@ export function AuthTerminalDialog({
     >
       <div
         ref={panelRef}
-        className={`max-h-[calc(100dvh-2rem)] overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)] ${
+        className={`max-h-[calc(100dvh-2rem)] overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-raised ${
           running || restarting
             ? "w-[min(44rem,calc(100vw-2rem))]"
             : "w-[min(28rem,calc(100vw-2rem))]"
@@ -264,7 +264,7 @@ export function AuthTerminalDialog({
               <>
                 <span
                   aria-hidden="true"
-                  className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full border border-[var(--color-text-secondary)]"
+                  className="mt-1 h-2.5 w-2.5 shrink-0 rounded-dot border border-[var(--color-text-secondary)]"
                 />
                 <span>
                   <span className="font-bold text-[var(--color-text-primary)]">Not signed in</span>

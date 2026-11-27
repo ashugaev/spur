@@ -12,12 +12,15 @@ import {
   TEST_DATA_DIR,
   sessionServiceInternals,
   sessionMetadataModule,
+  logSpurEventMock,
+  enrichedIds as harnessEnrichedIds,
   probeWorkspaceMock,
 } from "../helpers/session-service-harness.js";
-import { appendFileSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import type * as Fs from "node:fs";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SessionTransitions } from "../../src/session-transitions.js";
 import type * as Metadata from "../../src/metadata.js";
 import type * as Config from "../../src/config.js";
 import type { SessionService } from "../../src/session-service.js";
@@ -31,7 +34,6 @@ import type {
 let metadata: typeof Metadata;
 let service: SessionService;
 let config: AppConfig;
-let serviceModule: Awaited<ReturnType<typeof loadSessionServiceModule>>;
 const task = { label: "task", url: "https://example.com/task/1" };
 // Captured before the harness installs fake timers, which also fake hrtime.
 const realClock = process.hrtime.bigint;
@@ -81,18 +83,7 @@ const binding = () =>
       transitionsBinding: { store: { observedState(id: string): SessionState | undefined } };
     }
   ).transitionsBinding;
-function enrichedIds() {
-  const internals = service as unknown as {
-    enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
-  };
-  const original = internals.enrichWithClassified.bind(internals);
-  const ids: string[] = [];
-  const spy = vi.spyOn(internals, "enrichWithClassified").mockImplementation((record, ...rest) => {
-    ids.push(record.id);
-    return original(record, ...rest);
-  });
-  return { ids, restore: () => spy.mockRestore() };
-}
+const enrichedIds = () => harnessEnrichedIds(service);
 
 beforeEach(async () => {
   await resetSessionServiceHarness(() => []);
@@ -100,7 +91,6 @@ beforeEach(async () => {
   const { tags: _tags, ...rawConfig } = baseConfig();
   config = parseConfigText("/tmp/spur.yaml", JSON.stringify(rawConfig));
   const module = await loadSessionServiceModule();
-  serviceModule = module;
   metadata = sessionMetadataModule();
   readSessionMock.mockImplementation(metadata.readSession);
   writeSessionMock.mockImplementation(metadata.writeSession);
@@ -118,6 +108,7 @@ describe("session transitions service", () => {
     "retains a transient limit reversal admitted by ordinary %s before append recovery",
     async (read) => {
       metadata.writeSession(TEST_DATA_DIR, record());
+      await service.get("api-1");
       const cursor = (await poll()).nextCursor;
       const readCurrent = () =>
         read === "get"
@@ -166,7 +157,7 @@ describe("session transitions service", () => {
     },
   );
 
-  it("drains an admitted backlog before strict classification or account/session reads", async () => {
+  it("drains an admitted backlog without runtime, account or session reads", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     const cursor = (await poll()).nextCursor;
     const restore = failJournalAppends();
@@ -187,31 +178,6 @@ describe("session transitions service", () => {
     restore();
     expect((await poll({ since: cursor })).entries).toContainEqual(
       expect.objectContaining({ to: "rate_limited" }),
-    );
-  });
-
-  it("drains observations admitted during the awaited refresh before acknowledging its cursor", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record());
-    metadata.writeSession(TEST_DATA_DIR, record({ id: "other" }));
-    const cursor = (await poll()).nextCursor;
-    const internals = service as unknown as {
-      refreshSessionTransitions(binding: unknown, assertCurrent: () => void): Promise<void>;
-    };
-    const refresh = internals.refreshSessionTransitions.bind(internals);
-    vi.spyOn(internals, "refreshSessionTransitions").mockImplementationOnce(async (...args) => {
-      await refresh(...args);
-      const restore = failJournalAppends();
-      expect(() =>
-        metadata.writeSession(
-          TEST_DATA_DIR,
-          record({ id: "other", status: "stopped", stopReason: "manual_pause" }),
-        ),
-      ).toThrow("journal append unavailable");
-      restore();
-    });
-    const page = await poll({ since: cursor });
-    expect(page.entries).toContainEqual(
-      expect.objectContaining({ sessionId: "other", kind: "status", to: "stopped" }),
     );
   });
 
@@ -246,38 +212,11 @@ describe("session transitions service", () => {
     ]);
   });
 
-  it("does not fabricate classified state admission when a strict marker callback fails on an older backlog", async () => {
+  it("keeps an older queued status edge ahead of a state edge from a later ordinary read", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     metadata.writeSession(TEST_DATA_DIR, record({ id: "other" }));
+    await service.get("api-1");
     const cursor = (await poll()).nextCursor;
-    const store = (
-      service as unknown as {
-        transitionsBinding: {
-          store: {
-            observeState(record: SessionRecord, state: SessionState, links: unknown[]): void;
-          };
-        };
-      }
-    ).transitionsBinding.store;
-    const observed = vi.spyOn(store, "observeState");
-    let release: (() => void) | undefined;
-    let reached: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const entered = new Promise<void>((resolve) => {
-      reached = resolve;
-    });
-    const internals = sessionServiceInternals(service);
-    const original = internals.readRuntimeSnapshot.bind(internals);
-    vi.spyOn(internals, "readRuntimeSnapshot").mockImplementationOnce(async (...args) => {
-      reached?.();
-      await gate;
-      return original(...args);
-    });
-    evidence("working", "2026-03-18T11:00:00.000Z");
-    const pending = poll({ since: cursor });
-    await entered;
     const restore = failJournalAppends();
     expect(() =>
       metadata.writeSession(
@@ -285,22 +224,19 @@ describe("session transitions service", () => {
         record({ id: "other", status: "stopped", stopReason: "manual_pause" }),
       ),
     ).toThrow("journal append unavailable");
-    release?.();
-    await expect(pending).rejects.toThrow("journal append unavailable");
-    expect(
-      observed.mock.calls.some(
-        ([record, state]) => record.id === "api-1" && state === "rate_limited",
-      ),
-    ).toBe(false);
+    evidence("working", "2026-03-18T11:00:00.000Z");
+    expect(await service.get("api-1")).toMatchObject({ state: "rate_limited" });
+    await expect(poll({ since: cursor })).rejects.toThrow("journal append unavailable");
     restore();
-    evidence("working");
-    const recovered = await poll({ since: cursor });
-    expect(recovered.entries).toContainEqual(
-      expect.objectContaining({ sessionId: "other", kind: "status", to: "stopped" }),
+    const recovered = (await poll({ since: cursor })).entries;
+    const otherAt = recovered.findIndex(
+      (entry) => entry.sessionId === "other" && entry.kind === "status" && entry.to === "stopped",
     );
-    expect(
-      recovered.entries.some((entry) => entry.sessionId === "api-1" && entry.to === "rate_limited"),
-    ).toBe(false);
+    const limitedAt = recovered.findIndex(
+      (entry) => entry.sessionId === "api-1" && entry.to === "rate_limited",
+    );
+    expect(otherAt).toBeGreaterThanOrEqual(0);
+    expect(limitedAt).toBeGreaterThan(otherAt);
   });
 
   it.each(["same", "different", "disposed"] as const)(
@@ -351,335 +287,146 @@ describe("session transitions service", () => {
     },
   );
 
-  it("skips enrichment of unchanged terminal records on a cursor poll and keeps live ones", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record({ id: "live" }));
-    for (const [id, status] of [
-      ["done", "completed"],
-      ["gone", "killed"],
-    ] as const)
-      metadata.writeSession(TEST_DATA_DIR, record({ id, status }));
-    const enrich = enrichedIds();
-    const first = await poll();
-    expect(new Set(enrich.ids)).toEqual(new Set(["live", "done", "gone"]));
-    enrich.ids.length = 0;
-    const page = await poll({ since: first.nextCursor });
-    expect(page).toEqual({ entries: [], nextCursor: first.nextCursor, hasMore: false });
-    expect(enrich.ids).toEqual(["live"]);
-  });
-
-  it("settles a record completed through complete() despite its succeeded lifecycle receipt", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record());
-    await poll();
-    await service.complete("api-1", { skipPrCheck: true, skipRuntimeTeardown: true });
-    expect(
-      (
-        service as unknown as {
-          lifecycle: { snapshot(id: string): { operation: { phase: string } | null } };
-        }
-      ).lifecycle.snapshot("api-1").operation?.phase,
-    ).toBe("succeeded");
-    const completed = await poll();
-    const enrich = enrichedIds();
-    expect(await poll({ since: completed.nextCursor })).toMatchObject({ entries: [] });
-    expect(enrich.ids).toEqual([]);
-  });
-
-  it("does not settle a terminal record edited out of band between classification and re-read", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
-    const first = await poll();
-    const path = join(TEST_DATA_DIR, "sessions", "api", "api-1.json");
-    // Unsettle it with an ordinary write, then race the next classification.
-    metadata.writeSession(
-      TEST_DATA_DIR,
-      record({ status: "completed", updatedAt: "2026-03-18T10:05:00.000Z" }),
-    );
-    const internals = service as unknown as {
-      classifySessionRecord(...args: unknown[]): Promise<unknown>;
-    };
-    const classify = internals.classifySessionRecord.bind(internals);
-    vi.spyOn(internals, "classifySessionRecord").mockImplementationOnce(async (...args) => {
-      const result = await classify(...args);
-      const completed = JSON.parse(readFileSync(path, "utf8")) as SessionRecord;
-      writeFileSync(path, JSON.stringify({ ...completed, status: "killed" }));
-      return result;
-    });
-    const raced = await poll({ since: first.nextCursor });
-    expect(raced.entries.map((entry) => [entry.kind, entry.to])).toEqual([["status", "killed"]]);
-    const next = await poll({ since: raced.nextCursor });
-    expect(next.entries.map((entry) => [entry.kind, entry.from, entry.to])).toEqual([
-      ["state", "stopped", "killed"],
-    ]);
-  });
-
-  it("does not settle a finalizer rebuild whose classified record differs from the file", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record());
-    await service.complete("api-1", { skipPrCheck: true, skipRuntimeTeardown: true });
-    await poll();
-    metadata.writeSession(TEST_DATA_DIR, {
-      ...metadata.readSession(TEST_DATA_DIR, "api-1")!,
-      updatedAt: "2026-03-18T10:05:00.000Z",
-    });
-    const path = join(TEST_DATA_DIR, "sessions", "api", "api-1.json");
-    const completedText = readFileSync(path, "utf8");
-    const internals = service as unknown as {
-      enrichWithClassified(...args: unknown[]): Promise<unknown>;
-      classifySessionRecord(...args: unknown[]): Promise<unknown>;
-    };
-    const enrich = internals.enrichWithClassified.bind(internals);
-    const classify = internals.classifySessionRecord.bind(internals);
-    // Killed before the finalizer read, restored before the rebuild's re-read.
-    vi.spyOn(internals, "enrichWithClassified").mockImplementationOnce(async (...args) => {
-      const result = await enrich(...args);
-      const completed = JSON.parse(completedText) as SessionRecord;
-      writeFileSync(path, JSON.stringify({ ...completed, status: "killed" }));
-      return result;
-    });
-    vi.spyOn(internals, "classifySessionRecord")
-      .mockImplementationOnce(classify)
-      .mockImplementationOnce(async (...args) => {
-        const result = await classify(...args);
-        writeFileSync(path, completedText);
-        return result;
-      });
-    const cursor = (await poll()).nextCursor;
-    expect(binding().store.observedState("api-1")).toBe("killed");
-    const next = await poll({ since: cursor });
-    expect(next.entries.map((entry) => [entry.kind, entry.from, entry.to])).toEqual([
-      ["state", "killed", "stopped"],
-    ]);
-  });
-
-  it("does not settle a row whose finalizer rebuild was dropped", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record());
-    await service.complete("api-1", { skipPrCheck: true, skipRuntimeTeardown: true });
-    await poll();
-    const path = join(TEST_DATA_DIR, "sessions", "api", "api-1.json");
-    const completedText = readFileSync(path, "utf8");
-    const completed = JSON.parse(completedText) as SessionRecord;
-    writeFileSync(path, JSON.stringify({ ...completed, status: "killed" }));
-    const internals = service as unknown as {
-      enrichWithClassified(...args: unknown[]): Promise<unknown>;
-      classifySessionRecord(...args: unknown[]): Promise<unknown>;
-      displaySlotsForSession(...args: unknown[]): unknown;
-    };
-    const enrich = internals.enrichWithClassified.bind(internals);
-    const classify = internals.classifySessionRecord.bind(internals);
-    const slots = internals.displaySlotsForSession.bind(internals);
-    let linksMoved = false;
-    vi.spyOn(internals, "displaySlotsForSession").mockImplementation((...args) =>
-      linksMoved
-        ? { links: [{ label: "task", url: "https://example.com/moved" }] }
-        : slots(...args),
-    );
-    // Classified killed, re-read completed: view and source disagree.
-    vi.spyOn(internals, "classifySessionRecord").mockImplementationOnce(async (...args) => {
-      const result = await classify(...args);
-      writeFileSync(path, completedText);
-      return result;
-    });
-    vi.spyOn(internals, "enrichWithClassified")
-      .mockImplementationOnce(async (...args) => {
-        const result = await enrich(...args);
-        linksMoved = true;
-        return result;
-      })
-      .mockImplementationOnce(async () => {
-        // The rebuild finds the record gone; it is back for the final listing.
-        rmSync(path);
-        listSessionsMock.mockImplementationOnce((dataDir: string) => {
-          writeFileSync(path, completedText);
-          return metadata.listSessions(dataDir);
-        });
-        throw new serviceModule.SessionResourceNotFoundError("Session not found: api-1");
-      });
-    const raced = await poll();
-    linksMoved = false;
-    expect(binding().store.observedState("api-1")).toBe("killed");
-    const next = await poll({ since: raced.nextCursor });
-    expect(next.entries.map((entry) => [entry.kind, entry.from, entry.to])).toEqual([
-      ["state", "killed", "stopped"],
-    ]);
-  });
-
-  it("drains running finalizer rebuilds before a failed rebuild fails the poll", async () => {
-    for (const id of ["a", "b"]) {
+  it("runs no session enrichment across transitions polls", async () => {
+    for (const id of ["run-1", "run-2", "run-3"])
       metadata.writeSession(TEST_DATA_DIR, record({ id }));
-      await service.complete(id, { skipPrCheck: true, skipRuntimeTeardown: true });
-    }
-    await poll();
-    for (const id of ["a", "b"])
-      metadata.writeSession(TEST_DATA_DIR, {
-        ...metadata.readSession(TEST_DATA_DIR, id)!,
-        updatedAt: "2026-03-18T10:05:00.000Z",
-      });
-    const internals = service as unknown as {
-      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
-    };
-    const enrich = internals.enrichWithClassified.bind(internals);
-    const calls = new Map<string, number>();
-    let release: (() => void) | undefined;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let heldDone = false;
-    vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (record, ...rest) => {
-      const call = (calls.get(record.id) ?? 0) + 1;
-      calls.set(record.id, call);
-      if (call === 1) {
-        const result = await enrich(record, ...rest);
-        // Unsettles the row so finalization rebuilds it.
-        metadata.writeSession(TEST_DATA_DIR, { ...record, updatedAt: "2026-03-18T10:06:00.000Z" });
-        return result;
-      }
-      if (record.id === "a") throw new Error("rebuild failed");
-      await held;
-      heldDone = true;
-      return enrich(record, ...rest);
-    });
-    let settled = false;
-    const outcome = poll().then(
-      () => "resolved",
-      (error: unknown) => (error instanceof Error ? error.message : String(error)),
-    );
-    void outcome.finally(() => {
-      settled = true;
-    });
-    try {
-      await vi.waitFor(() => expect(calls.get("b")).toBe(2));
-      for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
-      expect(settled).toBe(false);
-    } finally {
-      release?.();
-    }
-    expect(await outcome).toBe("rebuild failed");
-    expect(heldDone).toBe(true);
-  });
-
-  it("enriches a full refresh pass in parallel under the concurrency cap", async () => {
-    for (let index = 0; index < 10; index += 1)
-      metadata.writeSession(TEST_DATA_DIR, record({ id: `done-${index}`, status: "completed" }));
-    const internals = service as unknown as {
-      enrichWithClassified(...args: unknown[]): Promise<unknown>;
-    };
-    const original = internals.enrichWithClassified.bind(internals);
-    let active = 0;
-    let peak = 0;
-    vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (...args) => {
-      active += 1;
-      peak = Math.max(peak, active);
-      try {
-        return await original(...args);
-      } finally {
-        active -= 1;
-      }
-    });
-    await poll();
-    expect(peak).toBe(4);
-  });
-
-  it("re-enriches a settled terminal record whose file changes out of band after completion", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
-    const first = await poll();
-    expect(
-      first.entries.filter((entry) => entry.kind === "state").map((entry) => entry.to),
-    ).toEqual(["stopped"]);
+    for (const id of ["stop-1", "stop-2", "stop-3"])
+      metadata.writeSession(TEST_DATA_DIR, record({ id, status: "stopped" }));
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "done", status: "completed" }));
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "gone", status: "killed" }));
     const enrich = enrichedIds();
-    expect((await poll({ since: first.nextCursor })).entries).toEqual([]);
+    listSessionsMock.mockClear();
+    let cursor: string | undefined;
+    for (let run = 0; run < 5; run += 1) {
+      const page = await poll(cursor ? { since: cursor } : {});
+      cursor = page.nextCursor;
+    }
     expect(enrich.ids).toEqual([]);
-    // Bypasses writeSession and its transitions observer, as a manual edit does.
-    const path = join(TEST_DATA_DIR, "sessions", "api", "api-1.json");
-    const completed = JSON.parse(readFileSync(path, "utf8")) as SessionRecord;
-    writeFileSync(path, JSON.stringify({ ...completed, status: "running" }));
-    const page = await poll({ since: first.nextCursor });
-    expect(enrich.ids).toEqual(["api-1"]);
-    expect(page.entries.map((entry) => [entry.kind, entry.from, entry.to])).toEqual([
-      ["status", "completed", "running"],
-      ["state", "stopped", "working"],
-    ]);
+    expect(listSessionsMock).not.toHaveBeenCalled();
   });
 
-  it("re-enriches a settled terminal record after a record write", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+  it("publishes killed and completed state edges from the record write without enrichment", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "gone" }));
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "done" }));
     const cursor = (await poll()).nextCursor;
     const enrich = enrichedIds();
-    metadata.writeSession(
-      TEST_DATA_DIR,
-      record({ status: "killed", updatedAt: "2026-03-18T10:05:00.000Z" }),
-    );
-    await poll({ since: cursor });
-    expect(enrich.ids).toEqual(["api-1"]);
-    enrich.ids.length = 0;
-    await poll({ since: cursor });
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "gone", status: "killed" }));
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "done", status: "completed" }));
+    const page = await poll({ since: cursor, kinds: ["state"] });
+    expect(page.entries.map((entry) => [entry.sessionId, entry.to])).toEqual([
+      ["gone", "killed"],
+      ["done", "stopped"],
+    ]);
     expect(enrich.ids).toEqual([]);
   });
 
-  it("keeps cursor-poll enrichments and listings constant from N to 10N retained completed records", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record({ id: "live" }));
-    const measure = async (count: number) => {
-      for (let index = 0; index < count; index += 1)
-        metadata.writeSession(
-          TEST_DATA_DIR,
-          record({ id: `done-${count}-${index}`, status: "completed" }),
-        );
-      let page = await poll({ limit: 1000 });
-      while (page.hasMore) page = await poll({ since: page.nextCursor, limit: 1000 });
-      const head = page.nextCursor;
-      const listingStartedAt = realClock();
-      metadata.listSessions(TEST_DATA_DIR);
-      const listingMs = Number(realClock() - listingStartedAt) / 1e6;
-      const enrich = enrichedIds();
-      listSessionsMock.mockClear();
-      const samples: number[] = [];
-      for (let run = 0; run < 5; run += 1) {
-        const startedAt = realClock();
-        await poll({ since: head });
-        samples.push(Number(realClock() - startedAt) / 1e6);
-      }
-      enrich.restore();
-      samples.sort((left, right) => left - right);
-      return {
-        median: samples[2] as number,
-        listingMs,
-        enrichments: enrich.ids.length,
-        listings: listSessionsMock.mock.calls.length,
-      };
-    };
-    const small = await measure(200);
-    const large = await measure(1800);
-    for (const [label, result] of [
-      ["N=200", small],
-      ["10N=2000", large],
-    ] as const)
-      console.info(
-        `transitions cursor poll ${label} completed: median ${result.median.toFixed(1)} ms, ` +
-          `one listing ${result.listingMs.toFixed(1)} ms, ${result.enrichments} enrichments, ` +
-          `${result.listings} listings (5 polls)`,
+  it("publishes state edges for records that ended while the daemon was down on boot", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
+    const cursor = (await poll()).nextCursor;
+    service.dispose();
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    const module = await loadSessionServiceModule();
+    service = new module.SessionService("/tmp/spur.yaml", undefined, {
+      deferBackgroundLoops: true,
+    });
+    const enrich = enrichedIds();
+    const page = await poll({ since: cursor });
+    expect(page.entries.map((entry) => [entry.kind, entry.from, entry.to])).toEqual([
+      ["status", "running", "killed"],
+      ["state", "working", "killed"],
+    ]);
+    expect(enrich.ids).toEqual([]);
+  });
+
+  it("derives hook state with the classifier rule for errored, stale-parked and paused records", async () => {
+    const enrich = enrichedIds();
+    const cases = [
+      ["err", { status: "errored", error: "provider failed" }, "error"],
+      ["parked", { status: "stopped", stopReason: "stale_timeout" }, "stale"],
+      ["paused", { status: "stopped", stopReason: "manual_pause" }, "stopped"],
+    ] as const;
+    for (const [id, overrides, state] of cases) {
+      metadata.writeSession(TEST_DATA_DIR, record({ id, ...overrides }));
+      expect(binding().store.observedState(id)).toBe(state);
+    }
+    expect(enrich.ids).toEqual([]);
+    const entries = (await poll({ kinds: ["state"] })).entries.length;
+    for (const [id] of cases) await service.get(id);
+    expect((await poll({ kinds: ["state"], limit: 1000 })).entries).toHaveLength(entries);
+  });
+
+  it("keeps a transitions poll under 2 s with 500 records and 50 live, including the first poll after restart", async () => {
+    for (let index = 0; index < 450; index += 1)
+      metadata.writeSession(
+        TEST_DATA_DIR,
+        record({ id: `done-${index}`, status: index % 3 === 0 ? "killed" : "completed" }),
       );
-    // Only the live record is enriched; each poll lists the session store twice.
-    expect(small).toMatchObject({ enrichments: 5, listings: 10 });
-    expect(large).toMatchObject({ enrichments: 5, listings: 10 });
+    for (let index = 0; index < 50; index += 1)
+      metadata.writeSession(TEST_DATA_DIR, record({ id: `live-${index}` }));
+    const timed = async () => {
+      const startedAt = realClock();
+      await poll({ limit: 1 });
+      return Number(realClock() - startedAt) / 1e6;
+    };
+    let enrich = enrichedIds();
+    listSessionsMock.mockClear();
+    const samples = [await timed(), await timed(), await timed()].sort((a, b) => a - b);
+    const median = samples[1] as number;
+    expect(enrich.ids).toEqual([]);
+    expect(listSessionsMock).not.toHaveBeenCalled();
+    enrich.restore();
+    service.dispose();
+    const module = await loadSessionServiceModule();
+    service = new module.SessionService("/tmp/spur.yaml", undefined, {
+      deferBackgroundLoops: true,
+    });
+    enrich = enrichedIds();
+    listSessionsMock.mockClear();
+    const afterRestart = await timed();
+    console.info(
+      `transitions poll median ${median.toFixed(1)} ms, first after restart ${afterRestart.toFixed(1)} ms`,
+    );
+    expect(enrich.ids).toEqual([]);
+    expect(listSessionsMock).not.toHaveBeenCalled();
+    expect(median).toBeLessThan(2000);
+    expect(afterRestart).toBeLessThan(2000);
   }, 120_000);
 
-  it("passes a resolved Claude account list, not a promise, to classification during a strict refresh", async () => {
+  it("fires a killed state subscription and logs the transition from an out-of-band record write", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
-    const accounts = [{ id: "acct-1", authenticated: true }];
-    vi.spyOn(
-      service as unknown as { computeClaudeAccountsView(): Promise<unknown> },
-      "computeClaudeAccountsView",
-    ).mockResolvedValue(accounts);
-    const enrich = vi.spyOn(
-      service as unknown as { enrichWithClassified(...args: unknown[]): Promise<unknown> },
-      "enrichWithClassified",
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "subscriber" }));
+    await service.get("api-1");
+    const subscriber = await service.get("subscriber");
+    const sent = vi.spyOn(service, "send").mockResolvedValue(subscriber);
+    service.subscribeToSessionStates("subscriber", {
+      targetSessionId: "api-1",
+      states: ["killed"],
+    });
+    const enrich = enrichedIds();
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    await vi.waitFor(() =>
+      expect(sent).toHaveBeenCalledWith(
+        "subscriber",
+        expect.objectContaining({ message: expect.stringContaining("api-1") }),
+      ),
     );
-    await poll();
-    expect(enrich).toHaveBeenCalled();
-    for (const call of enrich.mock.calls) expect(call[1]).toEqual(accounts);
+    expect(
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          entry.event === "session.state.transition" &&
+          entry.sessionId === "api-1" &&
+          entry.details.toState === "killed",
+      ),
+    ).toHaveLength(1);
+    expect(enrich.ids).toEqual([]);
   });
 
-  it("observes a structured reset on the first poll and projects identical GET/full-list/dashboard markers", async () => {
+  it("observes a structured reset on the first read and projects identical GET/full-list/dashboard markers", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     const reset = "2026-03-18T11:00:00.000Z";
     evidence("working", reset);
+    await service.get("api-1");
     const page = await poll();
     expect(page.entries.find((entry) => entry.kind === "state")).toMatchObject({
       to: "rate_limited",
@@ -703,11 +450,13 @@ describe("session transitions service", () => {
   it("retains unknown-to-known same-state refinements and clears an obsolete reset on renewed unknown evidence", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     evidence("working", undefined, true);
+    await service.get("api-1");
     let page = await poll();
     expect(page.entries.find((entry) => entry.to === "rate_limited")).not.toHaveProperty(
       "rateLimitResetAt",
     );
     evidence("working", "2026-03-18T10:06:00.000Z");
+    await service.get("api-1");
     page = await poll({ since: page.nextCursor });
     expect(page.entries).toHaveLength(1);
     expect(page.entries[0]).toMatchObject({
@@ -716,8 +465,10 @@ describe("session transitions service", () => {
       rateLimitResetAt: "2026-03-18T10:06:00.000Z",
     });
     evidence("working", undefined, true);
+    await service.get("api-1");
     expect((await poll({ since: page.nextCursor })).entries).toEqual([]);
     vi.setSystemTime(new Date("2026-03-18T10:06:01.000Z"));
+    await service.get("api-1");
     const expired = await poll({ since: page.nextCursor });
     expect(expired.entries[0]).toMatchObject({ from: "rate_limited", to: "rate_limited" });
     expect(expired.entries[0]).not.toHaveProperty("rateLimitResetAt");
@@ -727,13 +478,16 @@ describe("session transitions service", () => {
   it("retains rapid rate-limit relapse without advancing the four-second clock, including pagination and restart", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     evidence("working", "2026-03-18T11:00:00.000Z");
+    await service.get("api-1");
     const first = await poll();
     evidence("working");
+    await service.get("api-1");
     const exited = await poll({ since: first.nextCursor });
     expect(exited.entries[0]).toMatchObject({ from: "rate_limited", to: "working" });
     expect(metadata.readSession(TEST_DATA_DIR, "api-1")).not.toHaveProperty("rateLimitedAt");
     expect(metadata.readSession(TEST_DATA_DIR, "api-1")).not.toHaveProperty("rateLimitResetAt");
     evidence("working", "2026-03-18T12:00:00.000Z");
+    await service.get("api-1");
     const relapse = await poll({ since: exited.nextCursor });
     expect(relapse.entries[0]).toMatchObject({
       from: "working",
@@ -768,6 +522,7 @@ describe("session transitions service", () => {
 
   it("publishes completion before a later cleanup failure and retains historical links after source deletion", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
     await poll();
     const internals = service as unknown as {
       cleanupTerminalTelegram(record: SessionRecord): Promise<void>;
@@ -832,66 +587,54 @@ describe("session transitions service", () => {
     expect((await service.get("member")).slots?.links).toEqual([task]);
   });
 
-  it("fails strict polls on a thrown detector or marker write and retries without losing the required edge", async () => {
+  it("keeps the required edge after a detector or marker failure in an ordinary read", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
     const cursor = (await poll()).nextCursor;
-    vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot").mockRejectedValueOnce(
-      new Error("probe failed"),
-    );
-    await expect(poll({ since: cursor })).rejects.toThrow("probe failed");
     evidence("working", "2026-03-18T11:00:00.000Z");
     writeSessionMock.mockImplementationOnce(() => {
       throw new Error("marker failed");
     });
-    await expect(poll({ since: cursor })).rejects.toThrow("marker failed");
-    expect((await poll({ since: cursor })).entries).toHaveLength(1);
+    await expect(service.get("api-1")).rejects.toThrow("marker failed");
+    expect(await service.get("api-1")).toMatchObject({ state: "rate_limited" });
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["rate_limited"]);
   });
 
-  it("reconciles a committed status after journal failure before acknowledging a successful poll", async () => {
+  it("commits a status edge and fires its subscription when a journal append fails", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "subscriber" }));
+    await service.get("api-1");
     const cursor = (await poll()).nextCursor;
-    const binding = (
-      service as unknown as {
-        transitionsBinding: {
-          store: { observeStatus(record: SessionRecord, links: unknown[]): void };
-        };
-      }
-    ).transitionsBinding;
-    vi.spyOn(binding.store, "observeStatus").mockImplementationOnce(() => {
-      throw new Error("journal failed");
+    const subscriber = await service.get("subscriber");
+    const sent = vi.spyOn(service, "send").mockResolvedValue(subscriber);
+    service.subscribeToSessionStates("subscriber", {
+      targetSessionId: "api-1",
+      states: ["killed"],
     });
+    const restore = failJournalAppends();
     expect(() => metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }))).toThrow(
-      "journal failed",
+      "journal append unavailable",
     );
     expect(metadata.readSession(TEST_DATA_DIR, "api-1")?.status).toBe("killed");
+    await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
+    expect(sent).toHaveBeenCalledWith(
+      "subscriber",
+      expect.objectContaining({ message: expect.stringContaining("api-1") }),
+    );
     expect(
-      (await poll({ since: cursor })).entries.find((entry) => entry.kind === "status"),
-    ).toMatchObject({ to: "killed" });
-  });
-
-  it("fails a poll on journal state append failure and retries with the persisted reset intact", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record());
-    const cursor = (await poll()).nextCursor;
-    const binding = (
-      service as unknown as {
-        transitionsBinding: {
-          store: {
-            observeState(record: SessionRecord, state: SessionState, links: unknown[]): void;
-          };
-        };
-      }
-    ).transitionsBinding;
-    vi.spyOn(binding.store, "observeState").mockImplementationOnce(() => {
-      throw new Error("append failed");
-    });
-    evidence("working", "2026-03-18T11:00:00.000Z");
-    await expect(poll({ since: cursor })).rejects.toThrow("append failed");
-    expect((await poll({ since: cursor })).entries).toEqual([
-      expect.objectContaining({
-        kind: "state",
-        to: "rate_limited",
-        rateLimitResetAt: "2026-03-18T11:00:00.000Z",
-      }),
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          entry.event === "session.state.transition" &&
+          entry.sessionId === "api-1" &&
+          entry.details.toState === "killed",
+      ),
+    ).toHaveLength(1);
+    restore();
+    expect((await poll({ since: cursor })).entries.map((entry) => [entry.kind, entry.to])).toEqual([
+      ["status", "killed"],
+      ["state", "killed"],
     ]);
   });
 
@@ -931,39 +674,19 @@ describe("session transitions service", () => {
     );
   });
 
-  it("rejects a strict refresh held across dataDir reload without publishing old snapshots to the new stream", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record());
-    const internals = sessionServiceInternals(service);
-    let release: (() => void) | undefined;
-    const waiting = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const original = internals.readRuntimeSnapshot.bind(internals);
-    vi.spyOn(internals, "readRuntimeSnapshot").mockImplementationOnce(async (record) => {
-      await waiting;
-      return original(record);
-    });
-    const pending = poll();
-    const nextDir = join(TEST_DATA_DIR, "next");
-    service.applyConfig({ ...config, dataDir: nextDir }, []);
-    release?.();
-    await expect(pending).rejects.toThrow("data directory changed");
-    expect((await poll()).entries).toEqual([]);
-    expect(metadata.listSessions(nextDir)).toEqual([]);
-  });
-
   it.each([
-    ["get", "append"],
-    ["get", "checkpoint"],
-    ["list", "append"],
-    ["list", "checkpoint"],
-    ["dashboard", "append"],
-    ["dashboard", "checkpoint"],
+    ["get", "append", "journal append unavailable"],
+    ["get", "checkpoint", "journal checkpoint failed"],
+    ["list", "append", "journal append unavailable"],
+    ["list", "checkpoint", "journal checkpoint failed"],
+    ["dashboard", "append", "journal append unavailable"],
+    ["dashboard", "checkpoint", "journal checkpoint failed"],
   ] as const)(
-    "keeps %s and subscriptions available on %s journal failure while strict polls fail and retry",
-    async (read, failure) => {
+    "keeps %s and subscriptions available on %s journal failure while polls fail and retry",
+    async (read, failure, expected) => {
       metadata.writeSession(TEST_DATA_DIR, record());
       metadata.writeSession(TEST_DATA_DIR, record({ id: "subscriber" }));
+      await service.get("api-1");
       const cursor = (await poll()).nextCursor;
       const subscriber = await service.get("subscriber");
       const sent = vi.spyOn(service, "send").mockResolvedValue(subscriber);
@@ -971,21 +694,17 @@ describe("session transitions service", () => {
         targetSessionId: "api-1",
         states: ["rate_limited"],
       });
-      const store = (
-        service as unknown as {
-          transitionsBinding: {
-            store: {
-              observeState(record: SessionRecord, state: SessionState, links: unknown[]): void;
-              saveCheckpoint(): void;
-            };
-          };
-        }
-      ).transitionsBinding.store;
-      const fault =
-        failure === "append" ? vi.spyOn(store, "observeState") : vi.spyOn(store, "saveCheckpoint");
-      fault.mockImplementation(() => {
-        throw new Error(`journal ${failure} failed`);
-      });
+      let restore: () => void;
+      if (failure === "append") restore = failJournalAppends();
+      else {
+        const store = (
+          service as unknown as { transitionsBinding: { store: { saveCheckpoint(): void } } }
+        ).transitionsBinding.store;
+        const fault = vi.spyOn(store, "saveCheckpoint").mockImplementation(() => {
+          throw new Error(expected);
+        });
+        restore = () => fault.mockRestore();
+      }
       evidence("working", "2026-03-18T11:00:00.000Z");
       const view =
         read === "get"
@@ -1002,8 +721,8 @@ describe("session transitions service", () => {
         "subscriber",
         expect.objectContaining({ message: expect.stringContaining("api-1") }),
       );
-      await expect(poll({ since: cursor })).rejects.toThrow(`journal ${failure} failed`);
-      fault.mockRestore();
+      await expect(poll({ since: cursor })).rejects.toThrow(expected);
+      restore();
       const recovered = await poll({ since: cursor });
       expect(recovered.entries.filter((entry) => entry.sessionId === "api-1")).toEqual([
         expect.objectContaining({ kind: "state", from: "working", to: "rate_limited" }),
@@ -1099,38 +818,6 @@ describe("session transitions service", () => {
     expect(outcome).toBe("action journal unavailable");
   });
 
-  it.each(["runtime", "workspace"] as const)(
-    "rejects structured %s diagnostics in strict polls before retaining a false error",
-    async (probe) => {
-      metadata.writeSession(TEST_DATA_DIR, record());
-      const cursor = (await poll()).nextCursor;
-      const checkpointPath = join(TEST_DATA_DIR, "session-transitions", "checkpoint.json");
-      const before = readFileSync(checkpointPath, "utf8");
-      const runtime = vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot");
-      if (probe === "runtime")
-        runtime.mockResolvedValue({
-          runtimeAlive: false,
-          paneUsable: false,
-          processAlive: false,
-          probeUnresponsive: true,
-          diagnostic: "probe timed out",
-        });
-      else
-        probeWorkspaceMock.mockReturnValue({
-          exists: false,
-          missing: false,
-          diagnostic: "probe timed out",
-        });
-      await expect(poll({ since: cursor })).rejects.toThrow("probe timed out");
-      expect(metadata.readSession(TEST_DATA_DIR, "api-1")).not.toHaveProperty("error");
-      expect(readFileSync(checkpointPath, "utf8")).toBe(before);
-      expect(await service.get("api-1")).toMatchObject({ state: "error" });
-      runtime.mockRestore();
-      probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
-      expect((await poll({ since: cursor })).hasMore).toBe(false);
-    },
-  );
-
   it("accepts an empty but healthy runtime snapshot as an authoritative stopped state", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot").mockResolvedValue({
@@ -1139,99 +826,636 @@ describe("session transitions service", () => {
       processAlive: false,
       probeUnresponsive: false,
     });
+    await service.get("api-1");
     expect((await poll()).entries).toContainEqual(
       expect.objectContaining({ kind: "status", to: "stopped" }),
     );
   });
 
-  it("bypasses a cached alive runtime on the first strict poll while ordinary reads retain their cache", async () => {
+  it("logs and dispatches one state transition when a stopped record with stale rate-limit markers is enriched", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
-    const cursor = (await poll()).nextCursor;
-    const cachedAlive = {
-      runtimeAlive: true,
-      paneUsable: true,
-      processAlive: true,
-      probeUnresponsive: false,
-    };
-    const nowDead = {
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "subscriber" }));
+    await service.get("api-1");
+    const subscriber = await service.get("subscriber");
+    const sent = vi.spyOn(service, "send").mockResolvedValue(subscriber);
+    service.subscribeToSessionStates("subscriber", {
+      targetSessionId: "api-1",
+      states: ["stopped"],
+    });
+    const transitions = () =>
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.state.transition" && entry.sessionId === "api-1",
+      );
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({
+        status: "stopped",
+        rateLimitedAt: "2026-03-18T09:00:00.000Z",
+        rateLimitResetAt: "2026-03-18T09:30:00.000Z",
+      }),
+    );
+    await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
+    vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot").mockResolvedValue({
       runtimeAlive: false,
       paneUsable: false,
       processAlive: false,
       probeUnresponsive: false,
-    };
-    const snapshots = vi
-      .spyOn(sessionServiceInternals(service), "readRuntimeSnapshot")
-      .mockImplementation(async (_record, options) => (options?.fresh ? nowDead : cachedAlive));
-    expect(await service.get("api-1")).toMatchObject({ state: "working" });
-    expect(snapshots.mock.calls[0]?.[1]?.fresh).not.toBe(true);
-    const instant = Date.now();
-    const firstPoll = await poll({ since: cursor });
-    expect(firstPoll.entries).toContainEqual(
-      expect.objectContaining({ kind: "status", to: "stopped" }),
-    );
-    expect(snapshots.mock.calls[1]?.[1]?.fresh).toBe(true);
-    expect(Date.now()).toBe(instant);
+    });
+    await service.get("api-1");
+    expect(metadata.readSession(TEST_DATA_DIR, "api-1")).not.toHaveProperty("rateLimitedAt");
+    await vi.waitFor(() => expect(transitions()).toHaveLength(1));
+    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+    expect(sent).toHaveBeenCalledTimes(1);
+    expect(transitions()).toHaveLength(1);
+    expect(transitions()[0]?.[1].details).toMatchObject({
+      fromState: "working",
+      toState: "stopped",
+    });
+    const history = (
+      service as unknown as { stateHistory: Map<string, { state: SessionState }[]> }
+    ).stateHistory.get("api-1");
+    expect(history?.map((entry) => entry.state)).toEqual(["working", "stopped"]);
   });
 
-  it("retries an unchanged terminal observation missing from the journal after an ordinary append failure", async () => {
-    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
-    const store = (
-      service as unknown as {
-        transitionsBinding: {
-          store: {
-            observeState(record: SessionRecord, state: SessionState, links: unknown[]): void;
-          };
-        };
-      }
-    ).transitionsBinding.store;
-    vi.spyOn(store, "observeState").mockImplementationOnce(() => {
-      throw new Error("terminal append failed");
+  it("publishes a running session's state edge from the background tick with no reads", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    const reads = [
+      vi.spyOn(service, "list"),
+      vi.spyOn(service, "get"),
+      vi.spyOn(service, "listSessionTransitions"),
+    ];
+    sessionServiceInternals(service).startDashboardCacheLoop();
+    await vi.advanceTimersByTimeAsync(2000);
+    await service.settleBackgroundSpawns();
+    expect(binding().store.observedState("api-1")).toBe("working");
+    evidence("working", "2026-03-18T11:00:00.000Z");
+    await vi.advanceTimersByTimeAsync(2000);
+    await service.settleBackgroundSpawns();
+    expect(binding().store.observedState("api-1")).toBe("rate_limited");
+    for (const read of reads) expect(read).not.toHaveBeenCalled();
+  });
+
+  const journalLines = () => {
+    const dir = join(TEST_DATA_DIR, "session-transitions");
+    return readdirSync(dir)
+      .filter((file) => file.endsWith(".jsonl"))
+      .reduce((total, file) => total + readFileSync(join(dir, file), "utf8").split("\n").length, 0);
+  };
+  const restart = async () => {
+    service.dispose();
+    const module = await loadSessionServiceModule();
+    service = new module.SessionService("/tmp/spur.yaml", undefined, {
+      deferBackgroundLoops: true,
     });
-    expect(await service.get("api-1")).toMatchObject({ state: "stopped" });
-    expect(await service.get("api-1")).toMatchObject({ state: "stopped" });
-    const page = await poll({ kinds: ["state"] });
-    expect(page.entries).toEqual([
-      expect.objectContaining({ sessionId: "api-1", from: null, to: "stopped" }),
+  };
+
+  it("appends no transitions entry on a restart with unchanged records", async () => {
+    const statuses = ["running", "stopped", "completed", "killed"] as const;
+    for (const status of statuses)
+      metadata.writeSession(TEST_DATA_DIR, record({ id: `s-${status}`, status }));
+    for (const status of statuses) await service.get(`s-${status}`);
+    const before = journalLines();
+    await restart();
+    for (const status of statuses) await service.get(`s-${status}`);
+    await service.list({ includeCompleted: true });
+    await sessionServiceInternals(service).runDashboardCacheTick();
+    expect(journalLines()).toBe(before);
+  });
+
+  it("yields exactly one terminal edge for a session killed before restart", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    const cursor = (await poll()).nextCursor;
+    await restart();
+    await service.get("api-1");
+    await service.list({ includeCompleted: true });
+    await sessionServiceInternals(service).runDashboardCacheTick();
+    const all = (await poll({ limit: 1000 })).entries.filter(
+      (entry) => entry.sessionId === "api-1",
+    );
+    expect(all.filter((entry) => entry.kind === "status" && entry.to === "killed")).toHaveLength(1);
+    expect(all.filter((entry) => entry.kind === "state" && entry.to === "killed")).toHaveLength(1);
+    expect((await poll({ since: cursor })).entries).toEqual([]);
+  });
+
+  it("keeps an observed error on a metadata-only write of a killed record with an unchanged diagnostic", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed", retainInList: true }));
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "subscriber" }));
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed: EACCES",
+    });
+    await service.list({ includeCompleted: true });
+    expect(binding().store.observedState("api-1")).toBe("error");
+    const subscriber = await service.get("subscriber");
+    const sent = vi.spyOn(service, "send").mockResolvedValue(subscriber);
+    service.subscribeToSessionStates("subscriber", {
+      targetSessionId: "api-1",
+      states: ["killed"],
+    });
+    const before = journalLines();
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({ status: "killed", retainInList: true, updatedAt: "2026-03-18T10:04:00.000Z" }),
+    );
+    for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+    expect(journalLines()).toBe(before);
+    expect(binding().store.observedState("api-1")).toBe("error");
+    expect(sent).not.toHaveBeenCalled();
+  });
+
+  it("repairs a state left behind a committed status at boot", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
+    const cursor = (await poll()).nextCursor;
+    vi.spyOn(
+      binding().store as unknown as { observeState(): void },
+      "observeState",
+    ).mockImplementationOnce(() => {
+      throw new Error("state append lost");
+    });
+    expect(() => metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }))).toThrow(
+      "state append lost",
+    );
+    expect(binding().store.observedState("api-1")).toBe("working");
+    await restart();
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed"]);
+  });
+
+  it("replays no state edge on restart for a completed record with a persistent workspace stat failure", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed: EACCES",
+    });
+    await service.list({ includeCompleted: true });
+    expect(binding().store.observedState("api-1")).toBe("error");
+    const before = journalLines();
+    const cursor = (await poll()).nextCursor;
+    await restart();
+    expect(journalLines()).toBe(before);
+    expect((await poll({ since: cursor })).entries).toEqual([]);
+    await sessionServiceInternals(service).repairBootKeptErrors();
+    await service.list({ includeCompleted: true });
+    expect((await poll({ since: cursor })).entries).toEqual([]);
+  });
+
+  it("publishes the recovery edge when a pause clears a stored error under a new diagnostic", async () => {
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({ status: "stopped", stopReason: "manual_pause", error: "agent failed" }),
+    );
+    expect(binding().store.observedState("api-1")).toBe("error");
+    const cursor = (await poll()).nextCursor;
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed: EACCES",
+    });
+    await service.pause("api-1");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toContain("stopped");
+  });
+
+  it("does not repair an old store's record after the data directory is rebound", async () => {
+    const diagnostic = { exists: false, missing: false, diagnostic: "workspace stat failed" };
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed", retainInList: true }));
+    probeWorkspaceMock.mockReturnValue(diagnostic);
+    await service.list({ includeCompleted: true });
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    await restart();
+    const nextDir = join(TEST_DATA_DIR, "next");
+    metadata.writeSession(nextDir, record({ status: "stopped", stopReason: "manual_pause" }));
+    const internals = service as unknown as {
+      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+    };
+    const original = internals.enrichWithClassified.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (...args) => {
+      await held;
+      return original(args[0], ...args.slice(1));
+    });
+    const repair = sessionServiceInternals(service).repairBootKeptErrors();
+    service.applyConfig({ ...config, dataDir: nextDir }, []);
+    release();
+    await repair;
+    expect(binding().store.observedState("api-1")).toBe("stopped");
+    expect((await poll({ kinds: ["state"] })).entries.map((entry) => entry.to)).toEqual([
+      "stopped",
     ]);
   });
 
-  it.each(["structured", "thrown"] as const)(
-    "rejects a %s confirmation runtime probe failure without advancing strict observations",
-    async (failure) => {
-      metadata.writeSession(TEST_DATA_DIR, record());
-      const cursor = (await poll()).nextCursor;
-      const checkpointPath = join(TEST_DATA_DIR, "session-transitions", "checkpoint.json");
-      const before = readFileSync(checkpointPath, "utf8");
-      const snapshots = vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot");
-      const dead = {
-        runtimeAlive: false,
-        paneUsable: false,
-        processAlive: false,
-        probeUnresponsive: false,
-      };
-      const failConfirmation = () => {
-        snapshots.mockReset().mockResolvedValueOnce(dead);
-        if (failure === "thrown")
-          snapshots.mockRejectedValue(new Error("confirmation probe timed out"));
-        else
-          snapshots.mockResolvedValue({
-            ...dead,
-            probeUnresponsive: true,
-            diagnostic: "confirmation probe timed out",
-          });
-      };
-      failConfirmation();
-      await expect(poll({ since: cursor })).rejects.toThrow("confirmation probe timed out");
-      expect(metadata.readSession(TEST_DATA_DIR, "api-1")).not.toHaveProperty("error");
-      expect(metadata.readSession(TEST_DATA_DIR, "api-1")?.status).toBe("running");
-      expect(readFileSync(checkpointPath, "utf8")).toBe(before);
-      failConfirmation();
-      expect(await service.get("api-1")).toMatchObject({ state: "error" });
-      expect(metadata.readSession(TEST_DATA_DIR, "api-1")?.error).toContain(
-        "confirmation probe timed out",
-      );
-      snapshots.mockRestore();
-      expect((await poll({ since: cursor })).hasMore).toBe(false);
-    },
-  );
+  it("runs the boot repair for the new store after a data-directory rebind", async () => {
+    const nextDir = join(TEST_DATA_DIR, "next");
+    const killed = record({ status: "killed" });
+    metadata.writeSession(nextDir, killed);
+    // The new store's checkpoint holds `error` for an ended row with no diagnostic.
+    const prior = new SessionTransitions(nextDir);
+    prior.observeStatus(killed, []);
+    prior.observeState(killed, "error", []);
+    (service as unknown as { backgroundLoopsStarted: boolean }).backgroundLoopsStarted = true;
+    service.applyConfig({ ...config, dataDir: nextDir }, []);
+    expect(binding().store.observedState("api-1")).toBe("error");
+    await service.settleBackgroundSpawns();
+    expect(binding().store.observedState("api-1")).toBe("killed");
+  });
+
+  it("keeps a boot repair running across a same-directory reload", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed",
+    });
+    await service.get("api-1");
+    await restart();
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const repair = sessionServiceInternals(service).repairBootKeptErrors();
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    service.applyConfig(config, []);
+    release();
+    await repair;
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed"]);
+  });
+
+  it("drops a repair when the state went error, killed, error again while it waited", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    const diagnostic = { exists: false, missing: false, diagnostic: "workspace stat failed" };
+    probeWorkspaceMock.mockReturnValue(diagnostic);
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("error");
+    await restart();
+    const cursor = (await poll()).nextCursor;
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const repair = sessionServiceInternals(service).repairBootKeptErrors();
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("killed");
+    probeWorkspaceMock.mockReturnValue(diagnostic);
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("error");
+    release();
+    await repair;
+    expect(binding().store.observedState("api-1")).toBe("error");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed", "error"]);
+  });
+
+  it("drops a repair whose observed error was already replaced by a list", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed",
+    });
+    await service.list({ includeCompleted: true });
+    expect(binding().store.observedState("api-1")).toBe("error");
+    await restart();
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const repair = sessionServiceInternals(service).repairBootKeptErrors();
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    await service.list({ includeCompleted: true });
+    expect(binding().store.observedState("api-1")).toBe("stopped");
+    release();
+    await repair;
+    expect(binding().store.observedState("api-1")).toBe("stopped");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["stopped"]);
+  });
+
+  it("repairs a boot-kept error on a killed record once the diagnostic is gone", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed", retainInList: true }));
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed: EACCES",
+    });
+    await service.list({ includeCompleted: true });
+    expect(binding().store.observedState("api-1")).toBe("error");
+    // Hidden ended row: no list or sweep revisits it.
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    const cursor = (await poll()).nextCursor;
+    await restart();
+    expect(binding().store.observedState("api-1")).toBe("error");
+    await sessionServiceInternals(service).repairBootKeptErrors();
+    expect(binding().store.observedState("api-1")).toBe("killed");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed"]);
+  });
+
+  it("classifies the latest record when a queued snapshot predates a kill", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "stopped", stopReason: "manual_pause" }));
+    await service.get("api-1");
+    const cursor = (await poll()).nextCursor;
+    // The list snapshots its records, then waits on the accounts read before its
+    // jobs run; the kill lands in that gap.
+    const internals = service as unknown as {
+      computeClaudeAccountsView(): Promise<unknown>;
+    };
+    const original = internals.computeClaudeAccountsView.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "computeClaudeAccountsView").mockImplementationOnce(async () => {
+      await held;
+      return original();
+    });
+    const listing = service.list({ includeCompleted: true });
+    await vi.waitFor(() => expect(internals.computeClaudeAccountsView).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed", retainInList: true }));
+    release();
+    await listing;
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed"]);
+  });
+
+  it("leaves the status epoch alone on a field-only write right after boot", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await restart();
+    const epochs = (service as unknown as { statusEpochs: Map<string, number> }).statusEpochs;
+    const before = epochs.get("api-1") ?? 0;
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({ updatedAt: "2026-03-18T10:04:00.000Z", agentSessionId: "a-1" }),
+    );
+    expect(epochs.get("api-1") ?? 0).toBe(before);
+  });
+
+  it("prunes seeded last written statuses of removed sessions", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "gone", status: "completed" }));
+    await restart();
+    const internals = service as unknown as {
+      lastWrittenStatuses: Map<string, string>;
+      pruneFullViewCache(listedIds: ReadonlySet<string>): void;
+    };
+    expect([...internals.lastWrittenStatuses.keys()].sort()).toEqual(["api-1", "gone"]);
+    internals.pruneFullViewCache(new Set(["api-1"]));
+    expect([...internals.lastWrittenStatuses.keys()]).toEqual(["api-1"]);
+  });
+
+  it("counts a status change after a failed journal append", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    const epochs = (service as unknown as { statusEpochs: Map<string, number> }).statusEpochs;
+    const before = epochs.get("api-1") ?? 0;
+    const restore = failJournalAppends();
+    expect(() =>
+      metadata.writeSession(
+        TEST_DATA_DIR,
+        record({ status: "stopped", stopReason: "manual_pause" }),
+      ),
+    ).toThrow("journal append unavailable");
+    restore();
+    metadata.writeSession(TEST_DATA_DIR, record());
+    expect(epochs.get("api-1")).toBe(before + 2);
+  });
+
+  it("publishes no stale state when a pause and resume overlap a rate-limit clear classification", async () => {
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({
+        rateLimitedAt: "2026-03-18T10:00:00.000Z",
+        rateLimitResetAt: "2026-03-18T11:00:00.000Z",
+      }),
+    );
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      classifySessionRecord(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.classifySessionRecord.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "classifySessionRecord").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await held;
+      return result;
+    });
+    const clearing = service.clearRateLimit("api-1", true, "cli");
+    await vi.waitFor(() => expect(internals.classifySessionRecord).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "stopped", stopReason: "manual_pause" }));
+    metadata.writeSession(TEST_DATA_DIR, record());
+    release();
+    await clearing;
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["stopped"]);
+  });
+
+  it("keeps the killed state edge when a rate-limit clear classification outlives a kill", async () => {
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({
+        rateLimitedAt: "2026-03-18T10:00:00.000Z",
+        rateLimitResetAt: "2026-03-18T11:00:00.000Z",
+      }),
+    );
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      classifySessionRecord(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.classifySessionRecord.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "classifySessionRecord").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await held;
+      return result;
+    });
+    const clearing = service.clearRateLimit("api-1", true, "cli");
+    await vi.waitFor(() => expect(internals.classifySessionRecord).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    release();
+    await clearing;
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "session.rate_limit.cleared" && entry.sessionId === "api-1",
+      ),
+    ).toBe(true);
+    expect(binding().store.observedState("api-1")).toBe("killed");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed"]);
+  });
+
+  it("publishes no stale state when a pause and resume leave the status unchanged during a read", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const stale = service.get("api-1").catch(() => undefined);
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "stopped", stopReason: "manual_pause" }));
+    metadata.writeSession(TEST_DATA_DIR, record());
+    evidence("working", "2026-03-18T11:00:00.000Z");
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("rate_limited");
+    release();
+    await stale;
+    expect(binding().store.observedState("api-1")).toBe("rate_limited");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to).at(-1),
+    ).toBe("rate_limited");
+  });
+
+  it("publishes no stale stopped state when a completed row is reopened during a dashboard build", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("stopped");
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const pending = sessionServiceInternals(service)
+      .enrichDashboard(record({ status: "completed" }))
+      .catch(() => undefined);
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
+    expect(binding().store.observedState("api-1")).toBe("working");
+    release();
+    await pending;
+    expect(binding().store.observedState("api-1")).toBe("working");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["working"]);
+  });
+
+  it("keeps the killed state edge when a dashboard build that started before the kill resumes after it", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    const pending = sessionServiceInternals(service)
+      .enrichDashboard(record())
+      .catch(() => undefined);
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    release();
+    await pending;
+    expect(binding().store.observedState("api-1")).toBe("killed");
+    const states = (await poll({ since: cursor, kinds: ["state"] })).entries.map(
+      (entry) => entry.to,
+    );
+    expect(states).toEqual(["killed"]);
+  });
+
+  it("keeps the killed state edge when a read that started before the kill resumes after it", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await service.get("api-1");
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      sidecarViews(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.sidecarViews.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "sidecarViews").mockImplementationOnce(async (...args) => {
+      await held;
+      return original(...args);
+    });
+    evidence("waiting");
+    const pending = service.get("api-1").catch(() => undefined);
+    await vi.waitFor(() => expect(internals.sidecarViews).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    release();
+    await pending;
+    expect(binding().store.observedState("api-1")).toBe("killed");
+    const states = (await poll({ since: cursor, kinds: ["state"] })).entries.map(
+      (entry) => entry.to,
+    );
+    expect(states.at(-1)).toBe("killed");
+  });
 });
