@@ -18,7 +18,7 @@ import * as sessionArtifacts from "../../src/session-artifacts.js";
 import { createTempDir } from "../helpers/common.js";
 
 vi.mock("../../src/session-artifacts.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/session-artifacts.js")>();
+  const actual = await importOriginal<typeof sessionArtifacts>();
   return { ...actual, readArtifactInDir: vi.fn(actual.readArtifactInDir) };
 });
 

@@ -7,6 +7,7 @@ import {
   type ArtifactSortState,
 } from "@/components/ArtifactList";
 import { SECTION_CLASS, SECTION_HEADING_CLASS } from "@/components/cron-job-classes";
+import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import {
   clearCronStorage,
@@ -136,15 +137,19 @@ export function CronStorageSection({
       <div className="flex min-h-7 items-center justify-between gap-3">
         <div className="flex min-w-0 items-baseline gap-3">
           <h3 className={SECTION_HEADING_CLASS}>Storage</h3>
-          <span className={`truncate ${SECONDARY_TEXT}`}>
-            {view === null
-              ? load.status === "pending"
-                ? "Loading"
-                : null
-              : empty
+          {view === null ? (
+            load.status === "pending" ? (
+              <span aria-label="Loading storage" className={`flex ${SECONDARY_TEXT}`} role="status">
+                <Spinner className="h-3 w-3" strokeWidth={1.5} />
+              </span>
+            ) : null
+          ) : (
+            <span className={`truncate ${SECONDARY_TEXT}`}>
+              {empty
                 ? "Empty"
                 : `${countText(view.files.length, "file")} · ${formatBytes(view.totalBytes)}`}
-          </span>
+            </span>
+          )}
         </div>
         {view === null ? null : confirming ? (
           <div className="flex items-center gap-2" key="confirm">
