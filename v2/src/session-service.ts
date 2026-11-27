@@ -30922,12 +30922,20 @@ export class SessionService {
     return (await this.assembleDashboard(session))?.view;
   }
 
+  // The one fence for a classification that outlived its record: the write hook
+  // already published the terminal edge, so the in-hand state must not be
+  // journaled after it. Callers reclassify the latest record instead.
+  private endedSinceClassification(latest: SessionRecord | null, inputTerminal: boolean): boolean {
+    return latest !== null && isTerminalSessionStatus(latest.status) && !inputTerminal;
+  }
+
   private async assembleDashboard(
     session: SessionRecord,
   ): Promise<
     { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
   > {
     const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
+    const inputTerminal = isTerminalSessionStatus(session.status);
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
@@ -30947,9 +30955,12 @@ export class SessionService {
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
     const hasServiceIssues = await this.hasServiceIssues(session);
-    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
-      const current = readSession(this.config.dataDir, session.id);
-      return current ? this.assembleDashboard(current) : undefined;
+    const latest = readSession(this.config.dataDir, session.id);
+    if (
+      (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
+      this.endedSinceClassification(latest, inputTerminal)
+    ) {
+      return latest ? this.assembleDashboard(latest) : undefined;
     }
     const reported = this.withReportingError(session);
     const reportingConsistent = isDeepStrictEqual(reported, session);
@@ -31399,7 +31410,7 @@ export class SessionService {
     const latest = readSession(this.config.dataDir, session.id);
     if (
       (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
-      (latest && isTerminalSessionStatus(latest.status) && !inputTerminal)
+      this.endedSinceClassification(latest, inputTerminal)
     ) {
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
       return this.enrichWithClassified(latest, claudeAccounts, sessionBatch, stillCurrent);
