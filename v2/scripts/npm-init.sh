@@ -230,7 +230,12 @@ elif [[ "$TAILSCALE" != "off" ]]; then
   elif [[ "$ts_up" -eq 1 ]]; then
     sed -i "s/^Environment=WEB_HOST=.*/Environment=WEB_HOST=127.0.0.1,$ts_ip/" "$UNIT_DIR/spur-web.service"
     if [[ "$TAILSCALE" == "install" ]]; then
-      tailscale_result="$tailscale_install_result, bound"
+      # With --no-start the running web process keeps its old listener.
+      if [[ "$NO_START" -eq 1 ]]; then
+        tailscale_result="$tailscale_install_result, bound on next start"
+      else
+        tailscale_result="$tailscale_install_result, bound"
+      fi
     else
       tailscale_result="kept"
     fi

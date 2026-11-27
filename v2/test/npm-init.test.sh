@@ -307,7 +307,7 @@ grep -q '^Environment=WEB_HOST=127\.0\.0\.1,100\.64\.11\.22$' "$UNIT_DIR/spur-we
 grep -qi "unexpected curl invocation" "$OUT_FILE" &&
   fail "npm-init.sh invoked curl even though tailscale was already installed"
 assert_out "$OUT_FILE" "npm-init:   web UI: 127.0.0.1,100.64.11.22:5555"
-assert_out "$OUT_FILE" "npm-init:   Tailscale: already installed, bound"
+assert_out "$OUT_FILE" "npm-init:   Tailscale: already installed, bound on next start"
 assert_out "$OUT_FILE" "npm-init:   linger: already enabled"
 assert_no_log "$FAKE_BIN" sudo
 if grep -q -- 'enable-linger' "$FAKE_BIN/../loginctl.log"; then
@@ -716,6 +716,19 @@ assert_out "$OUT_FILE" "npm-init:   Tailscale: not found, bind skipped"
 assert_out "$OUT_FILE" "npm-init: info: Tailscale is not installed; web UI listens on 127.0.0.1 only when spur-web next starts. To restore the tailnet bind: spur init --tailscale"
 echo "npm-init.test.sh: prior-release-handoff scenario OK"
 
+# install-bound-started: services restart, so the tailnet bind is live.
+new_isolated_scenario install-bound-started
+write_up_tailscale_stub
+rm -f "$FAKE_BIN/sleep"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_BIN/sleep"
+printf '#!/usr/bin/env bash\necho 200\n' >"$FAKE_BIN/curl"
+chmod +x "$FAKE_BIN/sleep" "$FAKE_BIN/curl"
+run_isolated_init --install-tailscale
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "install-bound-started exited $rc"; }
+assert_out "$OUT_FILE" "npm-init:   Tailscale: already installed, bound"
+refute_out "$OUT_FILE" "bound on next start"
+echo "npm-init.test.sh: install-bound-started scenario OK"
+
 # install-not-up-started: --install-tailscale with Tailscale down and services restarted.
 new_isolated_scenario install-not-up-started
 rm -f "$FAKE_BIN/sleep"
@@ -803,7 +816,7 @@ TS_STUB="$FAKE_BIN/tailscale" run_isolated_init --no-start --install-tailscale
 grep -q 'tailscale.com/install.sh' "$FAKE_BIN/../curl.log" || fail "--install-tailscale must run the install script"
 grep -q '^Environment=WEB_HOST=127\.0\.0\.1,100\.64\.11\.22$' "$UNIT_DIR/spur-web.service" ||
   fail "installed Tailscale must bind the tailnet IP"
-assert_out "$OUT_FILE" "npm-init:   Tailscale: installed, bound"
+assert_out "$OUT_FILE" "npm-init:   Tailscale: installed, bound on next start"
 assert_out "$OUT_FILE" "npm-init:   web UI: 127.0.0.1,100.64.11.22:5555"
 echo "npm-init.test.sh: opt-in-install-ok scenario OK"
 
