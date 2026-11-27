@@ -938,6 +938,33 @@ describe("session transitions service", () => {
     expect((await poll({ since: cursor })).entries).toEqual([]);
   });
 
+  it("keeps an observed error on a metadata-only write of a killed record with an unchanged diagnostic", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed", retainInList: true }));
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "subscriber" }));
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed: EACCES",
+    });
+    await service.list({ includeCompleted: true });
+    expect(binding().store.observedState("api-1")).toBe("error");
+    const subscriber = await service.get("subscriber");
+    const sent = vi.spyOn(service, "send").mockResolvedValue(subscriber);
+    service.subscribeToSessionStates("subscriber", {
+      targetSessionId: "api-1",
+      states: ["killed"],
+    });
+    const before = journalLines();
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({ status: "killed", retainInList: true, updatedAt: "2026-03-18T10:04:00.000Z" }),
+    );
+    for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+    expect(journalLines()).toBe(before);
+    expect(binding().store.observedState("api-1")).toBe("error");
+    expect(sent).not.toHaveBeenCalled();
+  });
+
   it("repairs a state left behind a committed status at boot", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     await service.get("api-1");

@@ -251,6 +251,42 @@ describe("full-view list cache", () => {
     expect(calls).toBe(1);
   });
 
+  it("stops queued lifecycle rebuilds inside each callback when the request signal aborts", async () => {
+    writeFleet(0, 12);
+    const internals = service as unknown as {
+      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+    };
+    const { lifecycle } = sessionServiceInternals(service);
+    for (let index = 0; index < 12; index += 1)
+      lifecycle.settle(
+        lifecycle.begin("restore", [`run-${index}`]),
+        true,
+        () => "succeeded",
+        () => true,
+      );
+    const original = internals.enrichWithClassified.bind(internals);
+    const controller = new AbortController();
+    let calls = 0;
+    vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (record, ...rest) => {
+      calls += 1;
+      if (calls > 12) controller.abort();
+      const result = await original(record, ...rest);
+      // First pass: move every row so finalization rebuilds all twelve.
+      if (calls <= 12)
+        metadata.writeSession(TEST_DATA_DIR, { ...record, updatedAt: "2026-03-18T10:04:00.000Z" });
+      return result;
+    });
+    logSpurEventMock.mockClear();
+    await expect(service.list({ signal: controller.signal })).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toBe(13);
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.list.enrich_failed"),
+    ).toBe(false);
+  });
+
   it("routes lifecycle rebuilds through the shared gate", async () => {
     writeFleet(0, 2);
     const internals = service as unknown as {

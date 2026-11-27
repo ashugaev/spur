@@ -6765,9 +6765,20 @@ export class SessionService {
           }
         });
       };
+      // The one state rule for hook and boot. An unchanged status keeps an
+      // observed `error`: a workspace diagnostic is better evidence than the
+      // status-derived state. Any other divergence is a lost append and gets
+      // repaired. Running records publish nothing here.
+      const writeDerivedState = (record: SessionRecord): SessionState | undefined => {
+        if (this.isLiveSessionRecord(record)) return undefined;
+        const keepObserved =
+          store.observedStatus(record.id) === record.status &&
+          store.observedState(record.id) === "error";
+        return keepObserved ? undefined : statusDerivedState(record);
+      };
       binding.unregister = observeSessionWrites(dataDir, (record) => {
         if (this.transitionsBinding !== binding) return;
-        const derived = this.isLiveSessionRecord(record) ? undefined : statusDerivedState(record);
+        const derived = writeDerivedState(record);
         try {
           publishEdges(record, derived);
         } finally {
@@ -6787,18 +6798,7 @@ export class SessionService {
         }
       });
       this.transitionsBinding = binding;
-      for (const record of listSessions(dataDir)) {
-        // An unchanged status keeps an observed `error`: a workspace diagnostic is
-        // better evidence than the status-derived state. Any other divergence is
-        // a lost append and gets repaired.
-        const keepObserved =
-          store.observedStatus(record.id) === record.status &&
-          store.observedState(record.id) === "error";
-        publishEdges(
-          record,
-          this.isLiveSessionRecord(record) || keepObserved ? undefined : statusDerivedState(record),
-        );
-      }
+      for (const record of listSessions(dataDir)) publishEdges(record, writeDerivedState(record));
     }
     const removeIds = new Set(options.unconfiguredToRemove ?? []);
     mutateConfigRegistry(this.config.dataDir, (current) => ({
@@ -7235,6 +7235,7 @@ export class SessionService {
           return undefined;
         // List callers (lastBuild) drop the one row that cannot be rebuilt
         // instead of failing the whole listing; refuse callers keep the throw.
+        if (options.signal?.aborted) throw error;
         if (options.onExhausted === "lastBuild" && !(error instanceof SessionLifecycleError)) {
           this.logListEnrichFailed(record.id, error);
           return undefined;
@@ -13075,7 +13076,10 @@ export class SessionService {
     const views = await this.finalizeLifecycleRows(
       rows.filter((row) => row !== undefined),
       (record, listing) =>
-        this.fullListGate.run(() => this.enrichWithClassified(record, undefined, listing)),
+        this.fullListGate.run(() => {
+          options?.signal?.throwIfAborted();
+          return this.enrichWithClassified(record, undefined, listing);
+        }),
       { includePending: true, onExhausted: "lastBuild", signal: options?.signal },
     );
     for (const view of views) {
