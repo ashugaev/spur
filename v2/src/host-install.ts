@@ -1809,15 +1809,23 @@ const NPM_INIT_TAILSCALE_FLAGS: Record<NpmInitTailscaleMode, string> = {
 };
 
 // Runs before any host write: the Tailscale installer elevates itself, so a
-// host without root, sudo, or (without a terminal) passwordless sudo fails here.
+// host without root, without sudo authorization (`sudo -v` on a terminal), or
+// without passwordless sudo (no terminal) fails here.
 function assertTailscaleInstallPossible(): void {
   if (process.getuid?.() === 0) return;
-  if (findExecutableOnPath("sudo") === null) {
-    throw new Error(
-      "npm-init: --tailscale needs root or sudo to install Tailscale; no changes made. Install it manually (https://tailscale.com/download), then re-run: spur init --tailscale",
-    );
+  const noSudo = new Error(
+    "npm-init: --tailscale needs root or sudo to install Tailscale; no changes made. Install it manually (https://tailscale.com/download), then re-run: spur init --tailscale",
+  );
+  if (findExecutableOnPath("sudo") === null) throw noSudo;
+  if (process.stdin.isTTY) {
+    try {
+      execFileSync("sudo", ["-v"], { stdio: "inherit" });
+    } catch {
+      throw noSudo;
+    }
+    return;
   }
-  if (!process.stdin.isTTY && tryExec("sudo", ["-n", "true"]) === undefined) {
+  if (tryExec("sudo", ["-n", "true"]) === undefined) {
     throw new Error(
       "npm-init: --tailscale needs passwordless sudo when run without a terminal; no changes made. Run spur init --tailscale from a terminal, or install Tailscale manually (https://tailscale.com/download) and re-run.",
     );

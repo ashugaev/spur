@@ -208,10 +208,19 @@ describe("runNpmInit --tailscale install preflight", () => {
     expect(execFileSyncCalls.filter((call) => call.command === "bash")).toHaveLength(1);
   });
 
-  it("makes no sudo call when sudo is present and a terminal exists", () => {
+  it("authorizes with sudo -v when sudo is present and a terminal exists", () => {
     setPath(["sudo"]);
     runNpmInit(cliEntrypoint, { tailscale: "install" });
-    expect(sudoCalls()).toHaveLength(0);
+    expect(sudoCalls().map((call) => call.args)).toEqual([["-v"]]);
+    expect(execFileSyncCalls.filter((call) => call.command === "bash")).toHaveLength(1);
+  });
+
+  it("throws before any write when sudo -v fails on a terminal", async () => {
+    setPath(["sudo"]);
+    failingCommand = "sudo";
+    expect(() => runNpmInit(cliEntrypoint, { tailscale: "install" })).toThrow(msgNoSudo);
+    expect(sudoCalls().map((call) => call.args)).toEqual([["-v"]]);
+    await expectNothingWritten();
   });
 
   it("makes no sudo call when Tailscale is already installed", () => {

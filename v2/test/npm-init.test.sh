@@ -26,6 +26,11 @@ VERIFY_PACKAGE_FILES_SRC="$HERE/../scripts/verify-package-files.sh"
 REQUIRED_FILES_LIST="$HERE/../required-package-files.txt"
 DEPLOY_WEB_UNIT="$HERE/../deploy/spur-web.npm.service"
 
+# The script derives its unit dir from XDG_CONFIG_HOME, falling back to
+# $HOME/.config. An inherited value would write units outside the fixture HOME,
+# so drop every XDG base-dir variable; scenarios then resolve under their HOME.
+unset XDG_CONFIG_HOME XDG_RUNTIME_DIR XDG_DATA_HOME
+
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
@@ -142,7 +147,7 @@ fail() {
 # host's real tailscale, curl and sudo unreachable.
 link_real_tools() {
   local fake_bin="$1" tool real
-  for tool in bash sh dirname sed grep install mkdir rm head tr cut tail seq cat chmod sleep journalctl; do
+  for tool in bash sh id dirname sed grep install mkdir rm head tr cut tail seq cat chmod sleep journalctl; do
     real="$(command -v "$tool" || true)"
     case "$real" in
       /*) ln -sf "$real" "$fake_bin/$tool" ;;
@@ -200,7 +205,7 @@ UNIT_DIR="$FAKE_HOME/.config/systemd/user"
 # Plan lines print before the summary, and the summary labels keep their order.
 assert_out "$OUT_FILE" "npm-init: plan (units, linger, services, Tailscale):"
 assert_out "$OUT_FILE" "npm-init:   install user units spur-daemon, spur-web, spur-mcp, spur-mcp-tunnel in $UNIT_DIR"
-assert_out "$OUT_FILE" "npm-init:   enable linger for $USER if allowed (best effort, no sudo): services keep running after logout and start at boot"
+assert_out "$OUT_FILE" "npm-init:   enable linger for $(id -un) if allowed (best effort, no sudo): services keep running after logout and start at boot"
 assert_out "$OUT_FILE" "npm-init:   leave services stopped (--no-start)"
 assert_out "$OUT_FILE" "npm-init:   agent integrations: skill links, Cursor hook"
 assert_out "$OUT_FILE" "npm-init:   Tailscale: skipped; web UI stays on 127.0.0.1 (pass --tailscale for private remote access)"
@@ -636,6 +641,7 @@ write_up_tailscale_stub() {
 #!/usr/bin/env bash
 echo "$*" >>"$(dirname "$0")/../tailscale.log"
 if [ "$1" = "ip" ]; then echo "100.64.11.22"; exit 0; fi
+if [ "$1" = "status" ]; then exit "${TS_STATUS_RC:-0}"; fi
 exit 1
 EOF
   chmod +x "$FAKE_BIN/tailscale"
@@ -656,14 +662,15 @@ assert_out "$OUT_FILE" "npm-init:   Tailscale: not requested"
 refute_out "$OUT_FILE" "npm-init: info: Tailscale"
 echo "npm-init.test.sh: default-no-install scenario OK"
 
-# hint-up: no flag, Tailscale already up. Only `ip -4` is called; the web UI
+# hint-up: no flag, Tailscale already up. Only `status` and `ip -4` are called; the web UI
 # stays on loopback and an info line names the one command that binds it.
 new_isolated_scenario hint-up
 write_up_tailscale_stub
 write_logging_stub "$FAKE_BIN" curl
 run_isolated_init --no-start
 [ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "hint-up exited $rc"; }
-[ "$(cat "$FAKE_BIN/../tailscale.log")" = "ip -4" ] || fail "hint mode may only call 'tailscale ip -4'"
+[ "$(cat "$FAKE_BIN/../tailscale.log" | tr '\n' '|')" = "status|ip -4|" ] ||
+  fail "hint mode may only call 'tailscale status' and 'tailscale ip -4'"
 assert_no_log "$FAKE_BIN" curl
 assert_no_log "$FAKE_BIN" sudo
 assert_loopback
@@ -700,6 +707,19 @@ assert_loopback
 assert_out "$OUT_FILE" "npm-init:   Tailscale: not up"
 assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI is now on 127.0.0.1 only. To restore the tailnet bind: sudo tailscale up, then spur init --tailscale"
 echo "npm-init.test.sh: keep-bind-down scenario OK"
+
+# keep-bind-stopped: `ip -4` still answers a cached 100.x after `tailscale
+# down`, but `status` fails => not up, no bind.
+new_isolated_scenario keep-bind-stopped
+write_up_tailscale_stub
+write_logging_stub "$FAKE_BIN" curl
+TS_STATUS_RC=1 run_isolated_init --no-start --keep-tailscale
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "keep-bind-stopped exited $rc"; }
+assert_loopback
+assert_out "$OUT_FILE" "npm-init:   Tailscale: not up"
+assert_out "$OUT_FILE" "npm-init: info: Tailscale is not up; web UI is now on 127.0.0.1 only."
+assert_no_log "$FAKE_BIN" curl
+echo "npm-init.test.sh: keep-bind-stopped scenario OK"
 
 # keep-bind-up: --keep-tailscale rebinds when Tailscale is up; never installs.
 new_isolated_scenario keep-bind-up
@@ -759,7 +779,7 @@ grep -q -- '--no-ask-password enable-linger' "$FAKE_BIN/../loginctl.log" ||
   fail "linger must be requested with --no-ask-password"
 assert_no_log "$FAKE_BIN" sudo
 assert_out "$OUT_FILE" "npm-init:   linger: not enabled"
-assert_out "$OUT_FILE" "npm-init: info: linger not enabled (loginctl refused); services stop at logout and do not start at boot. To enable: sudo loginctl enable-linger $USER"
+assert_out "$OUT_FILE" "npm-init: info: linger not enabled (loginctl refused); services stop at logout and do not start at boot. To enable: sudo loginctl enable-linger $(id -un)"
 echo "npm-init.test.sh: linger-refused scenario OK"
 
 # linger-show-fails: show-user exits 1 => treated as not enabled, enable runs.
@@ -769,5 +789,20 @@ SHOW_RC=1 run_isolated_init --no-start --no-tailscale
 assert_out "$OUT_FILE" "npm-init:   linger: enabled"
 refute_out "$OUT_FILE" "npm-init: info: linger"
 echo "npm-init.test.sh: linger-show-fails scenario OK"
+
+# user-unset: $USER unset must not abort the plan, and linger targets the
+# account from `id -un`.
+new_isolated_scenario user-unset
+saved_user="${USER:-}"
+unset USER
+LINGER_STATE="Linger=no" run_isolated_init --no-start --no-tailscale
+USER="$saved_user"
+export USER
+[ "$rc" -eq 0 ] || { cat "$OUT_FILE" >&2; fail "user-unset must exit 0, got $rc"; }
+assert_out "$OUT_FILE" "npm-init:   enable linger for $(id -un) if allowed"
+grep -q -- "enable-linger $(id -un)\$" "$FAKE_BIN/../loginctl.log" ||
+  fail "linger must target the id -un account"
+assert_out "$OUT_FILE" "npm-init:   linger: enabled"
+echo "npm-init.test.sh: user-unset scenario OK"
 
 echo "npm-init.test.sh: OK"

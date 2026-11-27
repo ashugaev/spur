@@ -11,6 +11,8 @@ set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+# The account linger applies to; `$USER` can be unset or stale.
+account="$(id -un)"
 NO_START=0
 EXPOSE_WEB=0
 WEB_PORT=""
@@ -127,7 +129,7 @@ fi
 
 echo "npm-init: plan (units, linger, services, Tailscale):"
 echo "npm-init:   install user units spur-daemon, spur-web, spur-mcp, spur-mcp-tunnel in $UNIT_DIR"
-echo "npm-init:   enable linger for $USER if allowed (best effort, no sudo): services keep running after logout and start at boot"
+echo "npm-init:   enable linger for $account if allowed (best effort, no sudo): services keep running after logout and start at boot"
 if [[ "$NO_START" -eq 1 ]]; then
   echo "npm-init:   leave services stopped (--no-start)"
 else
@@ -197,7 +199,11 @@ elif [[ "$TAILSCALE" != "off" ]]; then
   ts_ip=""
   if command -v tailscale >/dev/null 2>&1; then
     have_tailscale=1
-    ts_ip="$(tailscale ip -4 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    # `tailscale ip -4` can return a cached address after `tailscale down`;
+    # `tailscale status` exits non-zero when stopped or logged out.
+    if tailscale status >/dev/null 2>&1; then
+      ts_ip="$(tailscale ip -4 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    fi
   fi
 
   # Tailscale always assigns IPv4 from the CGNAT range 100.64.0.0/10, so
@@ -235,12 +241,12 @@ fi
 # Linger keeps the user services running after logout and starts them at boot.
 # Best effort and unprivileged: a refusal is an info line, never a failure.
 linger_result="enabled"
-linger_state="$(loginctl show-user "$USER" -p Linger 2>/dev/null || true)"
+linger_state="$(loginctl show-user "$account" -p Linger 2>/dev/null || true)"
 if [[ "$linger_state" == "Linger=yes" ]]; then
   linger_result="already enabled"
-elif ! loginctl --no-ask-password enable-linger "$USER" >/dev/null 2>&1; then
+elif ! loginctl --no-ask-password enable-linger "$account" >/dev/null 2>&1; then
   linger_result="not enabled"
-  info_lines+=("linger not enabled (loginctl refused); services stop at logout and do not start at boot. To enable: sudo loginctl enable-linger $USER")
+  info_lines+=("linger not enabled (loginctl refused); services stop at logout and do not start at boot. To enable: sudo loginctl enable-linger $account")
 fi
 
 web_port="$(grep -E '^Environment=PORT=' "$UNIT_DIR/spur-web.service" | tail -1 | cut -d= -f3-)"
