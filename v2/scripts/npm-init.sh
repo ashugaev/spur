@@ -140,7 +140,7 @@ tailscale_install_result="already installed"
 if [[ "$EXPOSE_WEB" -eq 0 && "$TAILSCALE" == "install" ]] && ! command -v tailscale >/dev/null 2>&1; then
   echo "npm-init: tailscale not found, installing (curl -fsSL https://tailscale.com/install.sh | sh)"
   curl -fsSL https://tailscale.com/install.sh | sh ||
-    die "Tailscale install failed; units not installed, web UI not started. Install Tailscale manually (https://tailscale.com/download), then re-run: spur init --tailscale"
+    die "Tailscale install failed; no units changed, running services left as they were, web UI not on the tailnet. Install Tailscale manually (https://tailscale.com/download), then re-run: spur init --tailscale"
   tailscale_install_result="installed"
 fi
 

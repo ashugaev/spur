@@ -725,7 +725,7 @@ chmod +x "$FAKE_BIN/curl"
 run_isolated_init --no-start --tailscale
 [ "$rc" -eq 1 ] || { cat "$OUT_FILE" >&2; fail "opt-in-install-fail must exit 1, got $rc"; }
 grep -q 'tailscale.com/install.sh' "$FAKE_BIN/../curl.log" || fail "--tailscale must run the install script"
-assert_out "$OUT_FILE" "npm-init: Tailscale install failed; units not installed, web UI not started. Install Tailscale manually (https://tailscale.com/download), then re-run: spur init --tailscale"
+assert_out "$OUT_FILE" "npm-init: Tailscale install failed; no units changed, running services left as they were, web UI not on the tailnet. Install Tailscale manually (https://tailscale.com/download), then re-run: spur init --tailscale"
 [ ! -e "$UNIT_DIR" ] || fail "units must not be written when the Tailscale install fails"
 refute_out "$OUT_FILE" "npm-init: summary:"
 echo "npm-init.test.sh: opt-in-install-fail scenario OK"
