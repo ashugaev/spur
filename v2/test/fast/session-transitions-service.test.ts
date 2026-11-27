@@ -1197,6 +1197,39 @@ describe("session transitions service", () => {
     ).toEqual(["killed"]);
   });
 
+  it("keeps the killed state edge when a rate-limit clear classification outlives a kill", async () => {
+    metadata.writeSession(
+      TEST_DATA_DIR,
+      record({
+        rateLimitedAt: "2026-03-18T10:00:00.000Z",
+        rateLimitResetAt: "2026-03-18T11:00:00.000Z",
+      }),
+    );
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      classifySessionRecord(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.classifySessionRecord.bind(internals);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(internals, "classifySessionRecord").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await held;
+      return result;
+    });
+    const clearing = service.clearRateLimit("api-1", true, "cli");
+    await vi.waitFor(() => expect(internals.classifySessionRecord).toHaveBeenCalled());
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "killed" }));
+    release();
+    await clearing;
+    expect(binding().store.observedState("api-1")).toBe("killed");
+    expect(
+      (await poll({ since: cursor, kinds: ["state"] })).entries.map((entry) => entry.to),
+    ).toEqual(["killed"]);
+  });
+
   it("keeps the killed state edge when a dashboard build that started before the kill resumes after it", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     await service.get("api-1");

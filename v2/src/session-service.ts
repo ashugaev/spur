@@ -7684,6 +7684,12 @@ export class SessionService {
           suppressMenuConfirmation: true,
           reconcileRuntime: false,
         });
+        // Killed or completed during the classification: its write hook already
+        // published the terminal edge.
+        const ended = readSession(this.config.dataDir, sessionId);
+        if (ended && this.endedSinceClassification(ended, false)) {
+          return { sessionId, state: statusDerivedState(ended), deliveryScheduled: false };
+        }
         const state = this.stabilizeState(sessionId, classified.state);
         await this.updateStateHistory(
           cleared,
