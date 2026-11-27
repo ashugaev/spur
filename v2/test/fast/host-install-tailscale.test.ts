@@ -180,7 +180,8 @@ describe("runNpmInit --tailscale install preflight", () => {
     failingCommand = null;
     if (originalHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = originalHome;
-    process.getuid = originalGetuid;
+    if (originalGetuid === undefined) delete process.getuid;
+    else process.getuid = originalGetuid;
     process.stdin.isTTY = originalIsTTY;
     await rm(fakeHome, { recursive: true, force: true });
   });
