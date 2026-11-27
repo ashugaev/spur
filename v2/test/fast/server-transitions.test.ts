@@ -146,7 +146,7 @@ describe("GET /sessions/transitions", () => {
     );
   });
 
-  it("fails the request on refresh or journal errors", async () => {
+  it("fails the request on journal errors", async () => {
     vi.spyOn(SessionService.prototype, "listSessionTransitions").mockRejectedValue(
       new Error("Journal append failed"),
     );

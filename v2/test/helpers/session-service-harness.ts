@@ -841,7 +841,6 @@ vi.mock("../../src/metadata.js", async (importOriginal) => {
   actualMetadataModule = actual;
   return {
     observeSessionWrites: actual.observeSessionWrites,
-    withSessionWriteGuard: actual.withSessionWriteGuard,
     deletePendingSendBatch: actual.deletePendingSendBatch,
     deletePendingSendBatchConditional: actual.deletePendingSendBatchConditional,
     deletePendingSpawnWork: actual.deletePendingSpawnWork,
@@ -1472,6 +1471,11 @@ type SessionServiceInternals = {
   withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
   withSessionLifecycleLocks<T>(sessionIds: readonly string[], task: () => Promise<T>): Promise<T>;
   enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
+  dashboardCache: Map<string, { id: string; state: SessionState }>;
+  runDashboardCacheTick(): Promise<void>;
+  startDashboardCacheLoop(): void;
+  warmFullViewCache(): Promise<void>;
+  fullViewCache: Map<string, { input: SessionRecord }>;
   classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },
