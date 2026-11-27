@@ -334,6 +334,10 @@ export class SessionTransitions {
     this.flushPending();
   }
 
+  observedStatus(sessionId: string): SessionRecord["status"] | undefined {
+    return this.checkpoint.observations[sessionId]?.status;
+  }
+
   observedState(sessionId: string): SessionState | undefined {
     return this.checkpoint.observations[sessionId]?.state;
   }

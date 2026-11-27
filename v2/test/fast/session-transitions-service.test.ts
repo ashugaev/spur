@@ -14,6 +14,7 @@ import {
   sessionMetadataModule,
   logSpurEventMock,
   enrichedIds as harnessEnrichedIds,
+  probeWorkspaceMock,
 } from "../helpers/session-service-harness.js";
 import { appendFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import type * as Fs from "node:fs";
@@ -934,6 +935,24 @@ describe("session transitions service", () => {
     );
     expect(all.filter((entry) => entry.kind === "status" && entry.to === "killed")).toHaveLength(1);
     expect(all.filter((entry) => entry.kind === "state" && entry.to === "killed")).toHaveLength(1);
+    expect((await poll({ since: cursor })).entries).toEqual([]);
+  });
+
+  it("replays no state edge on restart for a completed record with a persistent workspace stat failure", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed: EACCES",
+    });
+    await service.list({ includeCompleted: true });
+    expect(binding().store.observedState("api-1")).toBe("error");
+    const before = journalLines();
+    const cursor = (await poll()).nextCursor;
+    await restart();
+    expect(journalLines()).toBe(before);
+    expect((await poll({ since: cursor })).entries).toEqual([]);
+    await service.list({ includeCompleted: true });
     expect((await poll({ since: cursor })).entries).toEqual([]);
   });
 

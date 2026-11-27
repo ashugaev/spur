@@ -230,6 +230,58 @@ describe("full-view list cache", () => {
     expect(peak).toBeLessThanOrEqual(8);
   });
 
+  it("stops queued cache-hit work when the request signal aborts", async () => {
+    writeFleet(20, 0);
+    await service.list();
+    const internals = service as unknown as {
+      requestScopedFields(...args: unknown[]): Promise<unknown>;
+    };
+    const original = internals.requestScopedFields.bind(internals);
+    const controller = new AbortController();
+    let calls = 0;
+    vi.spyOn(internals, "requestScopedFields").mockImplementation(async (...args) => {
+      calls += 1;
+      controller.abort();
+      return original(...args);
+    });
+    await expect(service.list({ signal: controller.signal })).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toBe(1);
+  });
+
+  it("routes lifecycle rebuilds through the shared gate", async () => {
+    writeFleet(0, 2);
+    const internals = service as unknown as {
+      enrichWithClassified(record: SessionRecord, ...rest: unknown[]): Promise<unknown>;
+      fullListGate: { run(task: () => Promise<unknown>): Promise<unknown> };
+    };
+    // A nonzero lifecycle revision lets finalization rebuild a moved row.
+    const { lifecycle } = sessionServiceInternals(service);
+    for (const id of ["run-0", "run-1"])
+      lifecycle.settle(
+        lifecycle.begin("restore", [id]),
+        true,
+        () => "succeeded",
+        () => true,
+      );
+    const original = internals.enrichWithClassified.bind(internals);
+    let rewritten = false;
+    vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (record, ...rest) => {
+      const result = await original(record, ...rest);
+      if (!rewritten) {
+        rewritten = true;
+        metadata.writeSession(TEST_DATA_DIR, { ...record, updatedAt: "2026-03-18T10:04:00.000Z" });
+      }
+      return result;
+    });
+    const gate = vi.spyOn(internals.fullListGate, "run");
+    await service.list();
+    // Two row jobs plus the rebuild of the rewritten row.
+    expect(gate.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
   it("drops the listed lastActivityAt high-water mark when the data directory changes", async () => {
     metadata.writeSession(TEST_DATA_DIR, record({ id: "run" }));
     await service.list();

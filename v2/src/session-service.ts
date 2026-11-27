@@ -6788,9 +6788,14 @@ export class SessionService {
       });
       this.transitionsBinding = binding;
       for (const record of listSessions(dataDir)) {
+        // An unchanged status with an observed state keeps that state: the
+        // earlier observer had better evidence than the status-derived one.
+        const keepObserved =
+          store.observedStatus(record.id) === record.status &&
+          store.observedState(record.id) !== undefined;
         publishEdges(
           record,
-          this.isLiveSessionRecord(record) ? undefined : statusDerivedState(record),
+          this.isLiveSessionRecord(record) || keepObserved ? undefined : statusDerivedState(record),
         );
       }
     }
