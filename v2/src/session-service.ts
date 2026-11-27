@@ -4226,6 +4226,11 @@ export class SessionService {
   private readonly bootRepairGate = createConcurrencyGate(BOOT_REPAIR_ENRICH_CONCURRENCY);
   private fullViewCacheReady: Promise<void> | null = null;
   private readonly listedActivityHighWater = new Map<string, string>();
+  // Counts each session's status changes seen by the write hook. A state
+  // publication whose classification began at another epoch is stale, even when
+  // the status came back (pause then resume). Field-only writes do not count, so
+  // the classifier's own readout and healing writes never trip it.
+  private readonly statusEpochs = new Map<string, number>();
   // Bumped by applyConfig: an enrichment started before a reload never serves after it.
   private configGeneration = 0;
   private reaperTimer: NodeJS.Timeout | null = null;
@@ -6789,6 +6794,10 @@ export class SessionService {
       };
       binding.unregister = observeSessionWrites(dataDir, (record) => {
         if (this.transitionsBinding !== binding) return;
+        // A new status bumps the session's epoch (see statusEpochs).
+        if (store.observedStatus(record.id) !== record.status) {
+          this.statusEpochs.set(record.id, (this.statusEpochs.get(record.id) ?? 0) + 1);
+        }
         const derived = writeDerivedState(record);
         try {
           publishEdges(record, derived);
@@ -13135,6 +13144,9 @@ export class SessionService {
     }
     for (const id of this.listedActivityHighWater.keys()) {
       if (!listedIds.has(id)) this.listedActivityHighWater.delete(id);
+    }
+    for (const id of this.statusEpochs.keys()) {
+      if (!listedIds.has(id)) this.statusEpochs.delete(id);
     }
   }
 
@@ -30933,14 +30945,9 @@ export class SessionService {
   }
 
   // State publication fence shared by enrichWithClassified and assembleDashboard:
-  // another write during the awaits replaces the record object, so the in-hand
-  // state is stale (ABA-safe, unlike a status compare). A re-parsed but equal
-  // record is not a move. One reclassification, then the publish is skipped:
-  // the write hook and background ticks publish the rest.
-  private recordMovedSince(latest: SessionRecord | null, settled: SessionRecord | null): boolean {
-    return latest !== settled && !isDeepStrictEqual(latest, settled);
-  }
-
+  // a status epoch change since the classification began means the in-hand state
+  // is stale (ABA-safe: pause then resume counts). One reclassification, then
+  // the publish is skipped: the write hook and background ticks publish the rest.
   private async assembleDashboard(
     session: SessionRecord,
     // Set on the one reclassification after a status move; a second move skips
@@ -30950,6 +30957,7 @@ export class SessionService {
     { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
   > {
     const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
+    const statusEpoch = this.statusEpochs.get(session.id) ?? 0;
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
@@ -30961,9 +30969,6 @@ export class SessionService {
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified, "read");
     if (persisted.status === "missing") return undefined;
     session = persisted.session;
-    // The record as the classifier left it; the stat-gated cache returns the same
-    // object until another write replaces the file.
-    const settled = readSession(this.config.dataDir, session.id);
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const workspaceState = resolveWorkspaceState(this.config.dataDir, session);
@@ -30973,7 +30978,7 @@ export class SessionService {
 
     const hasServiceIssues = await this.hasServiceIssues(session);
     const latest = readSession(this.config.dataDir, session.id);
-    const recordMoved = this.recordMovedSince(latest, settled);
+    const recordMoved = (this.statusEpochs.get(session.id) ?? 0) !== statusEpoch;
     if (
       (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
       (recordMoved && !retried)
@@ -31398,6 +31403,7 @@ export class SessionService {
     detectionOnlyError: boolean;
   }> {
     const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
+    const statusEpoch = this.statusEpochs.get(session.id) ?? 0;
     const hasIndependentError = (record: SessionRecord): boolean =>
       record.status === "errored" ||
       Boolean(record.serverErrorAt) ||
@@ -31409,9 +31415,6 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     }
     session = persisted.session;
-    // The record as the classifier left it; the stat-gated cache returns the same
-    // object until another write replaces the file.
-    const settled = readSession(this.config.dataDir, session.id);
     const preReportHasIndependentError =
       hasIndependentError(session) ||
       (classified.state === "error" && !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)) ||
@@ -31432,7 +31435,7 @@ export class SessionService {
     // A record whose status moved while this classification ran gets one
     // reclassification; the state is never published for a stale status.
     const latest = readSession(this.config.dataDir, session.id);
-    const recordMoved = this.recordMovedSince(latest, settled);
+    const recordMoved = (this.statusEpochs.get(session.id) ?? 0) !== statusEpoch;
     if (
       (this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision ||
       (recordMoved && !retried)
