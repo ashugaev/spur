@@ -745,7 +745,9 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       });
       const configPath = await context.writeConfig("auto.yaml", baseConfig(context, sessionPrefix));
 
-      const { stdout } = await context.execCli(["--config", configPath, command, "--json"]);
+      const { stdout } = await context.execCli(["--config", configPath, command, "--json"], {
+        env: { SPUR_DISABLE_AUTOSTART: "0" },
+      });
       const sessions = JSON.parse(stdout) as SessionView[];
       const info = await context.fetchJson<RuntimeInfo>("/info");
       currentActiveContext().daemonPid = info.pid;
@@ -1232,7 +1234,11 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     currentActiveContext().daemonPid = daemon.info.pid;
 
     const restarted = JSON.parse(
-      (await context.execCli(["--config", configPath, "daemon", "restart", "--json"])).stdout,
+      (
+        await context.execCli(["--config", configPath, "daemon", "restart", "--json"], {
+          env: { SPUR_DISABLE_AUTOSTART: "0" },
+        })
+      ).stdout,
     ) as {
       baseUrl: string;
       previousPid?: number;
@@ -1356,8 +1362,11 @@ projects:
       expect(extraSpawn.project).toBe("web");
 
       const restarted = JSON.parse(
-        (await context.execCli(["--config", extraConfigPath, "daemon", "restart", "--json"]))
-          .stdout,
+        (
+          await context.execCli(["--config", extraConfigPath, "daemon", "restart", "--json"], {
+            env: { SPUR_DISABLE_AUTOSTART: "0" },
+          })
+        ).stdout,
       ) as {
         restarted: boolean;
         runtime?: RuntimeInfo;

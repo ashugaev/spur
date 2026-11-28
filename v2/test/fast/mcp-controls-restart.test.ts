@@ -36,6 +36,11 @@ function observeStartup(
   childExits: ChildEvidence[],
   report: (summary: string) => void = (summary) => process.stderr.write(`${summary}\n`),
 ) {
+  const startedAt = Date.now();
+  const phases: { generation: number; stage: string; elapsedMs: number }[] = [];
+  const observe = (stage: string) =>
+    phases.push({ generation, stage, elapsedMs: Date.now() - startedAt });
+  observe("awaiting-fixture");
   const evidence: ChildEvidence = {
     generation,
     pid: owned.pid,
@@ -68,11 +73,28 @@ function observeStartup(
   const startup = new Promise<void>((resolve, reject) => {
     const fail = (category: "exit" | "signal" | "spawn-error" | "timeout") => {
       finish();
-      const summary = `Owned daemon startup failed: generation=${generation} code=${evidence.code ?? "none"} signal=${evidence.signal ?? "none"} category=${category}`;
+      const summary = `Owned daemon startup failed: generation=${generation} code=${evidence.code ?? "none"} signal=${evidence.signal ?? "none"} category=${category} last-observed-stage=${phases.at(-1)?.stage} elapsedMs=${Date.now() - startedAt}`;
       report(summary);
       reject(new Error(summary));
     };
-    const ready = () => {
+    const onMessage = (message: unknown) => {
+      if (
+        owned.pid === undefined ||
+        typeof message !== "object" ||
+        message === null ||
+        !("pid" in message) ||
+        message.pid !== owned.pid
+      )
+        return;
+      if (
+        "startupStage" in message &&
+        (message.startupStage === "importing-server" || message.startupStage === "starting-server")
+      ) {
+        observe(message.startupStage);
+        return;
+      }
+      if (!("ready" in message) || message.ready !== true) return;
+      observe("ready");
       finish();
       resolve();
     };
@@ -81,15 +103,15 @@ function observeStartup(
     const timer = setTimeout(() => fail("timeout"), 15000);
     const finish = () => {
       clearTimeout(timer);
-      owned.off("message", ready);
+      owned.off("message", onMessage);
       owned.off("close", close);
     };
-    owned.once("message", ready);
+    owned.on("message", onMessage);
     owned.once("close", close);
   });
   // Replacement startup is supervised without an awaiting caller.
   void startup.catch(() => undefined);
-  return { startup, closed, evidence };
+  return { startup, closed, evidence, phases };
 }
 
 async function awaitChildCloses(closes: Promise<void>[]) {
@@ -123,6 +145,85 @@ async function writePrivateEvidence(path: string, evidence: unknown) {
     await file.close();
   }
 }
+
+it("waits for owned readiness across progress and invalid IPC messages", async () => {
+  const owned = new ChildProcess();
+  Object.defineProperty(owned, "pid", { value: 42 });
+  const report = vi.fn<(summary: string) => void>();
+  const observation = observeStartup(owned, 3, [], [], report);
+  let ready = false;
+  void observation.startup.then(() => {
+    ready = true;
+  });
+  for (const message of [
+    null,
+    "private-marker",
+    { ready: true },
+    { ready: true, pid: 43 },
+    { ready: false, pid: 42 },
+    { startupStage: "private-marker", pid: 42 },
+    { startupStage: "importing-server", pid: 43 },
+    { startupStage: "importing-server", pid: 42 },
+    { startupStage: "starting-server", pid: 42 },
+  ]) {
+    owned.emit("message", message);
+    await Promise.resolve();
+    expect(ready).toBe(false);
+  }
+  owned.emit("message", { ready: true, pid: 42 });
+  await observation.startup;
+  expect(ready).toBe(true);
+  owned.emit("message", { ready: true, pid: 42 });
+  expect(observation.phases.map((phase) => phase.stage)).toEqual([
+    "awaiting-fixture",
+    "importing-server",
+    "starting-server",
+    "ready",
+  ]);
+  for (const phase of observation.phases) {
+    expect(phase.generation).toBe(3);
+    expect(phase.elapsedMs).toBeGreaterThanOrEqual(0);
+  }
+  expect(report).not.toHaveBeenCalled();
+  expect(owned.listenerCount("message")).toBe(0);
+  owned.emit("close", 0, null);
+  await observation.closed;
+});
+
+it("times out at the last owned phase without exposing invalid IPC", async () => {
+  vi.useFakeTimers();
+  const owned = new ChildProcess();
+  const report = vi.fn<(summary: string) => void>();
+  const observation = observeStartup(owned, 4, [], [], report);
+  try {
+    owned.emit("message", { ready: true });
+    Object.defineProperty(owned, "pid", { value: 42 });
+    owned.emit("message", { startupStage: "importing-server", pid: 42 });
+    owned.emit("message", { startupStage: "private-marker", pid: 42 });
+    owned.emit("message", { startupStage: "starting-server", pid: 43 });
+    await vi.advanceTimersByTimeAsync(14999);
+    expect(report).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    const failure = await observation.startup.catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(report).toHaveBeenCalledTimes(1);
+    const summary = report.mock.calls[0]?.[0] ?? "";
+    expect((failure as Error).message).toBe(summary);
+    expect(summary).toContain("generation=4");
+    expect(summary).toContain("category=timeout");
+    expect(summary).toContain("last-observed-stage=importing-server");
+    expect(summary).toContain("elapsedMs=15000");
+    expect(summary).not.toContain("private-marker");
+    expect(summary.length).toBeLessThanOrEqual(220);
+    expect(owned.listenerCount("message")).toBe(0);
+    owned.emit("close", 0, null);
+    await observation.closed;
+    expect(report).toHaveBeenCalledTimes(1);
+  } finally {
+    owned.emit("close", 0, null);
+    vi.useRealTimers();
+  }
+});
 
 it.each(["exit", "signal"] as const)(
   "captures private startup %s evidence through close",
@@ -190,7 +291,8 @@ it("waits for every generation's close before securing and replacing private evi
   const observations = children.map((owned, index) => {
     owned.stderr = new PassThrough();
     const observation = observeStartup(owned, index + 1, [], [], vi.fn());
-    owned.emit("message", { ready: true });
+    Object.defineProperty(owned, "pid", { value: index + 1 });
+    owned.emit("message", { ready: true, pid: owned.pid });
     return observation;
   });
   const probe = await fs.open(path, "r+");
@@ -245,7 +347,8 @@ it("bounds an unclosed generation by the existing cleanup deadline", async () =>
   try {
     const owned = new ChildProcess();
     const observation = observeStartup(owned, 1, [], [], vi.fn());
-    owned.emit("message", { ready: true });
+    Object.defineProperty(owned, "pid", { value: 1 });
+    owned.emit("message", { ready: true, pid: owned.pid });
     await observation.startup;
     owned.emit("exit", 0, null);
     const closed = awaitChildCloses([observation.closed]);
@@ -461,6 +564,9 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     sentinel = await paneIdentity();
     startup = startChild();
     await startup;
+    const initialInfo = await fetch(`http://127.0.0.1:${daemonPort}/info`);
+    expect(initialInfo.status).toBe(200);
+    expect(await initialInfo.json()).toMatchObject({ pid: child?.pid });
     host = await startMcpHttp(config);
     const first = await connect();
     const before = await first.callTool({ name: "mcp_status", arguments: {} });
@@ -528,6 +634,15 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     );
     const after = await reconnected.callTool({ name: "mcp_status", arguments: {} });
     expect(generation).toBe(2);
+    for (const observation of observations) {
+      expect(observation.phases.map((phase) => phase.stage)).toEqual([
+        "awaiting-fixture",
+        "importing-server",
+        "starting-server",
+        "ready",
+      ]);
+      for (const phase of observation.phases) expect(phase.elapsedMs).toBeGreaterThanOrEqual(0);
+    }
     const sentinelAfter = await paneIdentity();
     expect(sentinelAfter).toEqual(sentinel);
     const statusSchema = z.object({
@@ -615,6 +730,7 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     const sourceAfter = await sourceSnapshot();
     Object.assign(evidence, {
       childOutput,
+      startupObservations: observations.flatMap((observation) => observation.phases),
       childExits,
       childGenerations: observations.map((observation) => observation.evidence),
       sourceBefore,
