@@ -618,12 +618,41 @@ describe("startServer", () => {
     });
     const cgroupSpy = vi.spyOn(hostMemory, "readCgroupMemorySnapshot").mockReturnValue(null);
     const pressureSpy = vi.spyOn(hostMemory, "readCgroupPressure").mockReturnValue(null);
+    const startupOrder: string[] = [];
+    const recoverySpy = vi
+      .spyOn(SessionService.prototype, "recoverManagedAuthorization")
+      .mockImplementation(async () => {
+        startupOrder.push("authorization-recovered");
+      });
+    const reconcileStoppedSessions = SessionService.prototype.reconcileStoppedSessions;
+    const reconcileSpy = vi
+      .spyOn(SessionService.prototype, "reconcileStoppedSessions")
+      .mockImplementation(async function (this: SessionService) {
+        const result = await reconcileStoppedSessions.call(this);
+        startupOrder.push("boot-reconciled");
+        return result;
+      });
+    const startBackgroundLoops = SessionService.prototype.startBackgroundLoops;
+    const loopsSpy = vi
+      .spyOn(SessionService.prototype, "startBackgroundLoops")
+      .mockImplementation(function (this: SessionService) {
+        startupOrder.push("background-loops");
+        startBackgroundLoops.call(this);
+      });
     let server: StartedServer | undefined;
     try {
       server = await startServer(configPath, {
         info: () => undefined,
         warn: () => undefined,
       });
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(loopsSpy).toHaveBeenCalledTimes(1);
+      expect(startupOrder).toEqual([
+        "authorization-recovered",
+        "boot-reconciled",
+        "background-loops",
+      ]);
       const response = await fetch(`http://127.0.0.1:${port}/info`);
       expect(response.status).toBe(200);
       const info = (await response.json()) as { port: number; version?: unknown };
@@ -642,6 +671,9 @@ describe("startServer", () => {
         memorySpy.mockRestore();
         cgroupSpy.mockRestore();
         pressureSpy.mockRestore();
+        recoverySpy.mockRestore();
+        reconcileSpy.mockRestore();
+        loopsSpy.mockRestore();
       }
     }
 
@@ -650,20 +682,32 @@ describe("startServer", () => {
       event: "daemon.registry.count",
       details: { read: 1, worktreeInternalDropped: 0 },
     });
-    expect(events[1]).toMatchObject({
+    const reconciledIndex = events.findIndex(
+      (entry) => entry.event === "daemon.startup.reconciled",
+    );
+    const attentionPollIndex = events.findIndex((entry) => entry.event === "gh.poll_cycle");
+    expect(events[reconciledIndex]).toMatchObject({
+      event: "daemon.startup.reconciled",
+      details: { scanned: 0, alive: 0, drifted: 0 },
+    });
+    expect(attentionPollIndex).toBeGreaterThan(reconciledIndex);
+    expect(events[attentionPollIndex]).toMatchObject({
       event: "gh.poll_cycle",
       details: { cycle: "attention", calls: 0 },
     });
-    expect(events.map((entry) => entry.event)).toEqual([
+    const eventNames = events.map((entry) => entry.event);
+    const lifecycleEvents = [
       "daemon.registry.count",
-      "gh.poll_cycle",
       "daemon.startup.reconciled",
       "daemon.admission.startup",
       "daemon.started",
       "http.route.not_found",
       "daemon.stopping",
       "daemon.stopped",
-    ]);
+    ];
+    expect([...eventNames].sort()).toEqual([...lifecycleEvents, "gh.poll_cycle"].sort());
+    expect(eventNames.filter((event) => event !== "gh.poll_cycle")).toEqual(lifecycleEvents);
+    expect(attentionPollIndex).toBeLessThan(eventNames.indexOf("daemon.stopped"));
     expect(events.find((entry) => entry.event === "daemon.admission.startup")).toMatchObject({
       details: { cap: 100, capSource: "default", live: 0 },
     });

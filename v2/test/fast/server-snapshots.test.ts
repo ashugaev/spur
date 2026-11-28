@@ -13,7 +13,11 @@ import { createTempDir, findFreePort } from "../helpers/common.js";
 const servers: StartedServer[] = [];
 
 afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => server.stop()));
+  try {
+    await Promise.all(servers.splice(0).map((server) => server.stop()));
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 async function fixture(extraProjectYaml: string[] = []) {
@@ -356,7 +360,9 @@ describe("snapshot reads", () => {
   });
 
   it("returns each matching session's latest, newest first, with status and state", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const { dataDir, session, url } = await fixture();
+    await (servers[0] as StartedServer).settleBackgroundSpawns();
     const completed = linked(session, "snap-done", { status: "completed" });
     const archived = linked(session, "snap-arch", { status: "completed" });
     const unmatched = linked(session, "snap-corrupt", {
