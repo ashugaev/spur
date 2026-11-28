@@ -300,16 +300,50 @@ export interface AvailableBacklogItem {
 
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
 
+/** Internal spawn option and persisted session tag: which trigger block spawned a work-item session. */
+export interface WorkItemTriggerOrigin {
+  triggerId: string;
+  sourceId: string;
+  externalId: string;
+  blockIndex: number;
+}
+
+export type WorkItemMemberState = "spawning" | "running" | "failed" | "completed";
+
+/** One spawn-block outcome for a work item. A member without `triggerId` is a migrated pre-upgrade record. */
+export interface WorkItemMember {
+  triggerId?: string;
+  blockIndex: number;
+  state: WorkItemMemberState;
+  sessionId?: string;
+  claimedAt: string;
+  attempts: number;
+  nextRetryAt?: string;
+  error?: string;
+  /** Running owner a claimed member would replace; restored when the owner is still live. */
+  replacesSessionId?: string;
+  /** Unresolved retired trigger namespaces; cleared once the member settles. */
+  previousTriggerIds?: string[];
+  /** Set once the member reached running or completed; auto-complete ages from it. */
+  startedAt?: string;
+  /** Terminal stop: the member is never retried again. */
+  endedReason?: "anchor_not_live";
+}
+
 interface WorkItemLifecycleBase extends WorkItemEventData {
   autoClose: boolean;
   createdAt: string;
+  members: WorkItemMember[];
+  /** Legacy work-item journal retained until every desired member transfers. */
+  spawnWorkId?: string;
+  /** Last time the source re-emitted this item for a retry. */
+  lastRetryEmitAt?: string;
 }
 
 export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
   (
     | {
         state: "pending";
-        spawnWorkId?: string;
       }
     | {
         state: "running";
@@ -1390,6 +1424,8 @@ export interface SessionRecord {
   lastOpenedAt?: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  /** Set when a work-item spawn trigger created this session; lets a retry find it after a lost spawn. */
+  triggerOrigin?: WorkItemTriggerOrigin;
   /** Distinguishes a captured empty terminal slot state from a legacy record. */
   terminalSlotsCaptured?: true;
   selfDestruct?: SelfDestructConfig;
@@ -1585,6 +1621,7 @@ export interface SessionView extends Omit<
   | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "triggerOrigin"
   | "handoffIdempotency"
   | "blockedTriggerNotices"
   | "spawnIntent"
@@ -1658,6 +1695,7 @@ export type DashboardOmittedField =
   | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "triggerOrigin"
   | "handoffIdempotency"
   | "blockedTriggerNotices"
   | "spawnIntent"

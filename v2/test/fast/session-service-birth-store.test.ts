@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../src/event-bus.js";
 import * as hostMemory from "../../src/host-memory.js";
 import {
+  archiveSessions,
   listSessions,
   readPendingSpawnWork,
   readSession,
@@ -243,6 +244,51 @@ describe("api idempotency key", () => {
   const internals = (service: SessionService) => service as unknown as Internals;
   const view = (status: SessionView["status"] = "running") =>
     ({ id: "test-birth", status }) as SessionView;
+
+  it.each(["foreground", "background"] as const)(
+    "expires archived API keys before a new %s acceptance and active replay",
+    async (delivery) => {
+      const f = fixture();
+      const archived = f.record("completed", { ...request, prompt: "old request" }, "api:k");
+      writeSession(f.dataDir, archived);
+      archiveSessions(f.dataDir, [archived]);
+      const archivePath = join(f.dataDir, "sessions-archive", "test", "test-birth.json");
+      const archiveBytes = readFileSync(archivePath, "utf8");
+      const service = f.fresh();
+      const next = { id: "test-new", status: "spawning" } as SessionView;
+      const persist = (fingerprint: SpawnSessionRequest) => {
+        writeSession(f.dataDir, { ...f.record("spawning", fingerprint, "api:k"), id: next.id });
+        return next;
+      };
+      const launch = vi
+        .spyOn(internals(service), "spawnOnce")
+        .mockImplementation(async (fp) => persist(fp));
+      const accept = vi
+        .spyOn(internals(service), "acceptBackgroundSpawn")
+        .mockImplementation(async (_request, options) => ({
+          session: persist(options.triggerBirthRequest),
+        }));
+      vi.spyOn(service, "get").mockResolvedValue(next);
+      const body = { ...request, idempotencyKey: "k" };
+      const first = await service.spawnFromRequest(body, delivery);
+      expect(first).toMatchObject(next);
+      expect(first).not.toHaveProperty("replayed");
+      await expect(service.spawnFromRequest(body, delivery)).resolves.toMatchObject({
+        ...next,
+        replayed: true,
+      });
+      await expect(
+        service.spawnFromRequest({ ...body, prompt: "different" }, delivery),
+      ).rejects.toBeInstanceOf(IdempotencyKeyConflictError);
+      await expect(
+        service.spawnFromRequest({ ...body, project: "other" }, delivery),
+      ).rejects.toBeInstanceOf(IdempotencyKeyConflictError);
+      expect(launch).toHaveBeenCalledTimes(delivery === "foreground" ? 1 : 0);
+      expect(accept).toHaveBeenCalledTimes(delivery === "background" ? 1 : 0);
+      expect(listSessions(f.dataDir).map((record) => record.id)).toEqual(["test-new"]);
+      expect(readFileSync(archivePath, "utf8")).toBe(archiveBytes);
+    },
+  );
 
   it("repeat spawn returns the first session with replayed", async () => {
     const f = fixture();

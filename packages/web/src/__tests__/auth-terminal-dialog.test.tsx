@@ -1,4 +1,11 @@
-import { fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactNode, StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -40,8 +47,9 @@ interface Call {
 let calls: Call[];
 // Holds every POST response until resolved; null answers immediately.
 let postGate: Promise<void> | null;
+let deleteGate: Promise<void> | null;
 let responses: Record<string, () => { status?: number; payload: unknown }>;
-const onClose = vi.fn();
+const clients = new Set<QueryClient>();
 
 function terminal(
   status: TerminalLogin["status"],
@@ -69,6 +77,7 @@ function render(
   strict = false,
   account: SignInAccount | undefined = "host" in target ? undefined : ACCOUNT,
 ) {
+  const onClose = vi.fn();
   // Strict runs use the app's own query defaults: the stranding bug only showed with them.
   const client = new QueryClient({
     defaultOptions: {
@@ -77,10 +86,11 @@ function render(
         : { retry: false, refetchOnWindowFocus: false },
     },
   });
+  clients.add(client);
   const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
-  return rtlRender(
+  const rendered = rtlRender(
     <AuthTerminalDialog
       {...(account ? { account } : {})}
       provider="claude"
@@ -89,6 +99,7 @@ function render(
     />,
     { wrapper: strict ? StrictWrapper(Wrapper) : Wrapper },
   );
+  return { ...rendered, onClose, client };
 }
 
 function StrictWrapper(Inner: ({ children }: { children: ReactNode }) => ReactNode) {
@@ -109,7 +120,7 @@ beforeEach(() => {
   calls = [];
   responses = {};
   postGate = null;
-  onClose.mockReset();
+  deleteGate = null;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -117,6 +128,7 @@ beforeEach(() => {
       const method = init?.method ?? "GET";
       calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
       if (method === "POST" && postGate) await postGate;
+      if (method === "DELETE" && deleteGate) await deleteGate;
       const handler = responses[`${method} ${url}`];
       const { status = 200, payload } = handler
         ? handler()
@@ -129,7 +141,13 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => {
+afterEach(async () => {
+  cleanup();
+  for (const client of clients) {
+    await client.cancelQueries();
+    client.clear();
+  }
+  clients.clear();
   vi.unstubAllGlobals();
 });
 
@@ -187,37 +205,58 @@ describe("AuthTerminalDialog", () => {
     });
     reply("POST /api/auth-terminal-logins", "running");
     responses[`DELETE /api/auth-terminal-logins/${ID}`] = () => ({ payload: { stopped: ID } });
-    render();
+    const { onClose } = render();
+    const pendingPost = postGate;
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      expect(onClose).toHaveBeenCalledTimes(1);
+      release();
 
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(onClose).toHaveBeenCalledTimes(1);
-    release();
-
-    await waitFor(() =>
-      expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith(ID))).toBe(true),
-    );
+      await waitFor(() =>
+        expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith(ID))).toBe(true),
+      );
+    } finally {
+      await act(async () => {
+        release();
+        await pendingPost;
+      });
+      await waitFor(() =>
+        expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith(ID))).toBe(true),
+      );
+    }
   });
 
   it("stops the terminal a restart creates when Close lands while it is in flight", async () => {
     reply("POST /api/auth-terminal-logins", "not_signed_in", "exited");
     responses[`DELETE /api/auth-terminal-logins/${ID}`] = () => ({ payload: { stopped: ID } });
-    render();
+    const { onClose } = render();
     const restart = await screen.findByRole("button", { name: "Restart terminal" });
     let release: () => void = () => undefined;
     postGate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    const pendingPost = postGate;
     reply("POST /api/auth-terminal-logins", "running");
-    fireEvent.click(restart);
+    try {
+      fireEvent.click(restart);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Close" }));
-    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
-    const deletesBefore = calls.filter((call) => call.method === "DELETE").length;
-    release();
+      fireEvent.click(await screen.findByRole("button", { name: "Close" }));
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      const deletesBefore = calls.filter((call) => call.method === "DELETE").length;
+      release();
 
-    await waitFor(() =>
-      expect(calls.filter((call) => call.method === "DELETE").length).toBe(deletesBefore + 1),
-    );
+      await waitFor(() =>
+        expect(calls.filter((call) => call.method === "DELETE").length).toBe(deletesBefore + 1),
+      );
+    } finally {
+      await act(async () => {
+        release();
+        await pendingPost;
+      });
+      await waitFor(() =>
+        expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith(ID))).toBe(true),
+      );
+    }
   });
 
   it("hides the embedded terminal's own header", async () => {
@@ -366,7 +405,7 @@ describe("AuthTerminalDialog", () => {
   it("stops the terminal on Close, then closes", async () => {
     reply("POST /api/auth-terminal-logins", "running");
     responses[`DELETE /api/auth-terminal-logins/${ID}`] = () => ({ payload: { stopped: ID } });
-    render();
+    const { onClose } = render();
     await screen.findByTestId("direct-terminal");
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
@@ -375,13 +414,58 @@ describe("AuthTerminalDialog", () => {
     expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith(ID))).toBe(true);
   });
 
+  it("keeps a settled Close callback scoped to the dialog that started it", async () => {
+    let release: () => void = () => undefined;
+    const pendingDelete = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    deleteGate = pendingDelete;
+    reply("POST /api/auth-terminal-logins", "running");
+    responses[`DELETE /api/auth-terminal-logins/${ID}`] = () => ({ payload: { stopped: ID } });
+    const first = render();
+    let second: ReturnType<typeof render> | undefined;
+    try {
+      expect((await screen.findByTestId("direct-terminal")).textContent).toBe(ID);
+      const close = screen.getByRole("button", { name: "Close" });
+      await waitFor(() => expect(close).toBeEnabled());
+      fireEvent.click(close);
+      await waitFor(() =>
+        expect(calls).toContainEqual({
+          url: `/api/auth-terminal-logins/${ID}`,
+          method: "DELETE",
+          body: undefined,
+        }),
+      );
+      first.unmount();
+      second = render();
+      await screen.findByTestId("direct-terminal");
+      await act(async () => {
+        release();
+        await pendingDelete;
+      });
+      await waitFor(() => expect(first.onClose).toHaveBeenCalledTimes(1));
+      expect(second.onClose).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => {
+        release();
+        await pendingDelete;
+      });
+      try {
+        await waitFor(() => expect(first.onClose).toHaveBeenCalledTimes(1));
+      } finally {
+        first.unmount();
+        second?.unmount();
+      }
+    }
+  });
+
   it("closes even when the stop request fails", async () => {
     reply("POST /api/auth-terminal-logins", "running");
     responses[`DELETE /api/auth-terminal-logins/${ID}`] = () => ({
       status: 404,
       payload: { error: "Unknown terminal login" },
     });
-    render();
+    const { onClose } = render();
     await screen.findByTestId("direct-terminal");
 
     fireEvent.keyDown(window, { key: "Escape" });

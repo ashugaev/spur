@@ -1,12 +1,35 @@
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readSpurInstanceRuntimeConfig } from "./spur-instance.js";
 import {
   cleanupIsolatedWebTestTarget,
   createIsolatedWebTestTarget,
 } from "../tests/harness/daemon-target.js";
+
+const { execFileSyncMock } = vi.hoisted(() => ({ execFileSyncMock: vi.fn() }));
+
+vi.mock("node:child_process", () => ({
+  execFileSync: execFileSyncMock,
+  default: { execFileSync: execFileSyncMock },
+}));
+
+beforeEach(() => {
+  execFileSyncMock.mockReset();
+  execFileSyncMock.mockImplementation((file: unknown, args: unknown, options: unknown) => {
+    expect(file).toBe(process.execPath);
+    expect(args).toEqual(["-e", expect.any(String)]);
+    const program = (args as [string, string])[1];
+    expect(program).toContain('const net = require("node:net");');
+    expect(program).toContain("const servers = [net.createServer(), net.createServer()];");
+    expect(program).toContain('server.listen(0, "127.0.0.1",');
+    expect(program).toContain("for (const open of servers) open.close();");
+    expect(options).toEqual({ encoding: "utf8" });
+    const daemonPort = 41001 + (execFileSyncMock.mock.calls.length - 1) * 2;
+    return `${daemonPort} ${daemonPort + 1}\n`;
+  });
+});
 
 const MEMO_KEYS = [
   "SPUR_DAEMON_URL",
@@ -82,6 +105,7 @@ describe("createIsolatedWebTestTarget", () => {
     stubHarnessEnv();
     const first = createIsolatedWebTestTarget();
     try {
+      expect(execFileSyncMock).toHaveBeenCalledTimes(1);
       expect(process.env["SPUR_WEB_TEST_UI_PORT"]).toBe(String(first.uiPort));
 
       // Simulated worker: the memo values arrive through the inherited env.
@@ -94,6 +118,7 @@ describe("createIsolatedWebTestTarget", () => {
 
       const before = harnessTempDirs();
       const second = createIsolatedWebTestTarget();
+      expect(execFileSyncMock).toHaveBeenCalledTimes(1);
       expect(second.uiPort).toBe(first.uiPort);
       expect(second.env).toEqual(workerEnv);
       expectIsolatedDaemonUrl(second.env["SPUR_DAEMON_URL"]);
@@ -121,8 +146,18 @@ describe("createIsolatedWebTestTarget", () => {
       stubHarnessEnv(partial);
       const second = createIsolatedWebTestTarget();
       try {
+        expect(execFileSyncMock).toHaveBeenCalledTimes(2);
+        expect(execFileSyncMock.mock.calls[1]).toEqual(execFileSyncMock.mock.calls[0]);
         expect(second.uiPort).not.toBe(first.uiPort);
         expect(second.env["SPUR_CONFIG"]).not.toBe(first.env["SPUR_CONFIG"]);
+        expect(second.uiPort).toBe(41004);
+        expect(second.env["SPUR_DAEMON_URL"]).toBe("http://127.0.0.1:41003");
+        expect(second.env["SPUR_WEB_TEST_UI_PORT"]).toBe("41004");
+        expect(process.env["SPUR_CONFIG"]).toBe(second.env["SPUR_CONFIG"]);
+        expect(readSpurInstanceRuntimeConfig()).toMatchObject({
+          uiPort: 41004,
+          daemonUrl: "http://127.0.0.1:41003",
+        });
       } finally {
         second.cleanup();
       }
