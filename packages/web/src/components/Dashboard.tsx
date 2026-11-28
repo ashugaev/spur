@@ -2618,7 +2618,6 @@ export function Dashboard() {
     session: DashboardSession,
     options?: {
       prAction?: OpenPrAction;
-      retry?: true;
       skipPrCheck?: true;
     },
   ): Promise<boolean> => {
@@ -2632,18 +2631,6 @@ export function Dashboard() {
       activeDeskSessions.some((candidate) => lifecycleRef.current.pending(candidate.id))
     )
       return false;
-    const activeSubagentCount = activeDeskSessions.filter(
-      (candidate) => candidate.id !== session.id,
-    ).length;
-    // A dialog retry is the same Done click the user already confirmed.
-    if (!options?.retry && activeSubagentCount > 0 && typeof window !== "undefined") {
-      const ok = window.confirm(
-        `Close this desk? ${activeSubagentCount} subagent${
-          activeSubagentCount === 1 ? "" : "s"
-        } on this checkout will be ended.`,
-      );
-      if (!ok) return false;
-    }
     const activeDeskIds = new Set(activeDeskSessions.map((candidate) => candidate.id));
     const owner = reserveTransitions(
       rawSessions.filter((row) => activeDeskIds.has(row.id)),
@@ -2719,7 +2706,7 @@ export function Dashboard() {
       const pending =
         dialog.action === "kill"
           ? handleKillSession(dialog.session, { prAction })
-          : handleCompleteSession(dialog.session, { prAction, retry: true });
+          : handleCompleteSession(dialog.session, { prAction });
       if (prAction === "leave_open") {
         setOpenPrAction((current) => (current === dialog ? null : current));
         actionDialogs.closeRecover();
@@ -2743,7 +2730,7 @@ export function Dashboard() {
       const done =
         dialog.action === "kill"
           ? await handleKillSession(dialog.session, options)
-          : await handleCompleteSession(dialog.session, { ...options, retry: true });
+          : await handleCompleteSession(dialog.session, options);
       if (done) {
         setPrCheckUnavailable((current) => (current === dialog ? null : current));
       }

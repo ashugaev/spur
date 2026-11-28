@@ -718,16 +718,15 @@ describe("Dashboard lifecycle reconciliation", () => {
     const child: SpurSessionView = { ...anchor, id: "api-child", parentSessionId: source.id };
     list = { ...list, sessions: [anchor, child] };
     current.set(child.id, child);
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirm = vi.spyOn(window, "confirm");
     const { client } = render(<Dashboard />);
     await clickDone();
     await waitFor(() => expect(screen.queryByText("Cross repo session")).not.toBeInTheDocument());
     expect(
       screen.queryByRole("button", { name: `Close session ${child.id}` }),
     ).not.toBeInTheDocument();
-    expect(window.confirm).toHaveBeenCalledWith(
-      "Close this desk? 1 subagent on this checkout will be ended.",
-    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(posts).toEqual([`/api/sessions/${source.id}/complete`]);
     const addition: SpurSessionView = {
       ...source,
       id: "api-new",
@@ -806,7 +805,7 @@ describe("Dashboard lifecycle reconciliation", () => {
       list = { ...list, sessions: [anchor, child] };
       current.set(anchor.id, anchor);
       current.set(child.id, child);
-      vi.spyOn(window, "confirm").mockReturnValue(true);
+      const confirm = vi.spyOn(window, "confirm");
       const { client } = render(<Dashboard />);
       await clickDone();
       await waitFor(() => expect(doneButton()).not.toBeInTheDocument());
@@ -830,9 +829,7 @@ describe("Dashboard lifecycle reconciliation", () => {
       post = deferredResponse();
       await clickDone();
       await waitFor(() => expect(posts).toHaveLength(2));
-      expect(window.confirm).toHaveBeenLastCalledWith(
-        "Close this desk? 1 subagent on this checkout will be ended.",
-      );
+      expect(confirm).not.toHaveBeenCalled();
     },
   );
 
@@ -842,7 +839,6 @@ describe("Dashboard lifecycle reconciliation", () => {
     list = { ...list, sessions: [anchor, child] };
     current.set(anchor.id, anchor);
     current.set(child.id, child);
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     const { client } = render(<Dashboard />);
     const anchorButton = await screen.findByRole("button", { name: `Close session ${anchor.id}` });
     fireEvent.click(anchorButton);
