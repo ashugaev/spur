@@ -114,9 +114,10 @@ export interface WebUnitOptions {
 // marks external exposure (set by npm-init.sh --expose-web). Reinit must
 // re-apply both so an update or rollback never silently resets to loopback:5555.
 // A comma-separated WEB_HOST (e.g. `127.0.0.1,100.64.0.1`) marks a Tailscale
-// bind that npm-init.sh already resolved; only re-apply `--tailscale` when one
-// is live, so an unattended `spur update` never triggers a fresh Tailscale
-// install/lookup on a host that had it declined or not yet up.
+// bind that npm-init.sh already resolved; reinit sends `--tailscale` only when
+// one is live and the `tailscale` binary is on PATH (nothing to install), else
+// `--no-tailscale`, so an unattended `spur update` never installs Tailscale,
+// even through an older script that reads `--tailscale` as install.
 // Pre-#573 units set the bind via `HOSTNAME=` rather than `WEB_HOST=`; still
 // recognize that legacy var here so updating a `--expose-web` install doesn't
 // downgrade its public bind back to loopback.

@@ -12,6 +12,7 @@ import {
   type HostChangedFailureKind,
 } from "./deploy-switch-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import { findExecutableOnPath } from "./agents/executable.js";
 import { isActive, resolveSystemdScope, runNpmInit } from "./host-install.js";
 import { spurInstallLockPath } from "./install-lock.js";
 import { writeStdout } from "./io.js";
@@ -263,7 +264,10 @@ export function reinitUnits(cliEntrypoint: string, configPath?: string): void {
   runNpmInit(cliEntrypoint, {
     webPort: String(webPort),
     exposeWeb,
-    tailscale,
+    // `update <older-version>` swaps the package first, so the script run here
+    // may predate `--install-tailscale` and treat `--tailscale` as install.
+    // Send it only when the binary is present: nothing to install, no sudo.
+    tailscale: tailscale && findExecutableOnPath("tailscale") !== null ? "keep" : "off",
     ...(configPath !== undefined ? { configPath } : {}),
   });
 }

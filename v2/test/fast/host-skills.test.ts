@@ -316,6 +316,7 @@ describe("host-skills", () => {
 
     expect(lines).toHaveLength(2);
     for (const line of lines) {
+      expect(line.startsWith("spur: info: host skills not linked")).toBe(true);
       expect(line).toContain("does not create it");
       expect(line).toContain("spur reinit");
     }
