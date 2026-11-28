@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { tryRotate } from "../../src/jsonl-log-io.js";
 import {
   appendEventLog,
@@ -528,7 +528,7 @@ describe("warn collapse", () => {
     expect(readEventLog(dataDir)).toHaveLength(2);
   });
 
-  it("writes the summary (carrying the LATEST message) then the new occurrence once the window elapses", async () => {
+  it("writes the summary (carrying the LATEST message) then the new occurrence once the window elapses", () => {
     setEventLogConfig({
       hotBytes: DEFAULT_EVENT_LOG_HOT_BYTES,
       shardHotBytes: DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
@@ -536,19 +536,26 @@ describe("warn collapse", () => {
       collapseWindowMs: 20,
     });
     const dataDir = makeTempDir();
-    logSpurEvent(dataDir, { event: "e", level: "warn", message: "first" });
-    logSpurEvent(dataDir, { event: "e", level: "warn", message: "second" });
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    logSpurEvent(dataDir, { event: "e", level: "warn", message: "third" });
+    const now = 1_000_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      logSpurEvent(dataDir, { event: "e", level: "warn", message: "first" });
+      logSpurEvent(dataDir, { event: "e", level: "warn", message: "second" });
+      expect(readEventLog(dataDir)).toHaveLength(1);
+      clock.mockReturnValue(now + 40);
+      logSpurEvent(dataDir, { event: "e", level: "warn", message: "third" });
 
-    const entries = readEventLog(dataDir);
-    expect(entries).toHaveLength(3);
-    expect(entries[0]?.message).toBe("first");
-    // The summary carries the latest suppressed entry's message, not the first one's.
-    expect(entries[1]?.message).toBe("second");
-    expect(entries[1]?.details?.["suppressedCount"]).toBe(1);
-    expect(typeof entries[1]?.details?.["suppressedSince"]).toBe("string");
-    expect(entries[2]?.message).toBe("third");
+      const entries = readEventLog(dataDir);
+      expect(entries).toHaveLength(3);
+      expect(entries[0]?.message).toBe("first");
+      // The summary carries the latest suppressed entry's message, not the first one's.
+      expect(entries[1]?.message).toBe("second");
+      expect(entries[1]?.details?.["suppressedCount"]).toBe(1);
+      expect(typeof entries[1]?.details?.["suppressedSince"]).toBe("string");
+      expect(entries[2]?.message).toBe("third");
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("writes every occurrence immediately when collapseWindowMs is 0", () => {
