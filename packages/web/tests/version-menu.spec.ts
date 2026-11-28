@@ -188,7 +188,10 @@ test.describe("Version menu Auto checkbox", () => {
 
     const checkbox = page.getByRole("checkbox", { name: "Auto update" });
     await expect(checkbox).not.toBeChecked();
-    await expect(page.getByText("Auto", { exact: true })).toHaveCSS("color", "rgb(85, 85, 88)");
+    await expect(checkbox).toBeEnabled();
+    const label = page.getByText("Auto", { exact: true });
+    await expect(label).toHaveClass(/text-\[var\(--color-text-tertiary\)\]/);
+    await expect(label).toHaveCSS("color", "rgb(139, 139, 144)");
   });
 
   test("on state: bold primary label, checked box", async ({ page }) => {
@@ -330,7 +333,8 @@ test.describe("Version menu Auto checkbox", () => {
     const glyph = page.getByTestId("version-rollback-icon");
     await expect(glyph).toBeVisible();
     await expect(page.getByTestId("version-alert-icon")).toHaveCount(0);
-    await expect(glyph).toHaveCSS("color", "rgb(255, 77, 77)");
+    await expect(glyph).toHaveClass(/text-\[var\(--color-status-error\)\]/);
+    await expect(glyph).toHaveCSS("color", "rgb(255, 102, 102)");
 
     await page.getByRole("button", { name: /Show Spur version information/ }).click();
     const notice = page.getByTestId("version-update-failure");

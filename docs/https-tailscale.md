@@ -8,7 +8,7 @@ Browsers block microphone access (`getUserMedia`) over plain HTTP, `localhost` e
 
 ## Prerequisites
 
-- Tailnet up — [install-from-npm.md](install-from-npm.md#private-access-tailscale-default-on).
+- Tailnet up — [install-from-npm.md](install-from-npm.md#private-access-tailscale-opt-in).
 - MagicDNS enabled for the tailnet — a hard prerequisite of HTTPS Certificates, and what gives the node the `<host>.<tailnet>.ts.net` name every command below uses. Tailnet-level only; devices can still run `--accept-dns=false`.
 - HTTPS Certificates enabled for the tailnet: admin console → DNS → HTTPS Certificates → Enable. Once per tailnet, owner/admin only. Without it no cert issues, ever.
 

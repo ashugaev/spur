@@ -30,6 +30,7 @@ import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { VoiceControls, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
+import { toneColor } from "@/design/tone";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -291,7 +292,7 @@ function BacklogZone({
   return (
     <Zone
       label="Backlog"
-      color="var(--color-status-attention)"
+      tone="attention"
       count={items.length}
       collapsed={collapsed}
       onToggle={onToggle}
@@ -314,12 +315,12 @@ function BacklogZone({
               >
                 {BACKLOG_PROVIDER_ICONS[item.provider]}
               </span>
-              <span className="shrink-0 font-semibold uppercase text-[var(--color-text-primary)]">
+              <span className="shrink-0 font-bold uppercase text-[var(--color-text-primary)]">
                 {item.key}
               </span>
               <span className="min-w-0 truncate">{item.title}</span>
             </a>
-            <span className="hidden w-[7rem] shrink-0 truncate text-right text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] sm:inline">
+            <span className="hidden w-[7rem] shrink-0 truncate text-right text-label uppercase tracking-label text-[var(--color-text-tertiary)] sm:inline">
               {projectNameMap.get(item.projectId) ?? item.projectId}
             </span>
             <RowIconButton
@@ -445,7 +446,7 @@ function IconSliders() {
   return (
     <svg
       aria-hidden="true"
-      className="h-[13px] w-[13px] opacity-75"
+      className="h-[13px] w-[13px]"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -628,7 +629,7 @@ function ProjectMenu({
         type="button"
         onClick={popover.toggle}
       >
-        <span className="inline-flex min-w-0 max-w-[124px] items-center gap-1 text-[12px] font-bold uppercase tracking-[-0.02em] md:max-w-[230px] md:text-[16px]">
+        <span className="inline-flex min-w-0 max-w-[124px] items-center gap-1 text-body font-bold uppercase tracking-display md:max-w-[230px] md:text-title">
           <span className="block min-w-0 truncate">{activeProjectName}</span>
           <svg
             aria-hidden="true"
@@ -643,7 +644,7 @@ function ProjectMenu({
       </button>
       {popover.open ? (
         <div
-          className="absolute left-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-4rem)] min-w-[260px] max-w-[calc(100vw-1rem)] flex-col border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
+          className="absolute left-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-4rem)] min-w-[260px] max-w-[calc(100vw-1rem)] flex-col border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-raised"
           role="menu"
         >
           <div className="mb-1 transition hover:bg-[var(--color-hover-overlay)]">
@@ -689,7 +690,7 @@ function ProjectMenu({
                       </span>
                       <span className="min-w-0 truncate">{project.name}</span>
                       {project.kind === "shepherd" ? (
-                        <span className="shrink-0 border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
+                        <span className="shrink-0 border border-[var(--color-border-default)] px-1.5 py-0.5 text-label uppercase text-[var(--color-text-tertiary)]">
                           built-in
                         </span>
                       ) : null}
@@ -700,12 +701,12 @@ function ProjectMenu({
                     </span>
                   )}
                   {project.kind === "shepherd" && !project.configured ? (
-                    <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
+                    <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-label uppercase text-[var(--color-text-tertiary)]">
                       built-in
                     </span>
                   ) : null}
                   {!project.configured ? (
-                    <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
+                    <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-label uppercase text-[var(--color-text-tertiary)]">
                       unconfigured
                     </span>
                   ) : null}
@@ -809,7 +810,7 @@ function NewProjectModal({
       }}
     >
       <div
-        className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-md sm:p-5"
+        className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-modal sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-md sm:p-5"
         onKeyDown={(event) => {
           if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
             event.preventDefault();
@@ -818,7 +819,7 @@ function NewProjectModal({
         }}
       >
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+          <h2 className="text-title font-bold uppercase tracking-label text-[var(--color-text-primary)]">
             New project
           </h2>
           <button
@@ -875,7 +876,7 @@ function NewProjectModal({
           >
             <span>Folder doesn&apos;t exist. Create it?</span>
             <button
-              className="self-start bg-[var(--color-accent)] px-3 py-1 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+              className="self-start bg-[var(--color-accent)] px-3 py-1 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={submitting}
               onClick={onCreateFolder}
               type="button"
@@ -895,7 +896,7 @@ function NewProjectModal({
           <button
             aria-busy={submitting || undefined}
             aria-label={submitting ? "Creating project" : undefined}
-            className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+            className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
             disabled={submitting}
             onClick={onSubmit}
             type="button"
@@ -971,12 +972,12 @@ function EditProjectModal({
       <div
         aria-labelledby="edit-project-title"
         aria-modal="true"
-        className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-md sm:p-5"
+        className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-modal sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-md sm:p-5"
         role="dialog"
       >
         <div className="mb-4 flex items-center justify-between">
           <h2
-            className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+            className="text-title font-bold uppercase tracking-label text-[var(--color-text-primary)]"
             id="edit-project-title"
           >
             Project settings
@@ -1050,7 +1051,7 @@ function EditProjectModal({
               <button
                 aria-busy={deleting || undefined}
                 aria-label={deleting ? `${deleteLabel} in progress` : undefined}
-                className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-60"
+                className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={deleting}
                 onClick={onDelete}
                 type="button"
@@ -1066,7 +1067,7 @@ function EditProjectModal({
         <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-2">
           {deletable ? (
             <button
-              className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={deleting || confirmDeleteOpen}
               onClick={() => setConfirmDeleteOpen(true)}
               type="button"
@@ -1089,7 +1090,7 @@ function EditProjectModal({
               <button
                 aria-busy={submitting || undefined}
                 aria-label={submitting ? "Saving project" : undefined}
-                className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={submitting}
                 onClick={onSubmit}
                 type="button"
@@ -2617,7 +2618,6 @@ export function Dashboard() {
     session: DashboardSession,
     options?: {
       prAction?: OpenPrAction;
-      retry?: true;
       skipPrCheck?: true;
     },
   ): Promise<boolean> => {
@@ -2631,18 +2631,6 @@ export function Dashboard() {
       activeDeskSessions.some((candidate) => lifecycleRef.current.pending(candidate.id))
     )
       return false;
-    const activeSubagentCount = activeDeskSessions.filter(
-      (candidate) => candidate.id !== session.id,
-    ).length;
-    // A dialog retry is the same Done click the user already confirmed.
-    if (!options?.retry && activeSubagentCount > 0 && typeof window !== "undefined") {
-      const ok = window.confirm(
-        `Close this desk? ${activeSubagentCount} subagent${
-          activeSubagentCount === 1 ? "" : "s"
-        } on this checkout will be ended.`,
-      );
-      if (!ok) return false;
-    }
     const activeDeskIds = new Set(activeDeskSessions.map((candidate) => candidate.id));
     const owner = reserveTransitions(
       rawSessions.filter((row) => activeDeskIds.has(row.id)),
@@ -2718,7 +2706,7 @@ export function Dashboard() {
       const pending =
         dialog.action === "kill"
           ? handleKillSession(dialog.session, { prAction })
-          : handleCompleteSession(dialog.session, { prAction, retry: true });
+          : handleCompleteSession(dialog.session, { prAction });
       if (prAction === "leave_open") {
         setOpenPrAction((current) => (current === dialog ? null : current));
         actionDialogs.closeRecover();
@@ -2742,7 +2730,7 @@ export function Dashboard() {
       const done =
         dialog.action === "kill"
           ? await handleKillSession(dialog.session, options)
-          : await handleCompleteSession(dialog.session, { ...options, retry: true });
+          : await handleCompleteSession(dialog.session, options);
       if (done) {
         setPrCheckUnavailable((current) => (current === dialog ? null : current));
       }
@@ -2897,7 +2885,7 @@ export function Dashboard() {
             </span>
             <button
               aria-label="Filters"
-              className={`inline-flex h-7 shrink-0 items-center gap-[7px] border px-[9px] uppercase tracking-[0.08em] transition ${
+              className={`inline-flex h-7 shrink-0 items-center gap-[7px] border px-[9px] uppercase tracking-meta transition ${
                 activeFilterCount > 0
                   ? "border-[var(--color-accent)] text-[var(--color-accent)]"
                   : "border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)]"
@@ -2906,7 +2894,7 @@ export function Dashboard() {
               type="button"
             >
               <IconSliders />
-              <span className="hidden text-[10px] md:inline">Filters</span>
+              <span className="hidden text-label md:inline">Filters</span>
               {activeFilterCount > 0 ? (
                 <span className="min-w-4 border border-[var(--color-accent)] px-1 text-center font-bold tabular-nums">
                   {activeFilterCount}
@@ -2964,13 +2952,13 @@ export function Dashboard() {
               </div>
               {searchVoice.voiceError ? (
                 <div
-                  className="absolute left-0 top-full z-10 mt-1 w-full border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2 py-1.5 text-[10px] text-[var(--color-chip-error-text)]"
+                  className="absolute left-0 top-full z-10 mt-1 w-full border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2 py-1.5 text-label text-[var(--color-status-error)]"
                   role="alert"
                 >
                   {searchVoice.voiceError}
                 </div>
               ) : searchVoice.recording || searchVoice.voiceBusy ? (
-                <div className="absolute left-0 top-full z-10 mt-1 px-2 text-[10px] text-[var(--color-text-tertiary)]">
+                <div className="absolute left-0 top-full z-10 mt-1 px-2 text-label text-[var(--color-text-tertiary)]">
                   <VoiceStatusHint voice={searchVoice} />
                 </div>
               ) : null}
@@ -3010,7 +2998,7 @@ export function Dashboard() {
         {isMobile && !spawnOpen && !terminalSession ? (
           <button
             aria-label="Spawn Session"
-            className="fixed bottom-[38px] right-3.5 z-[35] flex h-12 w-12 items-center justify-center rounded-[14px] border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] shadow-[0_6px_20px_var(--color-shadow-modal-lg)] transition hover:bg-[var(--color-accent-hover)]"
+            className="fixed bottom-[38px] right-3.5 z-[35] flex h-12 w-12 items-center justify-center border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] shadow-overlay transition hover:bg-[var(--color-accent-hover)]"
             onClick={openSpawnModal}
             type="button"
           >
@@ -3065,7 +3053,7 @@ export function Dashboard() {
             statusOptions={ATTENTION_ZONE_ORDER.map((level) => ({
               level,
               label: ATTENTION_LANE_META[level].label,
-              color: ATTENTION_LANE_META[level].color,
+              color: toneColor(ATTENTION_LANE_META[level].tone),
               icon: STATUS_LANE_ICONS[level],
               count: stats[level],
             }))}
@@ -3246,35 +3234,35 @@ export function Dashboard() {
                       </div>
                     ) : null}
                     {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
-                      <p className="text-xs text-[var(--color-text-tertiary)]">
+                      <p className="text-[var(--color-text-tertiary)]">
                         will create {normalizedBranchPreview}
                       </p>
                     ) : null}
                     {branchExists && branchExists.exists && !branchExists.checkedOutAt ? (
-                      <p className="text-xs text-[var(--color-text-tertiary)]">
+                      <p className="text-[var(--color-text-tertiary)]">
                         branch already exists — will attach instead of creating new
                       </p>
                     ) : null}
                     {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
-                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                      <div className="border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2.5 py-1.5 text-[var(--color-status-error)]">
                         already checked out in another worktree — spawn will fail; pick a different
                         name
                       </div>
                     ) : null}
                     {branchExists && !branchExists.exists && branchExists.remote ? (
-                      <p className="text-xs text-[var(--color-text-tertiary)]">
+                      <p className="text-[var(--color-text-tertiary)]">
                         exists on origin — will track it
                       </p>
                     ) : null}
                     {spawnWorkspaceModeAuto && spawnDefaults.error ? (
-                      <div className="flex flex-wrap items-center gap-2 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                      <div className="flex flex-wrap items-center gap-2 border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2.5 py-1.5 text-[var(--color-status-error)]">
                         <span>
                           couldn&apos;t resolve this project&apos;s workspace default:{" "}
                           {spawnDefaults.error}
                         </span>
                         <span className="flex gap-2">
                           <button
-                            className="border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-chip-error-border)]/20"
+                            className="border border-[var(--color-status-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error-border)]/20"
                             onClick={() => {
                               setSpawnWorkspaceModeConfirmedFor(spawnProjectId);
                               setSpawnWorkspaceMode("worktree");
@@ -3284,7 +3272,7 @@ export function Dashboard() {
                             Use worktree
                           </button>
                           <button
-                            className="border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-chip-error-border)]/20"
+                            className="border border-[var(--color-status-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error-border)]/20"
                             onClick={() => {
                               setSpawnWorkspaceModeConfirmedFor(spawnProjectId);
                               setSpawnWorkspaceMode("shared");
@@ -3297,7 +3285,7 @@ export function Dashboard() {
                       </div>
                     ) : null}
                     {spawnModelError ? (
-                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                      <div className="border border-[var(--color-status-error-border)] bg-[var(--color-status-error-bg)] px-2.5 py-1.5 text-[var(--color-status-error)]">
                         couldn&apos;t load the model catalog: {spawnModelError}
                       </div>
                     ) : null}
@@ -3306,7 +3294,7 @@ export function Dashboard() {
                 selfDestructSlot: spawnSelfDestruct ? (
                   <textarea
                     aria-label="Auto-close conditions"
-                    className={`min-h-20 w-full resize-y [--color-input-border:var(--color-text-secondary)] [--color-input-placeholder:var(--color-text-secondary)] ${INPUT_CLASS}`}
+                    className={`min-h-20 w-full resize-y [--color-input-border:var(--color-text-secondary)] [--color-text-tertiary:var(--color-text-secondary)] ${INPUT_CLASS}`}
                     onChange={(event) => {
                       setSpawnSelfDestructConditions(event.target.value);
                     }}

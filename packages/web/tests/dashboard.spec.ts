@@ -1616,21 +1616,48 @@ test.describe("D3: Session rows render with correct columns", () => {
   });
 
   test("attention row text dims when terminal opens", async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "dark" });
     const session = makeNeedsInputSession({
       id: "unopened-needs-input-1",
       prompt: "Needs input for review",
       hasUnseenAttention: true,
     });
     await mockSessions(page, [session]);
+    await page.route(`/api/sessions/${session.id}/opened`, async (route) => {
+      session.hasUnseenAttention = false;
+      await route.fallback();
+    });
     await page.goto("/");
 
     const titleLink = page.getByRole("link", { name: "Needs input for review" });
+    await expect(titleLink).toHaveClass(/text-\[var\(--color-text-primary\)\]/);
+    await expect(titleLink).toHaveCSS("color", "rgb(225, 225, 225)");
     await expect(titleLink).toHaveCSS("opacity", "1");
+    const opened = page.waitForResponse(`**/api/sessions/${session.id}/opened`);
     await page
       .getByRole("button", { name: new RegExp(`Open web terminal for ${session.id}`, "i") })
       .click();
+    await opened;
 
-    await expect(titleLink).toHaveCSS("opacity", "0.7");
+    await expect(titleLink).toHaveClass(/text-\[var\(--color-text-secondary\)\]/);
+    await expect(titleLink).toHaveCSS("color", "rgb(161, 161, 161)");
+    await expect(titleLink).toHaveCSS("opacity", "1");
+    const refreshed = await page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/sessions" &&
+        response.request().method() === "GET",
+    );
+    const body: unknown = await refreshed.json();
+    expect(body).toEqual(
+      expect.objectContaining({
+        sessions: expect.arrayContaining([
+          expect.objectContaining({ id: session.id, hasUnseenAttention: false }),
+        ]),
+      }),
+    );
+    await expect(titleLink).toHaveClass(/text-\[var\(--color-text-secondary\)\]/);
+    await expect(titleLink).toHaveCSS("color", "rgb(161, 161, 161)");
+    await expect(titleLink).toHaveCSS("opacity", "1");
   });
 });
 
@@ -1662,7 +1689,8 @@ test.describe("D4: Terminal button state", () => {
     });
     await expect(termBtn).toBeVisible();
     const classList = await termBtn.getAttribute("class");
-    expect(classList).toContain("opacity-25");
+    expect(classList).toContain("opacity-50");
+    await expect(termBtn).toHaveCSS("opacity", "0.5");
     await expect(termBtn).toBeDisabled();
   });
 
@@ -2054,9 +2082,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await expect(page.getByRole("link", { name: "Open PR action row" }).first()).toHaveCount(0);
   });
 
-  test("done click confirms active desk subagents and sends desk-scoped complete", async ({
-    page,
-  }) => {
+  test("done click closes desk with subagents without confirmation", async ({ page }) => {
     const session = makeSessionWithPR({
       id: "done-desk-1",
       prompt: "Desk done row",
@@ -2107,9 +2133,10 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         body: JSON.stringify({ completedIds: [session.id, subagent.id], lifecycle }),
       });
     });
+    let dialogs = 0;
     page.on("dialog", async (dialog) => {
-      expect(dialog.message()).toBe("Close this desk? 1 subagent on this checkout will be ended.");
-      await dialog.accept();
+      dialogs += 1;
+      await dialog.dismiss();
     });
 
     await page.goto("/");
@@ -2120,6 +2147,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await expect
       .poll(() => completeBody)
       .toEqual({ scope: "desk", operationId: expect.any(String) });
+    expect(dialogs).toBe(0);
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {

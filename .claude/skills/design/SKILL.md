@@ -14,7 +14,7 @@ COMPLETENESS: before implementation, including imported Claude Design.
 
 PREVIEW
 
-  Load frontend-codestyle and supplied design system; check tokens, components, typography, layout and states.
+  Load design-system and supplied design system; check tokens, components, typography, layout and states.
   Report conflicts between supplied system and repository rules; never choose silently.
   Render with existing components/tokens in isolated sidecar or local HTML.
   Save screenshot before implementation; keep preview code in artifacts.
@@ -22,12 +22,12 @@ PREVIEW
 CONTRAST: every action and label, both themes.
 
   Measure rendered/computed colors against composited backgrounds, including images/overlays.
-  AA: text 4.5:1; large text, icons, UI components 3:1.
+  Thresholds and token fixes: design-system references/contrast.md.
   Fix failures before handoff.
 
 HANDOFF: $SPUR_SESSION_ARTIFACTS_DIR/design/, never committed.
 
-  proposed-ui.png   changed components/states
+  proposed-ui.png   changed components/states at phone, iPad mini and desktop widths (design-system patterns.md TARGET SIZES)
   design-spec.md    before/after; screenshots; components/states; acceptance;
                     Approval status: pending or approved by user @ <ISO>;
                     approval message/scope; Telegram evidence or none: no channel

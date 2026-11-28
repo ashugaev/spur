@@ -30,6 +30,15 @@ function isExecutable(path: string): boolean {
   }
 }
 
+export function findExecutableOnPath(command: string): string | null {
+  for (const directory of (process.env["PATH"] ?? "").split(delimiter)) {
+    if (!directory) continue;
+    const candidate = join(directory, command);
+    if (isExecutable(candidate)) return candidate;
+  }
+  return null;
+}
+
 export function agentExecutableCommand(agent: AgentName): string {
   const executable = AGENT_EXECUTABLES[agent];
   return process.env[executable.env] || executable.command;
@@ -63,14 +72,11 @@ export function resolveAgentExecutable(agent: AgentName): AgentExecutableResolut
       source: override ? "environment" : "path",
     };
   }
-  for (const directory of (process.env["PATH"] ?? "").split(delimiter)) {
-    if (!directory) continue;
-    const candidate = join(directory, command);
-    if (isExecutable(candidate)) {
-      return { command, path: candidate, source: override ? "environment" : "path" };
-    }
-  }
-  return { command, path: null, source: override ? "environment" : "path" };
+  return {
+    command,
+    path: findExecutableOnPath(command),
+    source: override ? "environment" : "path",
+  };
 }
 
 export function missingAgentExecutableMessage(agent: AgentName): string {

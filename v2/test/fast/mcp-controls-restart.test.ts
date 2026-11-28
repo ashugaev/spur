@@ -163,13 +163,25 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
   let generation = 0;
   let startup: Promise<void>;
   const childOutput: string[] = [];
+  const startupObservations: { generation: number; stage: string; elapsedMs: number }[] = [];
   const childExits: {
     pid: number | undefined;
     code: number | null;
     signal: NodeJS.Signals | null;
   }[] = [];
   const startChild = (): Promise<void> => {
-    generation++;
+    const ownedGeneration = ++generation;
+    const startedAt = Date.now();
+    let startupStage = "awaiting-fixture";
+    const observe = (stage: string) => {
+      startupStage = stage;
+      startupObservations.push({
+        generation: ownedGeneration,
+        stage,
+        elapsedMs: Date.now() - startedAt,
+      });
+    };
+    observe(startupStage);
     const owned = spawn(process.execPath, ["--import", tsx, fixture, config], {
       cwd: root,
       stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -186,17 +198,45 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
       }
     });
     return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Owned daemon startup timeout")), 15000);
-      owned.once("message", () => {
+      const onMessage = (message: unknown) => {
+        if (
+          typeof message !== "object" ||
+          message === null ||
+          !("pid" in message) ||
+          message.pid !== owned.pid
+        )
+          return;
+        if (
+          "startupStage" in message &&
+          (message.startupStage === "importing-server" ||
+            message.startupStage === "starting-server")
+        ) {
+          observe(message.startupStage);
+          return;
+        }
+        if (!("ready" in message) || message.ready !== true) return;
+        observe("ready");
         clearTimeout(timer);
+        owned.off("message", onMessage);
         resolve();
-      });
+      };
+      const timer = setTimeout(() => {
+        owned.off("message", onMessage);
+        reject(
+          new Error(
+            `Owned daemon startup timeout: generation=${ownedGeneration}, last-observed-stage=${startupStage}, elapsedMs=${Date.now() - startedAt}, exitCode=${owned.exitCode}, signal=${owned.signalCode}`,
+          ),
+        );
+      }, 15000);
+      owned.on("message", onMessage);
       owned.once("error", (error) => {
         clearTimeout(timer);
+        owned.off("message", onMessage);
         reject(error);
       });
       owned.once("exit", () => {
         clearTimeout(timer);
+        owned.off("message", onMessage);
         reject(new Error("Owned daemon exited before readiness"));
       });
     });
@@ -237,6 +277,9 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     sentinel = await paneIdentity();
     startup = startChild();
     await startup;
+    const initialInfo = await fetch(`http://127.0.0.1:${daemonPort}/info`);
+    expect(initialInfo.status).toBe(200);
+    expect(await initialInfo.json()).toMatchObject({ pid: child?.pid });
     host = await startMcpHttp(config);
     const first = await connect();
     const before = await first.callTool({ name: "mcp_status", arguments: {} });
@@ -401,6 +444,7 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     const sourceAfter = await sourceSnapshot();
     Object.assign(evidence, {
       childOutput,
+      startupObservations,
       childExits,
       sourceBefore,
       sourceAfter,

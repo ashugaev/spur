@@ -324,7 +324,7 @@ export function AuthLoginDialog({
       <div
         ref={panelRef}
         tabIndex={-1}
-        className="max-h-[calc(100dvh-2rem)] w-[min(26rem,calc(100vw-2rem))] overflow-y-auto outline-none border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]"
+        className="max-h-[calc(100dvh-2rem)] w-[min(26rem,calc(100vw-2rem))] overflow-y-auto outline-none border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-raised"
       >
         <div className="mb-3 flex items-center gap-2">
           <h2
@@ -377,7 +377,7 @@ export function AuthLoginDialog({
                     }`}
                   />
                   <span>
-                    <span className="block font-bold uppercase tracking-[0.06em] text-[var(--color-text-primary)]">
+                    <span className="block font-bold uppercase tracking-meta text-[var(--color-text-primary)]">
                       {option.title}
                       {option.tag ? (
                         <span className="ml-1.5 border border-[var(--color-border-default)] px-1 font-normal text-[var(--color-text-secondary)]">
@@ -395,7 +395,7 @@ export function AuthLoginDialog({
           {view === "api-key" ? (
             <>
               <label className="flex flex-col gap-1">
-                <span className="uppercase tracking-[0.08em]">API key</span>
+                <span className="uppercase tracking-meta">API key</span>
                 <input
                   ref={inputRef}
                   autoComplete="off"
@@ -425,7 +425,7 @@ export function AuthLoginDialog({
               </StepLine>
               <label className="flex flex-col gap-1">
                 {account.provider === "codex" ? (
-                  <span className="uppercase tracking-[0.08em]">
+                  <span className="uppercase tracking-meta">
                     Returned URL · localhost:1455/auth/callback?code=…
                   </span>
                 ) : null}
@@ -451,7 +451,7 @@ export function AuthLoginDialog({
                   <StepLine n={1}>Copy the code.</StepLine>
                   <div className="flex items-center justify-between gap-2.5 border border-[var(--color-border-strong)] px-3.5 py-3">
                     <span
-                      className="min-w-0 break-all text-[22px] font-bold tracking-[0.12em] text-[var(--color-text-primary)] sm:text-[26px] sm:tracking-[0.18em]"
+                      className="min-w-0 break-all text-display font-bold tracking-label text-[var(--color-text-primary)] sm:tracking-caps"
                       data-testid="auth-login-user-code"
                     >
                       {login.userCode}

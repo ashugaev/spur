@@ -70,7 +70,7 @@ import {
   type ServiceId,
 } from "./update-health.js";
 import { getVersion } from "./version.js";
-import { resolveAgentExecutable } from "./agents/executable.js";
+import { findExecutableOnPath, resolveAgentExecutable } from "./agents/executable.js";
 import { ensureCursorTokenUsageHook } from "./cursor-token-usage.js";
 
 // C2: below this available-KB/free-inode floor, `data-dir-disk-space` reports
@@ -1797,19 +1797,61 @@ export function resolveNpmInitScript(cliEntrypoint: string): string {
   return join(dirname(cliPath), "..", "scripts", "npm-init.sh");
 }
 
+// install: install Tailscale when missing, then bind the tailnet IP.
+// keep: bind the tailnet IP when Tailscale is already up; never install.
+// off: no Tailscale call. Unset: no flag; the script only prints a hint.
+export type NpmInitTailscaleMode = "install" | "keep" | "off";
+
+const NPM_INIT_TAILSCALE_FLAGS: Record<NpmInitTailscaleMode, string> = {
+  install: "--install-tailscale",
+  keep: "--tailscale",
+  off: "--no-tailscale",
+};
+
+// Runs before any host write: the Tailscale installer elevates itself, so a
+// host without root, without sudo authorization (`sudo -v` on a terminal), or
+// without passwordless sudo (no terminal) fails here.
+function assertTailscaleInstallPossible(): void {
+  if (process.getuid?.() === 0) return;
+  const noSudo = new Error(
+    "npm-init: --tailscale needs root or sudo to install Tailscale; no changes made. Install it manually (https://tailscale.com/download), then re-run: spur init --tailscale",
+  );
+  if (findExecutableOnPath("sudo") === null) throw noSudo;
+  if (process.stdin.isTTY) {
+    try {
+      execFileSync("sudo", ["-v"], { stdio: "inherit" });
+    } catch {
+      throw noSudo;
+    }
+    return;
+  }
+  if (tryExec("sudo", ["-n", "true"]) === undefined) {
+    throw new Error(
+      "npm-init: --tailscale needs passwordless sudo when run without a terminal; no changes made. Run spur init --tailscale from a terminal, or install Tailscale manually (https://tailscale.com/download) and re-run.",
+    );
+  }
+}
+
 export function runNpmInit(
   cliEntrypoint: string,
   options: {
     noStart?: boolean;
     exposeWeb?: boolean;
     webPort?: string;
-    tailscale?: boolean;
+    tailscale?: NpmInitTailscaleMode;
     configPath?: string;
   },
 ): void {
   const script = resolveNpmInitScript(cliEntrypoint);
   if (!existsSync(script)) {
     throw new Error(`npm init script not found: ${script}`);
+  }
+  if (
+    options.tailscale === "install" &&
+    !options.exposeWeb &&
+    findExecutableOnPath("tailscale") === null
+  ) {
+    assertTailscaleInstallPossible();
   }
   // Full repair: `runNpmInit` (`spur init`/`update`/`reinit`) is the one
   // caller allowed to do both the pin-file write and the `~/.npmrc` surgery
@@ -1828,11 +1870,15 @@ export function runNpmInit(
   if (options.webPort) {
     args.push("--web-port", options.webPort);
   }
-  args.push(options.tailscale === false ? "--no-tailscale" : "--tailscale");
+  if (options.tailscale !== undefined) {
+    args.push(NPM_INIT_TAILSCALE_FLAGS[options.tailscale]);
+  }
+  execFileSync("bash", [script, ...args], { stdio: "inherit" });
+  // Both agent-integration writes follow the script so its plan announces them
+  // before they happen.
   if (!ensureCursorTokenUsageHook()) {
     writeStderr("spur: Cursor token hook setup skipped; existing hooks were preserved");
   }
-  execFileSync("bash", [script, ...args], { stdio: "inherit" });
   // Refreshes ~/.claude/skills and ~/.codex/skills for every `spur init` /
   // `update` / `reinit` / `POST /deploy/switch` / auto-update tick — the
   // callers that all funnel through this function. Never allowed to fail

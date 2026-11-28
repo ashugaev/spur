@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { appendFileSync, existsSync } from "node:fs";
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -32,7 +32,44 @@ let activeTmuxSocketName: string | null = null;
 // capture (the prior design) only ever protects the FIRST context in a file;
 // every later context got no net at all.
 const liveTmuxSockets = new Set<string>();
-let tmuxExitNetRegistered = false;
+// Daemon children spawned by startDaemon that have not emitted "exit". The
+// exit net SIGKILLs these through their own ChildProcess handle only — never
+// by raw pid — so it can never signal a process this module did not spawn.
+const ownedDaemonChildren = new Set<ChildProcess>();
+let exitNetRegistered = false;
+
+// Kills every armed tmux socket and every live fixture daemon child. Pid is
+// checked here, not at registration: a failed spawn leaves pid undefined.
+export function sweepRuntimeFixtures(): void {
+  for (const socket of liveTmuxSockets) {
+    spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+  }
+  for (const child of ownedDaemonChildren) {
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+  }
+}
+
+function registerExitNet(): void {
+  if (exitNetRegistered) return;
+  exitNetRegistered = true;
+  process.once("exit", sweepRuntimeFixtures);
+  // A vitest fork-pool worker is torn down by its parent sending SIGTERM, and
+  // a cancelled CI job delivers SIGTERM/SIGINT mid-test. "exit" never fires on
+  // either path: the default disposition skips it, and vitest replaces
+  // process.exit with a throwing guard while a test file runs. So the handler
+  // sweeps synchronously, removes itself, and re-raises the same signal to
+  // die by its default disposition.
+  const onSignal = (signal: NodeJS.Signals): void => {
+    sweepRuntimeFixtures();
+    process.removeListener("SIGTERM", onSignal);
+    process.removeListener("SIGINT", onSignal);
+    process.kill(process.pid, signal);
+  };
+  process.once("SIGTERM", onSignal);
+  process.once("SIGINT", onSignal);
+}
 
 export function setActiveTmuxSocketName(socketName: string | null): void {
   const next = socketName?.trim() || null;
@@ -43,28 +80,7 @@ export function setActiveTmuxSocketName(socketName: string | null): void {
   if (next) {
     liveTmuxSockets.add(next);
   }
-  if (!tmuxExitNetRegistered) {
-    tmuxExitNetRegistered = true;
-    const sweep = (): void => {
-      for (const socket of liveTmuxSockets) {
-        spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
-      }
-    };
-    process.once("exit", sweep);
-    // A vitest fork-pool worker is torn down by its parent sending SIGTERM,
-    // not by the worker's own event loop going idle — plain `process.once
-    // ("exit", ...)` alone never fires on that path (measured: a fixture that
-    // arms two sockets and returns normally still leaves both tmux servers
-    // alive after the whole `vitest run` invocation exits). Translating the
-    // signal into an explicit process.exit() makes the exit path uniform:
-    // the "exit" listener above still does the actual kill, this only
-    // ensures it gets invoked instead of the default signal disposition
-    // terminating the process without emitting "exit" at all. A prior
-    // listener for either signal (there is none installed in this test
-    // tree) would be overridden by design — teardown safety wins here.
-    process.once("SIGTERM", () => process.exit(0));
-    process.once("SIGINT", () => process.exit(0));
-  }
+  registerExitNet();
 }
 
 // Builds the `-L <socket> ...` argv this module always shapes tmux calls
@@ -253,6 +269,26 @@ export function fakeAgentScript(
         ? "OpenAI Codex"
         : "Cursor Agent";
   const prompt = agentName === "claude" ? "❯" : agentName === "codex" ? "›" : "Composer 2 Fast";
+  // Real claude writes sessions/<pid>.json once its REPL is up and keeps its
+  // status current (busy / idle / waiting + waitingFor); Spur's launch
+  // readiness waits for the file and the daemon's status reader ranks it above
+  // the JSONL. Mirrors that contract, in the launch's config dir.
+  // claude_set_status <status> [waitingFor] rewrites the file atomically.
+  const registerSession =
+    agentName === "claude"
+      ? `claude_sessions_dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
+claude_session_file="$claude_sessions_dir/$$.json"
+mkdir -p "$claude_sessions_dir"
+claude_set_status() {
+  local waiting_json=""
+  if [[ -n "\${2:-}" ]]; then
+    waiting_json=",\\"waitingFor\\":\\"$2\\""
+  fi
+  printf '{"pid":%s,"sessionId":"%s","cwd":"%s","kind":"interactive","status":"%s"%s,"statusUpdatedAt":%s}\\n' "$$" "$session_uuid" "$PWD" "$1" "$waiting_json" "$(( $(date +%s) * 1000 ))" > "$claude_session_file.tmp"
+  mv "$claude_session_file.tmp" "$claude_session_file"
+}
+claude_set_status idle`
+      : "";
   const startup =
     agentName === "claude"
       ? `if [[ "\${1:-}" == "--print" ]]; then
@@ -508,13 +544,15 @@ fi`;
   // plus structured rollout events for question/waiting metadata.
   const signalWaiting =
     agentName === "claude"
-      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'
+      claude_set_status idle`
       : agentName === "codex"
         ? `emit_hook_event "Stop"`
         : `jsonl_append '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'`;
   const signalNeedsInput =
     agentName === "claude"
-      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'`
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'
+      claude_set_status waiting "input needed"`
       : agentName === "codex"
         ? `emit_hook_needs_input
       emit_rollout_input_required`
@@ -535,7 +573,8 @@ fi`;
     encoded_text="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$full_msg")"
     timestamp="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
     printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":%s}]},"timestamp":"%s","sessionId":"%s"}\\n' "$encoded_text" "$timestamp" "$session_uuid" >> "$session_dir/$session_uuid.jsonl"
-  fi`;
+  fi
+  claude_set_status busy`;
   // Codex uses a buffering read loop that drains pasted lines before emitting
   // one event_msg entry at submit time, so scanCodexRolloutForMessage sees
   // the exact full restore/replay message even across interrupt-driven sends.
@@ -805,6 +844,7 @@ else:
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
 printf '%s\n' "${header}"
 printf '%s\n' "${prompt}"
+${registerSession}
 # Backgrounded: a resume/wake triggered by send() holds the session's
 # workspace lock for the whole submit-ack wait, and every SPUR_TODO_COMMAND
 # call below re-enters that same lock. Run synchronously here and a
@@ -1104,7 +1144,21 @@ export async function createTmuxSession(args: {
   cwd: string;
   env?: Record<string, string | undefined>;
 }): Promise<void> {
-  const tmuxArgs = ["new-session", "-d", "-s", args.sessionName, "-x", "200", "-y", "50"];
+  // A controller CLI that outlives its test daemon must not auto-start a
+  // replacement: that daemon forks detached, untracked by teardown, and
+  // survives the run as an orphan.
+  const tmuxArgs = [
+    "new-session",
+    "-d",
+    "-s",
+    args.sessionName,
+    "-x",
+    "200",
+    "-y",
+    "50",
+    "-e",
+    "SPUR_DISABLE_AUTOSTART=1",
+  ];
   for (const [key, value] of Object.entries(args.env ?? {})) {
     if (!value) continue;
     tmuxArgs.push("-e", `${key}=${value}`);
@@ -1335,8 +1389,11 @@ ${content}`,
   ): Promise<{ stdout: string; stderr: string }> => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [CLI_PATH, ...args], {
       cwd: V2_DIR,
+      // A CLI child outliving a killed fixture daemon must not fork a detached
+      // replacement. Tests asserting autostart or restart pass "0".
       env: {
         ...env,
+        SPUR_DISABLE_AUTOSTART: "1",
         ...(options?.env ?? {}),
       },
       timeout: options?.timeoutMs ?? 60_000,
@@ -1367,6 +1424,9 @@ ${content}`,
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
+    ownedDaemonChildren.add(child);
+    child.once("exit", () => ownedDaemonChildren.delete(child));
+    registerExitNet();
     const tailLimit = 4096;
     let stdout = "";
     let stderr = "";

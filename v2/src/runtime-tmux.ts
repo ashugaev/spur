@@ -7,6 +7,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { agentInterruptKeys, agentSendMode } from "./agents/index.js";
+import { claudeStartupDialog } from "./agents/claude.js";
+import type { ClaudeLaunchRegistration } from "./agents/types.js";
+import { readClaudeLaunchRegistration } from "./claude-session-status.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS } from "./npm-prefix.js";
@@ -404,6 +407,27 @@ const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
 const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
 const CODEX_READY_SETTLE_DELAY_MS = 500;
 const AGENT_READY_TIMEOUT_MS = 120_000;
+// A Claude dialog footer seen on consecutive captures spanning this long fails
+// readiness: nobody is answering it, and typing into it would pick its default
+// option. The span check needs at least two captures, so one sighting never fails.
+const CLAUDE_DIALOG_REFUSE_AFTER_MS = 1_500;
+// While a dialog is up, the next capture lands when the refusal is due, never
+// sooner than this and never later than the normal cadence.
+const CLAUDE_DIALOG_POLL_FLOOR_MS = 250;
+// Claude registered with no dialog on screen but the ready markers missing this
+// long: its terminal output drifted. Registration normally leads the markers by
+// well under a second, and startup dialogs never write it. 30s leaves room for a
+// slow first render on a loaded host before proceeding on registration alone.
+const CLAUDE_MARKER_GRACE_MS = 30_000;
+// Before Claude registers, its registration file is re-read at this interval
+// inside each capture wait: a local file read, no tmux load. Registration seen
+// cuts the wait short and the pane is captured at once.
+const CLAUDE_REGISTRATION_POLL_MS = 200;
+// Capture cadence for the first CLAUDE_REGISTERED_FAST_WINDOW_MS after Claude
+// registers; markers normally follow within it. Past the window the normal
+// backoff resumes for the rest of the marker grace.
+const CLAUDE_REGISTERED_POLL_MS = 250;
+const CLAUDE_REGISTERED_FAST_WINDOW_MS = 3_000;
 const AGENT_READY_POLL_INITIAL_MS = 500;
 const AGENT_READY_POLL_MAX_MS = 2_000;
 const AGENT_READY_POLL_JITTER_MAX_MS = 250;
@@ -1792,11 +1816,33 @@ export class PromptReadyTimeoutError extends Error {
   }
 }
 
+// Claude sits on a startup dialog (bypass, trust, API key, resume, usage
+// limit). Not a PromptReadyTimeoutError: callers that continue after that one
+// (restore with a live agent) must not type into a dialog.
+export class ClaudeStartupDialogError extends Error {
+  readonly screen: string;
+
+  constructor(args: { sessionName: string; screen: string; capture: string }) {
+    const detail = args.capture.trim()
+      ? `\nLast pane output:\n${args.capture.trimEnd().split("\n").slice(-40).join("\n")}`
+      : "";
+    super(
+      `Claude ${args.screen} blocks the prompt in tmux session "${args.sessionName}"; answer it in the terminal or fix the Claude config, then retry${detail}`,
+    );
+    this.name = "ClaudeStartupDialogError";
+    this.screen = args.screen;
+  }
+}
+
 export async function waitForTmuxReady(
   sessionName: string,
   readyMarkers: string[],
   timeoutMs = AGENT_READY_TIMEOUT_MS,
-  options?: { agent?: AgentName; operation?: RestoreOperationContext },
+  options?: {
+    agent?: AgentName;
+    operation?: RestoreOperationContext;
+    claudeRegistration?: ClaudeLaunchRegistration;
+  },
 ): Promise<void> {
   const wait = <T>(promise: Promise<T>): Promise<T> => options?.operation?.wait(promise) ?? promise;
   options?.operation?.assertActive();
@@ -1810,6 +1856,13 @@ export async function waitForTmuxReady(
   let lastCapture = "";
   let lastCursorTrustConfirmAt = 0;
   let cursorTrustConfirmAttempts = 0;
+  let claudeDialog: string | null = null;
+  let claudeDialogSinceMs = 0;
+  let claudeRegistrationMissing = false;
+  let claudePanePid: number | null = null;
+  let claudeRegistered = false;
+  let claudeRegisteredAtMs: number | null = null;
+  let claudeMarkerGraceSinceMs: number | null = null;
   let pollDelayMs = AGENT_READY_POLL_INITIAL_MS;
   const pollJitterMs = tmuxReadyPollJitterMs(sessionName);
   while (Date.now() < deadline) {
@@ -1837,7 +1890,42 @@ export async function waitForTmuxReady(
       await wait(sleep(CURSOR_READY_SETTLE_DELAY_MS));
       return;
     }
-    if (readyMarkers.every((marker) => capture.includes(marker))) {
+    if (options?.agent === "claude") {
+      const dialog = claudeStartupDialog(capture);
+      if (dialog !== null && dialog !== claudeDialog) {
+        claudeDialogSinceMs = Date.now();
+      }
+      claudeDialog = dialog;
+      if (dialog !== null && Date.now() - claudeDialogSinceMs >= CLAUDE_DIALOG_REFUSE_AFTER_MS) {
+        throw new ClaudeStartupDialogError({ sessionName, screen: dialog, capture });
+      }
+    }
+    const markersShown = readyMarkers.every((marker) => capture.includes(marker));
+    if (options?.agent === "claude" && options.claudeRegistration) {
+      if (claudeDialog === null) {
+        // Markers alone are not enough: Claude draws them before its REPL takes
+        // input. Its own sessions/<pid>.json appears once the REPL is up.
+        claudePanePid ??= await wait(getTmuxPanePid(sessionName, { fresh: true }));
+        claudeRegistered ||= await wait(
+          readClaudeLaunchRegistration(options.claudeRegistration, claudePanePid),
+        );
+        if (claudeRegistered && markersShown) return;
+        if (markersShown) claudeRegistrationMissing = true;
+        if (claudeRegistered) {
+          claudeMarkerGraceSinceMs ??= Date.now();
+          if (Date.now() - claudeMarkerGraceSinceMs >= CLAUDE_MARKER_GRACE_MS) {
+            process.stderr.write(
+              `spur: Claude registered in tmux session "${sessionName}" but its ready markers ` +
+                `(${readyMarkers.join(", ")}) never appeared; proceeding on registration alone. ` +
+                `Claude's terminal output may have changed.\n`,
+            );
+            return;
+          }
+        }
+      } else {
+        claudeMarkerGraceSinceMs = null;
+      }
+    } else if (claudeDialog === null && markersShown) {
       if (options?.agent === "codex") {
         // Codex can print its prompt before the next stdin read is ready.
         await wait(sleep(CODEX_READY_SETTLE_DELAY_MS));
@@ -1859,15 +1947,59 @@ export async function waitForTmuxReady(
       await wait(sleep(AGENT_READY_POLL_INITIAL_MS));
       continue;
     }
-    await wait(sleep(pollDelayMs + pollJitterMs));
+    const pendingClaudeRegistration =
+      options?.agent === "claude" && claudeDialog === null && !claudeRegistered
+        ? options.claudeRegistration
+        : undefined;
+    if (pendingClaudeRegistration) {
+      // Same capture cadence as before registration; only the file is read
+      // between captures, so registration ends the wait within one slice.
+      const captureDelayMs = pollDelayMs + pollJitterMs;
+      for (
+        let waitedMs = 0;
+        waitedMs < captureDelayMs && !claudeRegistered;
+        waitedMs += CLAUDE_REGISTRATION_POLL_MS
+      ) {
+        await wait(sleep(Math.min(CLAUDE_REGISTRATION_POLL_MS, captureDelayMs - waitedMs)));
+        claudeRegistered = await wait(
+          readClaudeLaunchRegistration(pendingClaudeRegistration, claudePanePid),
+        );
+      }
+      if (claudeRegistered) continue;
+    } else if (
+      claudeRegistered &&
+      Date.now() - (claudeRegisteredAtMs ??= Date.now()) < CLAUDE_REGISTERED_FAST_WINDOW_MS
+    ) {
+      await wait(sleep(CLAUDE_REGISTERED_POLL_MS));
+      continue;
+    } else {
+      const captureDelayMs = pollDelayMs + pollJitterMs;
+      const dialogRefuseInMs = CLAUDE_DIALOG_REFUSE_AFTER_MS - (Date.now() - claudeDialogSinceMs);
+      await wait(
+        sleep(
+          claudeDialog === null
+            ? captureDelayMs
+            : Math.min(captureDelayMs, Math.max(dialogRefuseInMs, CLAUDE_DIALOG_POLL_FLOOR_MS)),
+        ),
+      );
+    }
     if (Date.now() - startedAt >= AGENT_READY_POLL_BACKOFF_AFTER_MS) {
       pollDelayMs = Math.min(pollDelayMs * 2, AGENT_READY_POLL_MAX_MS);
     }
   }
 
-  const detail = lastCapture.trim()
-    ? `\nLast pane output:\n${lastCapture.trimEnd().split("\n").slice(-40).join("\n")}`
-    : "";
+  if (claudeDialog !== null) {
+    throw new ClaudeStartupDialogError({ sessionName, screen: claudeDialog, capture: lastCapture });
+  }
+  const registrationDetail =
+    claudeRegistrationMissing && options?.claudeRegistration
+      ? `\nClaude session registration not seen in ${options.claudeRegistration.sessionsDir} for session ${options.claudeRegistration.sessionId}`
+      : "";
+  const detail =
+    registrationDetail +
+    (lastCapture.trim()
+      ? `\nLast pane output:\n${lastCapture.trimEnd().split("\n").slice(-40).join("\n")}`
+      : "");
   throw new PromptReadyTimeoutError({ sessionName, elapsedMs: Date.now() - startedAt, detail });
 }
 

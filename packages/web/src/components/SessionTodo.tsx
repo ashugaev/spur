@@ -81,7 +81,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
     <section aria-labelledby="session-todo-heading">
       <h2
         id="session-todo-heading"
-        className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]"
+        className="flex items-center gap-2 py-2 text-label font-bold uppercase tracking-caps text-[var(--color-text-tertiary)]"
       >
         ToDo
         <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
@@ -115,7 +115,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
             >
               {resolved}/{projection.counts.total}
             </div>
-            <div className="flex flex-wrap gap-3 uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">
+            <div className="flex flex-wrap gap-3 uppercase tracking-meta text-[var(--color-text-secondary)]">
               {projection.counts.open > 0 ? <span>{projection.counts.open} open</span> : null}
               {projection.counts.held > 0 ? <span>{projection.counts.held} held</span> : null}
               <span>{resolved} resolved</span>
@@ -178,7 +178,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
                     >
                       {item.history.map((event) => (
                         <div key={event.eventId}>
-                          <div className="uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                          <div className="uppercase tracking-meta text-[var(--color-text-tertiary)]">
                             {event.type.replaceAll("_", " ")} · {actorLabel(event.actor)} ·{" "}
                             {new Date(event.at).toLocaleString()}
                           </div>
@@ -197,7 +197,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
                           key={event.eventId}
                           className="border-t border-[var(--color-border-subtle)] pt-2"
                         >
-                          <div className="uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                          <div className="uppercase tracking-meta text-[var(--color-text-tertiary)]">
                             Completion override · {actorLabel(event.actor)} ·{" "}
                             {new Date(event.at).toLocaleString()}
                           </div>
