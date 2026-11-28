@@ -1,11 +1,12 @@
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentExecutableCommand,
   agentPaneChildFallbackEnabled,
   agentProcessNames,
+  findExecutableOnPath,
   missingAgentExecutableMessage,
   resolveAgentExecutable,
 } from "../../src/agents/executable.js";
@@ -65,6 +66,19 @@ describe("agent executable resolution", () => {
       path: executable,
       source: "path",
     });
+  });
+
+  it("finds a command on PATH and skips empty entries and non-executables", async () => {
+    const empty = await mkdtemp(join(tmpdir(), "spur-find-empty-"));
+    const bin = await mkdtemp(join(tmpdir(), "spur-find-bin-"));
+    cleanupPaths.push(empty, bin);
+    await writeFile(join(empty, "sudo"), "#!/bin/sh\n", "utf8");
+    await chmod(join(empty, "sudo"), 0o644);
+    await writeFile(join(bin, "sudo"), "#!/bin/sh\n", "utf8");
+    await chmod(join(bin, "sudo"), 0o755);
+    vi.stubEnv("PATH", `${delimiter}${empty}${delimiter}${bin}`);
+    expect(findExecutableOnPath("sudo")).toBe(join(bin, "sudo"));
+    expect(findExecutableOnPath("tailscale")).toBeNull();
   });
 
   it("uses an explicit executable path without relying on PATH", async () => {

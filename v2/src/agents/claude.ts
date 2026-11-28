@@ -5,7 +5,8 @@ import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
 import { SNAPSHOT_HOOK_TOOL_NAME, SNAPSHOT_HOOK_TURN_FILE } from "../snapshots.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
-import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import type { AgentLaunchPlan, AgentResumePlan, ClaudeLaunchRegistration } from "./types.js";
+import { detectClaudeUsageLimitMenu } from "../rate-limit-detect.js";
 import type { AgentModel } from "./models.js";
 import type { ProviderReasoningEffort } from "../types.js";
 import { agentExecutableCommand } from "./executable.js";
@@ -362,6 +363,53 @@ function withClaudeConfigDir(command: string, configDir?: string): string {
   return `CLAUDE_CONFIG_DIR=${shellEscape(configDir)} ${command}`;
 }
 
+// The sessions dir the launched claude writes its registration into: the
+// CLAUDE_CONFIG_DIR on the launch command, else the daemon's own (copied into
+// the pane env), else ~/.claude. Empty values count as unset.
+function claudeRegistrationFor(
+  sessionId: string,
+  options?: ClaudePlanOptions,
+): ClaudeLaunchRegistration {
+  const configDir =
+    options?.claudeConfigDir || process.env["CLAUDE_CONFIG_DIR"] || join(homedir(), ".claude");
+  return { sessionsDir: join(configDir, "sessions"), sessionId };
+}
+
+const CLAUDE_STARTUP_DIALOG_FOOTER = "Enter to confirm · Esc to";
+
+const CLAUDE_STARTUP_DIALOG_NAMES: ReadonlyArray<readonly [string, string]> = [
+  ["Bypass Permissions mode", "bypass permissions warning"],
+  ["Quick safety check", "workspace trust dialog"],
+  ["Do you want to use this API key", "custom API key prompt"],
+  ["Resume this conversation?", "resume usage prompt"],
+  ["Resume from summary", "resume summary prompt"],
+];
+
+/**
+ * Name of the Claude dialog blocking the composer in a pane capture, or null.
+ * A dialog is live only when its footer sits in the last 3 non-empty lines, so
+ * a dismissed dialog left in scrollback above a ready REPL does not count.
+ */
+export function claudeStartupDialog(capture: string): string | null {
+  if (detectClaudeUsageLimitMenu(capture)) {
+    return "usage limit menu";
+  }
+  const lines = capture
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (!lines.slice(-3).some((line) => line.startsWith(CLAUDE_STARTUP_DIALOG_FOOTER))) {
+    return null;
+  }
+  const bottom = lines.slice(-20).join("\n");
+  for (const [needle, name] of CLAUDE_STARTUP_DIALOG_NAMES) {
+    if (bottom.includes(needle)) {
+      return name;
+    }
+  }
+  return "startup dialog";
+}
+
 const CLAUDE_RESTRICT_WRITES_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"] as const;
 
 function claudeRestrictWritesArgs(restrictWrites?: boolean): string {
@@ -394,6 +442,9 @@ export function buildClaudePlan(prompt: string, options?: ClaudePlanOptions): Ag
     ),
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
+    ...(options?.sessionId
+      ? { claudeRegistration: claudeRegistrationFor(options.sessionId, options) }
+      : {}),
   };
 }
 
@@ -415,6 +466,7 @@ export function buildClaudeResumePlan(
       options?.claudeConfigDir,
     ),
     readyMarkers: ["❯"],
+    claudeRegistration: claudeRegistrationFor(sessionId, options),
   };
 }
 

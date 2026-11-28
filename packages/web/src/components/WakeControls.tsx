@@ -191,7 +191,7 @@ export function WakeControls({
   const popover = open ? (
     <div
       aria-label="Wake controls"
-      className="fixed z-30 w-[20rem] max-w-[calc(100vw-1rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-2 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+      className="fixed z-30 w-[20rem] max-w-[calc(100vw-1rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-2 shadow-overlay"
       ref={menuRef}
       role="dialog"
       style={menuStyle}
@@ -215,7 +215,7 @@ export function WakeControls({
               key={summary.target}
             >
               <div className="flex items-center justify-between gap-3">
-                <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-status-attention)]">
+                <span className="text-label font-bold uppercase tracking-label text-[var(--color-status-attention)]">
                   {summary.label}
                 </span>
                 <span className="font-mono text-[var(--color-text-primary)]">
@@ -223,12 +223,12 @@ export function WakeControls({
                 </span>
               </div>
               {summary.intervalMs ? (
-                <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                <span className="mt-1 block font-mono text-label uppercase tracking-meta text-[var(--color-text-tertiary)]">
                   every {formatIntervalDuration(summary.intervalMs)}
                 </span>
               ) : null}
               {summary.dailyAt ? (
-                <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                <span className="mt-1 block font-mono text-label uppercase tracking-meta text-[var(--color-text-tertiary)]">
                   daily {summary.dailyAt.join(", ")}
                 </span>
               ) : null}
@@ -237,7 +237,7 @@ export function WakeControls({
                   until {summary.stopCondition}
                 </span>
               ) : null}
-              <label className="mt-2 block text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
+              <label className="mt-2 block text-label uppercase tracking-label text-[var(--color-text-tertiary)]">
                 Message
                 <textarea
                   aria-label={`${summary.label} message`}
@@ -253,7 +253,7 @@ export function WakeControls({
               <div className="mt-2 flex flex-wrap gap-2">
                 <button
                   aria-busy={(busyTarget === summary.target && busyAction === "save") || undefined}
-                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-1.5 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-1.5 text-label uppercase tracking-meta text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                   disabled={saveDisabled}
                   onClick={() => saveMessage(summary.target)}
                   type="button"
@@ -265,7 +265,7 @@ export function WakeControls({
                 </button>
                 <button
                   aria-busy={(busyTarget === summary.target && busyAction === "wake") || undefined}
-                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-1.5 text-[10px] uppercase tracking-[0.08em] text-[var(--color-status-attention)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-1.5 text-label uppercase tracking-meta text-[var(--color-status-attention)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                   disabled={wakeDisabled}
                   onClick={() => wakeNow(summary.target)}
                   type="button"
@@ -282,7 +282,7 @@ export function WakeControls({
       </div>
       {error ? (
         <div
-          className="mt-2 border-t border-[var(--color-border-subtle)] px-2.5 pt-2 text-[var(--color-chip-error-text)]"
+          className="mt-2 border-t border-[var(--color-border-subtle)] px-2.5 pt-2 text-[var(--color-status-error)]"
           role="alert"
         >
           {error}
@@ -306,12 +306,12 @@ export function WakeControls({
         <span>{wakeTriggerLabel(summaries)}</span>
         <span className="font-mono text-[var(--color-text-primary)]">{countdown}</span>
         {primarySummary.intervalMs ? (
-          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+          <span className="font-mono text-label uppercase tracking-meta text-[var(--color-text-tertiary)]">
             every {formatIntervalDuration(primarySummary.intervalMs)}
           </span>
         ) : null}
         {primarySummary.dailyAt ? (
-          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+          <span className="font-mono text-label uppercase tracking-meta text-[var(--color-text-tertiary)]">
             daily {primarySummary.dailyAt.join(", ")}
           </span>
         ) : null}

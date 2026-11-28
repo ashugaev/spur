@@ -5,10 +5,15 @@
  */
 
 export const INPUT_CLASS =
-  "border border-[var(--color-input-border)] bg-[var(--color-input-bg)] px-2.5 py-2 text-[var(--color-input-text)] outline-none transition focus:border-[var(--color-accent)]";
+  "border border-[var(--color-input-border)] bg-[var(--color-input-bg)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]";
 
-const BUTTON_BASE_CLASS =
-  "border px-2 py-1 font-bold uppercase outline-hidden transition-colors focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50";
+export const FOCUS_RING_CLASS =
+  "outline-hidden focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)]";
+
+const BUTTON_BASE_CLASS = `border px-2 py-1 font-bold uppercase transition-colors ${FOCUS_RING_CLASS} disabled:cursor-not-allowed disabled:opacity-50`;
+
+/** Square icon-only button. Caller adds size (`h-8 w-8`) and idle text color. */
+export const ICON_BUTTON_CLASS = `inline-flex shrink-0 items-center justify-center border border-[var(--color-border-strong)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] ${FOCUS_RING_CLASS} disabled:cursor-not-allowed disabled:opacity-50`;
 
 export const SECONDARY_BUTTON_CLASS = `${BUTTON_BASE_CLASS} border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]`;
 
@@ -24,4 +29,4 @@ export const CHECKBOX_CLASS =
 export const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
 export const STATUS_CARD_CLASS =
-  "border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]";
+  "border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-raised";

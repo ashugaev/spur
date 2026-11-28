@@ -4490,6 +4490,55 @@ projects:
     expect(result.pane).not.toContain("This session was restored after the agent exited.");
   });
 
+  it("keeps a TTY list controller from forking a daemon after the test daemon stops", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-tty-orphan-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({ HOME: context.env.HOME, PATH: context.env.PATH });
+    const configPath = await context.writeConfig(
+      "tty-orphan.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const controllerSessionName = `${sessionPrefix}-ui`;
+    currentActiveContext().controllerSessionName = controllerSessionName;
+    await createTmuxSession({
+      sessionName: controllerSessionName,
+      cwd: context.rootDir,
+      command: `${process.execPath} ${CLI_PATH} --config ${configPath} list`,
+      env: { HOME: context.env.HOME, PATH: context.env.PATH },
+    });
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("Sessions"),
+    });
+
+    await stopDaemonByPid(daemon.info.pid);
+    delete currentActiveContext().daemonPid;
+
+    // The list refreshes every 2s; either it reports the unreachable daemon
+    // or it has forked a replacement that now answers on the port.
+    const outcome = await pollUntil(
+      async (): Promise<{ kind: "refused" } | { kind: "forked"; pid: number } | null> => {
+        if ((await captureTmuxPane(controllerSessionName)).includes("SPUR_DISABLE_AUTOSTART=1")) {
+          return { kind: "refused" };
+        }
+        try {
+          const info = await context.fetchJson<RuntimeInfo>("/info");
+          return { kind: "forked", pid: info.pid };
+        } catch {
+          return null;
+        }
+      },
+      { timeoutMs: 15_000, accept: (value) => value !== null },
+    );
+    if (outcome?.kind === "forked") currentActiveContext().daemonPid = outcome.pid;
+    expect(outcome?.kind).toBe("refused");
+  });
+
   it("restores a codex session through the native resume command", async () => {
     const result = await runRestoreScenario({ agent: "codex", configName: "restore-codex.yaml" });
     expect(result.spawned.agent).toBe("codex");

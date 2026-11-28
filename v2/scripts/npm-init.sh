@@ -3,20 +3,28 @@
 # npm does not register or start systemd services — run once per host:
 #   spur init
 # or:
-#   npm-init.sh [--no-start] [--expose-web] [--web-port <port>] [--tailscale|--no-tailscale]
+#   npm-init.sh [--no-start] [--expose-web] [--web-port <port>] [--install-tailscale|--tailscale|--no-tailscale]
+# Tailscale is never installed without --install-tailscale. --tailscale only
+# binds an already-installed, up Tailscale (releases before --install-tailscale
+# send it from `update`/`reinit`); with no flag the script only prints a hint
+# when Tailscale is already up.
 
 set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+# The account linger applies to; `$USER` can be unset or stale.
+account="$(id -un)"
 NO_START=0
 EXPOSE_WEB=0
 WEB_PORT=""
-TAILSCALE=1
+# install: install when missing, then bind. keep: bind when already up, never
+# install. off: no Tailscale call. hint: no flag; hint only when already up.
+TAILSCALE=hint
 CONFIG_PATH=""
 
 usage() {
-  sed -n '3,8p' "$0"
+  sed -n '3,12p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -32,8 +40,9 @@ while [[ $# -gt 0 ]]; do
       }
       shift 2
       ;;
-    --tailscale) TAILSCALE=1; shift ;;
-    --no-tailscale) TAILSCALE=0; shift ;;
+    --install-tailscale) TAILSCALE=install; shift ;;
+    --tailscale) TAILSCALE=keep; shift ;;
+    --no-tailscale) TAILSCALE=off; shift ;;
     -h | --help)
       usage
       exit 0
@@ -102,6 +111,43 @@ NODE
 [[ -n "$selected_config" ]] || die "instance configuration selection returned no path"
 export SPUR_CONFIG="$selected_config"
 
+required_units=(spur-daemon.service spur-web.service spur-mcp.service)
+if [[ -f "$HOME/.spur/mcp-tunnel.env" ]]; then
+  required_units+=(spur-mcp-tunnel.service)
+fi
+started_names=""
+for unit in "${required_units[@]}"; do
+  started_names+="${started_names:+ }${unit%.service}"
+done
+
+tailscale_plan="skipped; the spur-web unit binds 127.0.0.1 (pass --tailscale for private remote access)"
+if [[ "$EXPOSE_WEB" -eq 1 ]]; then
+  tailscale_plan="skipped (--expose-web binds 0.0.0.0)"
+elif [[ "$TAILSCALE" == "install" ]]; then
+  tailscale_plan="install system-wide via https://tailscale.com/install.sh if missing (needs sudo), then bind the tailnet IP"
+elif [[ "$TAILSCALE" == "keep" ]]; then
+  tailscale_plan="keep the existing tailnet bind if Tailscale is up; never installs"
+fi
+
+echo "npm-init: plan (units, linger, services, Tailscale):"
+echo "npm-init:   install user units spur-daemon, spur-web, spur-mcp, spur-mcp-tunnel in $UNIT_DIR"
+echo "npm-init:   enable linger for $account if allowed (best effort, no sudo): services keep running after logout and start at boot"
+if [[ "$NO_START" -eq 1 ]]; then
+  echo "npm-init:   leave services stopped (--no-start)"
+else
+  echo "npm-init:   start ${started_names// /, }"
+fi
+echo "npm-init:   agent integrations: skill links, Cursor hook"
+echo "npm-init:   Tailscale: $tailscale_plan"
+
+tailscale_install_result="already installed"
+if [[ "$EXPOSE_WEB" -eq 0 && "$TAILSCALE" == "install" ]] && ! command -v tailscale >/dev/null 2>&1; then
+  echo "npm-init: tailscale not found, installing (curl -fsSL https://tailscale.com/install.sh | sh)"
+  curl -fsSL https://tailscale.com/install.sh | sh ||
+    die "Tailscale install failed; no units changed, running services and any existing tailnet bind left as they were. Install Tailscale manually (https://tailscale.com/download), then re-run: spur init --tailscale"
+  tailscale_install_result="installed"
+fi
+
 mkdir -p "$UNIT_DIR"
 install -m 644 "$PKG_ROOT/deploy/spur-daemon.npm.service" "$UNIT_DIR/spur-daemon.service"
 install -m 644 "$PKG_ROOT/deploy/spur-web.npm.service" "$UNIT_DIR/spur-web.service"
@@ -117,10 +163,7 @@ for (const name of ['daemon', 'web', 'mcp', 'mcp-tunnel']) {
   writeFileSync(path, renderPinnedUnit(readFileSync(path, 'utf8'), configPath, name === 'web'));
 }
 NODE
-required_units=(spur-daemon.service spur-web.service spur-mcp.service)
-if [[ -f "$HOME/.spur/mcp-tunnel.env" ]]; then
-  required_units+=(spur-mcp-tunnel.service)
-else
+if [[ ! -f "$HOME/.spur/mcp-tunnel.env" ]]; then
   systemctl --user disable --now spur-mcp-tunnel.service 2>/dev/null || true
 fi
 
@@ -144,35 +187,111 @@ if [[ -n "$WEB_PORT" ]]; then
   fi
 fi
 
-# Private remote access over the user's own tailnet, on by default. This is
-# additional to the always-on loopback bind (never a replacement) and is
-# skipped when --expose-web already opted into the public 0.0.0.0 bind (that
-# is a separate, more permissive, explicit override).
-if [[ "$EXPOSE_WEB" -eq 0 && "$TAILSCALE" -eq 1 ]]; then
-  if ! command -v tailscale >/dev/null 2>&1; then
-    echo "npm-init: tailscale not found, installing (curl -fsSL https://tailscale.com/install.sh | sh)"
-    curl -fsSL https://tailscale.com/install.sh | sh || {
-      echo "npm-init: tailscale install failed — install manually: https://tailscale.com/download (continuing without it)" >&2
-    }
-  fi
-
+# Private remote access over the user's own tailnet. This is additional to the
+# always-on loopback bind (never a replacement) and is skipped when
+# --expose-web already opted into the public 0.0.0.0 bind (that is a separate,
+# more permissive, explicit override). Installing happens earlier and only for
+# --install-tailscale; no other mode installs or elevates.
+tailscale_result="not requested"
+info_lines=()
+# With --no-start the unit is rewritten but the running web process is not.
+keep_web_state="web UI is now on 127.0.0.1 only"
+install_web_state="web UI is on 127.0.0.1"
+if [[ "$NO_START" -eq 1 ]]; then
+  keep_web_state="web UI listens on 127.0.0.1 only when spur-web next starts"
+  install_web_state="$keep_web_state"
+fi
+if [[ "$EXPOSE_WEB" -eq 1 ]]; then
+  tailscale_result="skipped (--expose-web)"
+elif [[ "$TAILSCALE" != "off" ]]; then
+  have_tailscale=0
   ts_ip=""
   if command -v tailscale >/dev/null 2>&1; then
-    ts_ip="$(tailscale ip -4 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    have_tailscale=1
+    # `tailscale ip -4` can return a cached address after `tailscale down`;
+    # `tailscale status` exits non-zero when stopped or logged out.
+    if tailscale status >/dev/null 2>&1; then
+      ts_ip="$(tailscale ip -4 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    fi
   fi
 
   # Tailscale always assigns IPv4 from the CGNAT range 100.64.0.0/10, so
   # require a 100.x address here — a wildcard/public value (e.g. 0.0.0.0)
   # must never be baked into WEB_HOST and collapse to a public bind.
+  ts_up=0
   if [[ "$ts_ip" =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    ts_up=1
+  fi
+
+  if [[ "$TAILSCALE" == "hint" ]]; then
+    if [[ "$ts_up" -eq 1 ]]; then
+      info_lines+=("Tailscale is up but the web UI is not on the tailnet. To bind it: spur init --tailscale")
+    fi
+  elif [[ "$ts_up" -eq 1 ]]; then
     sed -i "s/^Environment=WEB_HOST=.*/Environment=WEB_HOST=127.0.0.1,$ts_ip/" "$UNIT_DIR/spur-web.service"
-    echo "npm-init: web UI will bind 127.0.0.1 and tailnet $ts_ip"
+    if [[ "$TAILSCALE" == "install" ]]; then
+      # With --no-start the running web process keeps its old listener.
+      if [[ "$NO_START" -eq 1 ]]; then
+        tailscale_result="$tailscale_install_result, bound on next start"
+      else
+        tailscale_result="$tailscale_install_result, bound"
+      fi
+    else
+      tailscale_result="kept"
+    fi
+  elif [[ "$have_tailscale" -eq 1 ]]; then
+    if [[ "$TAILSCALE" == "install" ]]; then
+      tailscale_result="$tailscale_install_result, not up"
+    else
+      tailscale_result="not up"
+    fi
+    if [[ "$TAILSCALE" == "keep" ]]; then
+      info_lines+=("Tailscale is not up; $keep_web_state. To restore the tailnet bind: sudo tailscale up, then spur init --tailscale")
+    else
+      info_lines+=("Tailscale is not up; $install_web_state. For remote access: sudo tailscale up, then spur init --tailscale")
+    fi
   else
-    echo "npm-init: Tailscale not up yet — web UI stays on 127.0.0.1 only. Run: sudo tailscale up  (authenticate in browser), then re-run: spur init"
+    tailscale_result="not found, bind skipped"
+    info_lines+=("Tailscale is not installed; $keep_web_state. To restore the tailnet bind: spur init --tailscale")
   fi
 fi
 
-loginctl enable-linger "$USER" >/dev/null
+# Linger keeps the user services running after logout and starts them at boot.
+# Best effort and unprivileged: a refusal is an info line, never a failure.
+linger_result="enabled"
+linger_state="$(loginctl show-user "$account" -p Linger 2>/dev/null || true)"
+if [[ "$linger_state" == "Linger=yes" ]]; then
+  linger_result="already enabled"
+elif ! loginctl --no-ask-password enable-linger "$account" >/dev/null 2>&1; then
+  linger_result="not enabled"
+  info_lines+=("linger not enabled (loginctl refused); services stop at logout and do not start at boot. To enable: sudo loginctl enable-linger $account")
+fi
+
+web_port="$(grep -E '^Environment=PORT=' "$UNIT_DIR/spur-web.service" | tail -1 | cut -d= -f3-)"
+[[ -n "$web_port" ]] || web_port=5555
+
+print_summary() {
+  local web_host line pending
+  web_host="$(grep -E '^Environment=WEB_HOST=' "$UNIT_DIR/spur-web.service" | tail -1 | cut -d= -f3-)"
+  echo "npm-init: summary:"
+  echo "npm-init:   units installed: spur-daemon spur-web spur-mcp spur-mcp-tunnel in $UNIT_DIR"
+  if [[ "$NO_START" -eq 1 ]]; then
+    echo "npm-init:   started: none (--no-start)"
+  else
+    echo "npm-init:   started: $started_names"
+  fi
+  echo "npm-init:   linger: $linger_result"
+  # The unit file is the source; with --no-start nothing serves it yet.
+  pending=""
+  if [[ "$NO_START" -eq 1 ]]; then
+    pending=" (on next start)"
+  fi
+  echo "npm-init:   web UI: ${web_host}:${web_port}${pending}"
+  echo "npm-init:   Tailscale: $tailscale_result"
+  for line in "${info_lines[@]}"; do
+    echo "npm-init: info: $line"
+  done
+}
 
 systemctl --user daemon-reload
 node --input-type=module - "$PKG_ROOT" "$selected_config" <<'NODE'
@@ -193,17 +312,12 @@ if [[ "$NO_START" -eq 0 ]]; then
   fi
 fi
 
-echo "npm-init: units installed in $UNIT_DIR"
-loginctl show-user "$USER" -p Linger
-
 if [[ "$NO_START" -eq 1 ]]; then
+  print_summary
   echo "npm-init: skipped start (--no-start). Run:"
   echo "  systemctl --user enable --now ${required_units[*]}"
   exit 0
 fi
-
-web_port="$(grep -E '^Environment=PORT=' "$UNIT_DIR/spur-web.service" | tail -1 | cut -d= -f3-)"
-[[ -n "$web_port" ]] || web_port=5555
 
 # Poll instead of sampling is-active once immediately after `start` returns
 # (F2: a racy immediate check reported false-positive "active" before a
@@ -255,3 +369,5 @@ if [[ "$active_daemon" -ne 1 || "$active_web" -ne 1 || "$active_mcp" -ne 1 || "$
   web_last_log="$(journalctl --user -u spur-web -n 5 --no-pager 2>/dev/null | tail -1)"
   die "one or more units failed to start — spur-web ActiveState=$web_active_state, last log: ${web_last_log:-<none>} — check: journalctl --user -u spur-daemon -u spur-web -u spur-mcp -u spur-mcp-tunnel -n 40 --no-pager"
 fi
+
+print_summary
