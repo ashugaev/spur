@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as ChildProcess from "node:child_process";
@@ -514,6 +514,7 @@ describe("createRealUpdateDeps launch", () => {
 
 describe("reinitUnits", () => {
   const originalHome = process.env["HOME"];
+  const originalPath = process.env["PATH"];
 
   beforeEach(() => {
     runNpmInitMock.mockReset();
@@ -522,6 +523,8 @@ describe("reinitUnits", () => {
   afterEach(() => {
     if (originalHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = originalHome;
+    if (originalPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = originalPath;
   });
 
   it("preserves the deployed web port and external exposure when reinstalling units", async () => {
@@ -545,7 +548,7 @@ describe("reinitUnits", () => {
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "6200",
       exposeWeb: true,
-      tailscale: false,
+      tailscale: "off",
     });
   });
 
@@ -570,11 +573,11 @@ describe("reinitUnits", () => {
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "5555",
       exposeWeb: false,
-      tailscale: false,
+      tailscale: "off",
     });
   });
 
-  it("re-applies --tailscale when the live unit already carries a Tailscale bind", async () => {
+  async function writeBoundHome(): Promise<string> {
     const home = await mkdtemp(join(tmpdir(), "spur-update-reinit-"));
     const unitDir = join(home, ".config", "systemd", "user");
     await mkdir(unitDir, { recursive: true });
@@ -588,14 +591,35 @@ describe("reinitUnits", () => {
       "[Service]\nEnvironment=PORT=4311\nEnvironment=WEB_HOST=127.0.0.1,100.64.0.1\n",
       "utf-8",
     );
-    process.env["HOME"] = home;
+    return home;
+  }
+
+  it("passes off for a live bind when the tailscale binary is gone, never an install", async () => {
+    process.env["HOME"] = await writeBoundHome();
+    process.env["PATH"] = await mkdtemp(join(tmpdir(), "spur-update-empty-path-"));
 
     reinitUnits("/tmp/cli.js");
 
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
       webPort: "4311",
       exposeWeb: false,
-      tailscale: true,
+      tailscale: "off",
+    });
+  });
+
+  it("sends the legacy --tailscale (keep), never the install flag, for a live bind with the binary", async () => {
+    const bin = await mkdtemp(join(tmpdir(), "spur-update-bin-"));
+    await writeFile(join(bin, "tailscale"), "#!/bin/sh\n", "utf-8");
+    await chmod(join(bin, "tailscale"), 0o755);
+    process.env["HOME"] = await writeBoundHome();
+    process.env["PATH"] = bin;
+
+    reinitUnits("/tmp/cli.js");
+
+    expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
+      webPort: "4311",
+      exposeWeb: false,
+      tailscale: "keep",
     });
   });
 });
@@ -638,7 +662,7 @@ describe("createRealUpdateDeps reinit delegation", () => {
       configPath: selectedConfig,
       webPort: "6200",
       exposeWeb: true,
-      tailscale: false,
+      tailscale: "off",
     });
   });
 

@@ -261,7 +261,7 @@ export function renderHostSkillWarnings(outcomes: HostSkillOutcome[]): string[] 
   }
   for (const [root, skills] of absentRoots) {
     lines.push(
-      `spur: host skills not linked — ${root} does not exist and Spur does not create it (skipped: ${skills.join(", ")}). If this agent is installed here, run \`mkdir -p ${root} && spur reinit\`. Otherwise ignore.`,
+      `spur: info: host skills not linked — ${root} does not exist and Spur does not create it (skipped: ${skills.join(", ")}). If this agent is installed here, run \`mkdir -p ${root} && spur reinit\`. Otherwise ignore.`,
     );
   }
 
