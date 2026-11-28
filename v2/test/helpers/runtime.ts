@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { appendFileSync, existsSync } from "node:fs";
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -32,7 +32,44 @@ let activeTmuxSocketName: string | null = null;
 // capture (the prior design) only ever protects the FIRST context in a file;
 // every later context got no net at all.
 const liveTmuxSockets = new Set<string>();
-let tmuxExitNetRegistered = false;
+// Daemon children spawned by startDaemon that have not emitted "exit". The
+// exit net SIGKILLs these through their own ChildProcess handle only — never
+// by raw pid — so it can never signal a process this module did not spawn.
+const ownedDaemonChildren = new Set<ChildProcess>();
+let exitNetRegistered = false;
+
+// Kills every armed tmux socket and every live fixture daemon child. Pid is
+// checked here, not at registration: a failed spawn leaves pid undefined.
+export function sweepRuntimeFixtures(): void {
+  for (const socket of liveTmuxSockets) {
+    spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+  }
+  for (const child of ownedDaemonChildren) {
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+  }
+}
+
+function registerExitNet(): void {
+  if (exitNetRegistered) return;
+  exitNetRegistered = true;
+  process.once("exit", sweepRuntimeFixtures);
+  // A vitest fork-pool worker is torn down by its parent sending SIGTERM, and
+  // a cancelled CI job delivers SIGTERM/SIGINT mid-test. "exit" never fires on
+  // either path: the default disposition skips it, and vitest replaces
+  // process.exit with a throwing guard while a test file runs. So the handler
+  // sweeps synchronously, removes itself, and re-raises the same signal to
+  // die by its default disposition.
+  const onSignal = (signal: NodeJS.Signals): void => {
+    sweepRuntimeFixtures();
+    process.removeListener("SIGTERM", onSignal);
+    process.removeListener("SIGINT", onSignal);
+    process.kill(process.pid, signal);
+  };
+  process.once("SIGTERM", onSignal);
+  process.once("SIGINT", onSignal);
+}
 
 export function setActiveTmuxSocketName(socketName: string | null): void {
   const next = socketName?.trim() || null;
@@ -43,28 +80,7 @@ export function setActiveTmuxSocketName(socketName: string | null): void {
   if (next) {
     liveTmuxSockets.add(next);
   }
-  if (!tmuxExitNetRegistered) {
-    tmuxExitNetRegistered = true;
-    const sweep = (): void => {
-      for (const socket of liveTmuxSockets) {
-        spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
-      }
-    };
-    process.once("exit", sweep);
-    // A vitest fork-pool worker is torn down by its parent sending SIGTERM,
-    // not by the worker's own event loop going idle — plain `process.once
-    // ("exit", ...)` alone never fires on that path (measured: a fixture that
-    // arms two sockets and returns normally still leaves both tmux servers
-    // alive after the whole `vitest run` invocation exits). Translating the
-    // signal into an explicit process.exit() makes the exit path uniform:
-    // the "exit" listener above still does the actual kill, this only
-    // ensures it gets invoked instead of the default signal disposition
-    // terminating the process without emitting "exit" at all. A prior
-    // listener for either signal (there is none installed in this test
-    // tree) would be overridden by design — teardown safety wins here.
-    process.once("SIGTERM", () => process.exit(0));
-    process.once("SIGINT", () => process.exit(0));
-  }
+  registerExitNet();
 }
 
 // Builds the `-L <socket> ...` argv this module always shapes tmux calls
@@ -1373,8 +1389,11 @@ ${content}`,
   ): Promise<{ stdout: string; stderr: string }> => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [CLI_PATH, ...args], {
       cwd: V2_DIR,
+      // A CLI child outliving a killed fixture daemon must not fork a detached
+      // replacement. Tests asserting autostart or restart pass "0".
       env: {
         ...env,
+        SPUR_DISABLE_AUTOSTART: "1",
         ...(options?.env ?? {}),
       },
       timeout: options?.timeoutMs ?? 60_000,
@@ -1405,6 +1424,9 @@ ${content}`,
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
+    ownedDaemonChildren.add(child);
+    child.once("exit", () => ownedDaemonChildren.delete(child));
+    registerExitNet();
     const tailLimit = 4096;
     let stdout = "";
     let stderr = "";

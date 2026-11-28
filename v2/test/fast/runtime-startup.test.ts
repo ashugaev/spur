@@ -5,7 +5,11 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createRuntimeTestContext, type RuntimeTestContext } from "../helpers/runtime.js";
+import {
+  createRuntimeTestContext,
+  sweepRuntimeFixtures,
+  type RuntimeTestContext,
+} from "../helpers/runtime.js";
 import * as Common from "../helpers/common.js";
 
 const spawn = vi.hoisted(() => vi.fn<typeof ChildProcess.spawn>());
@@ -230,6 +234,68 @@ describe("runtime daemon startup boundary", () => {
     expect(child.kill).not.toHaveBeenCalled();
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
+    child.exit(0);
+  });
+
+  it("execCli blocks CLI daemon autostart unless the caller opts in", async () => {
+    const execFileAsync = vi.mocked(Common.execFileAsync);
+    execFileAsync.mockClear();
+    // Fixture env allowing autostart, as the fake-tools fixture does; an
+    // ambient SPUR_DISABLE_AUTOSTART=1 must not mask the execCli default.
+    const inherited = context.env.SPUR_DISABLE_AUTOSTART;
+    context.env.SPUR_DISABLE_AUTOSTART = "0";
+    try {
+      await context.execCli(["list"]);
+      await context.execCli(["list"], { env: { SPUR_DISABLE_AUTOSTART: "0" } });
+    } finally {
+      if (inherited === undefined) delete context.env.SPUR_DISABLE_AUTOSTART;
+      else context.env.SPUR_DISABLE_AUTOSTART = inherited;
+    }
+    const autostart = execFileAsync.mock.calls.map(
+      (call) => (call[2] as { env?: NodeJS.ProcessEnv } | undefined)?.env?.SPUR_DISABLE_AUTOSTART,
+    );
+    expect(autostart).toEqual(["1", "0"]);
+  });
+
+  it("exit sweep SIGKILLs only live fixture-started daemons", async () => {
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ pid: child.pid })));
+    await context.startDaemon(`${context.rootDir}/test.yaml`);
+    sweepRuntimeFixtures();
+    expect(child.kill.mock.calls).toEqual([["SIGKILL"]]);
+    child.kill.mockClear();
+    child.exit(0);
+    sweepRuntimeFixtures();
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  it("exit sweep skips a child that never acquired a PID", async () => {
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ pid: 424242 })));
+    await context.startDaemon(`${context.rootDir}/test.yaml`);
+    child.pid = undefined;
+    sweepRuntimeFixtures();
+    expect(child.kill).not.toHaveBeenCalled();
+    child.exit(0);
+  });
+
+  it("signal handler sweeps then re-raises the signal", async () => {
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ pid: child.pid })));
+    await context.startDaemon(`${context.rootDir}/test.yaml`);
+    const handler = process.listeners("SIGTERM").at(-1);
+    expect(handler).toBeTypeOf("function");
+    // Never deliver a real signal: the re-raise would kill this worker.
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    try {
+      handler?.("SIGTERM");
+      expect(child.kill.mock.calls).toEqual([["SIGKILL"]]);
+      expect(kill.mock.calls).toEqual([[process.pid, "SIGTERM"]]);
+      expect(child.kill.mock.invocationCallOrder[0]).toBeLessThan(
+        kill.mock.invocationCallOrder[0] ?? 0,
+      );
+      expect(process.listeners("SIGTERM")).not.toContain(handler);
+      expect(process.listeners("SIGINT")).not.toContain(handler);
+    } finally {
+      kill.mockRestore();
+    }
     child.exit(0);
   });
 
