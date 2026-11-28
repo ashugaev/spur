@@ -24,7 +24,7 @@ Footer Accounts menu: one section per provider, Claude and Codex.
 Dashboard alert row per broken managed account or host login, above the agents list: Sign in and terminal icon.
 Row clears after a verified sign-in. Host rows open the terminal directly.
 
-Spawn dialog Account picker: Auto or an identified account; signed-out ones are disabled.
+Spawn dialog Account picker: Auto or an identified account; signed-out ones are disabled; hidden with exactly one usable account, where Auto is that account.
 Session Switch account: another profile or back to Auto, for the next request.
 
 Legacy Claude IDs remain, labels are ignored; sign in again for managed routing. An account shows its identity after sign-in.
@@ -38,7 +38,10 @@ Omission with no ready account launches with host authorization.
 
 Managed Claude/Codex sessions change account for the next request through
 [switch-auth](daemon-api.md#session-routes); current requests retain their account.
-Direct Claude sessions enter managed routing on explicit restore/respawn.
+Direct Claude sessions enter managed routing on explicit restore/respawn or switch-auth.
+Switch-auth relaunches a running unbound session with resume; a stopped session is only bound.
+A working session needs `force`; an unresumable relaunch retains its previous account.
+A running Codex switch requires a saved `spur_managed` provider; refusal keeps the session running unchanged.
 Managed Codex resumes require a saved `spur_managed` provider; incompatible or unverifiable native identity refuses restore without replacing the session.
 Recover direct Codex histories with [`spur handoff <sessionId> --agent codex`](commands.md#list).
 Handoff to the same provider keeps a pinned profile; another provider, Auto, or a removed profile gives Auto.

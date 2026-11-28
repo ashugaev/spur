@@ -1379,7 +1379,13 @@ export interface SessionRecord {
   taskStatus?: TaskStatusDeclaration;
   status: SessionStatus;
   /** "memory_shed" is written only by the critical memory shed's session stop. */
-  stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget" | "runtime_lost";
+  stopReason?:
+    | "manual_pause"
+    | "stale_timeout"
+    | "memory_shed"
+    | "token_budget"
+    | "runtime_lost"
+    | "auth_switch_unresumable";
   tokenBudgetOverride?: boolean;
   tokenUsage?: SessionTokenUsageRecord;
   preflightTokenUsage?: PreflightTokenUsageRecord;
@@ -1794,7 +1800,7 @@ export interface DurableSpawnReceipt {
 export interface DurableSpawnIntent {
   version: 1;
   phase: "queued" | "workspace_ready" | "launching" | "submitted";
-  request: Omit<SpawnSessionRequest, "attachments" | "configPath">;
+  request: Omit<SpawnSessionRequest, "attachments" | "configPath" | "idempotencyKey">;
   mode?: { name: string; skill: string };
   defaultBranch: string;
   preflightBatchId: string;

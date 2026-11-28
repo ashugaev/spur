@@ -268,6 +268,7 @@ import { writeCloseoutArchive } from "../../src/closeout-archive.js";
 import { allowsPrAlertBatch } from "../../src/pr-alert-owner.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { createPage } from "../../src/pages.js";
+import { __resetUsageCacheForTest } from "../../src/usage-report.js";
 import { isSpurReminder, snapshotRequestMessage } from "../../src/snapshots.js";
 import {
   DEFAULT_DAILY_WAKE_MESSAGE,
@@ -564,6 +565,24 @@ function mockOwnershipAgent(agent: AgentName): void {
     initialMessage,
     readyMarkers: ["ready"],
   }));
+}
+
+/** Rollout in the unbound Codex session's own codex-home, the root the switch guard reads. */
+function writeUnboundCodexRollout(threadId: string, modelProvider: string): string {
+  const rollout = join(
+    TEST_DATA_DIR,
+    "session-tools",
+    "api-1",
+    "codex-home",
+    "sessions",
+    `${threadId}.jsonl`,
+  );
+  mkdirSync(dirname(rollout), { recursive: true });
+  writeFileSync(
+    rollout,
+    `${JSON.stringify({ type: "session_meta", payload: { id: threadId, model_provider: modelProvider } })}\n`,
+  );
+  return rollout;
 }
 
 function mockExitedThenRestoredProcess() {
@@ -24179,18 +24198,621 @@ describe("SessionService", () => {
       },
     );
 
-    it.each([false, true])("leaves a direct session untouched with force=%s", async (force) => {
-      const original = runningSession({ claudeAccountId: "primary" });
+    it.each(["claude", "codex"] as const)(
+      "binds an unbound running %s session and relaunches it with resume",
+      async (provider) => {
+        seedManagedAccounts(provider);
+        if (provider === "codex") writeUnboundCodexRollout("native-session-uuid", "spur_managed");
+        const sessions = createSessionStore(
+          runningSession({ agent: provider, agentSessionId: "native-session-uuid" }),
+        );
+        mockClaudeJsonlState("waiting");
+        mockExitedThenRestoredProcess();
+        authProxyRegisterSessionMock.mockResolvedValue(registration(provider, "backup"));
+        const service = await createDisposedSessionService();
+
+        await service.switchAuth("api-1", "backup", { reason: "manual" });
+
+        expect(authProxySwitchSessionMock).not.toHaveBeenCalled();
+        expect(authProxyRegisterSessionMock).toHaveBeenCalledWith({
+          sessionId: "api-1",
+          provider,
+          accountId: "backup",
+        });
+        expect(killTmuxSessionMock).toHaveBeenCalled();
+        expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
+          provider,
+          "native-session-uuid",
+          expect.anything(),
+          expect.anything(),
+        );
+        expect(Object.values(createTmuxSessionMock.mock.calls.at(-1)?.[0].env ?? {})).toContain(
+          "fixture-routing-key",
+        );
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "running",
+          agentSessionId: "native-session-uuid",
+          auth: { provider, mode: "pinned", accountId: "backup" },
+        });
+        expect(sessions.get("api-1")?.auth).not.toHaveProperty("token");
+        service.dispose();
+      },
+    );
+
+    async function checkRegistrationClaimInvalidation(
+      scenario: "wake" | "owner" | "proxy",
+    ): Promise<void> {
+      seedManagedAccounts("claude");
+      const original = runningSession({
+        status: "stopped",
+        stopReason: "manual_pause",
+        agentSessionId: "native-session-uuid",
+        claudeAccountId: "primary",
+        prompt: "unrelated prompt",
+        intervalWake: {
+          intervalMs: 60_000,
+          nextDueAt: "2026-03-18T10:06:00.000Z",
+          message: "before",
+          stopCondition: "never",
+        },
+      });
+      const sessions = createSessionStore(original);
+      const own = registration("claude", "backup");
+      const { endpoint: _endpoint, token: _token, ...expectedAuth } = own;
+      let entered: () => void = () => undefined;
+      let release: () => void = () => undefined;
+      const reached = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const proceed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let registered = false;
+      authProxyGetStateMock.mockImplementation(async () => ({
+        accounts: ["primary", "backup"].map((id) => ({ id, provider: "claude", status: "ready" })),
+        sessions: registered
+          ? [
+              scenario === "proxy"
+                ? { ...expectedAuth, generation: expectedAuth.generation + 1 }
+                : expectedAuth,
+            ]
+          : [],
+      }));
+      authProxyRegisterSessionMock.mockImplementation(async () => {
+        entered();
+        await proceed;
+        registered = true;
+        return own;
+      });
+      const service = await createDisposedSessionService();
+      const refresh = vi.spyOn(
+        service as unknown as {
+          refreshDashboardCacheEntry: (record: SessionRecord) => Promise<void>;
+        },
+        "refreshDashboardCacheEntry",
+      );
+      const outcome = service.switchAuth("api-1", "backup", { reason: "manual" }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      try {
+        await reached;
+        vi.setSystemTime(Date.now() + 1_000);
+        await service.updateWakeMessage("api-1", { target: "interval", message: "after" });
+        const updated = sessions.get("api-1");
+        if (!updated) throw new Error("Missing updated session");
+        expect(updated.updatedAt).not.toBe(original.updatedAt);
+        if (scenario === "owner") {
+          sessions.set("api-1", {
+            ...updated,
+            createdAt: "2026-03-19T10:00:00.000Z",
+            tmuxSession: "replacement-pane",
+            claudeAccountId: "replacement-legacy",
+            prompt: "replacement prompt",
+          });
+        }
+        const latest = structuredClone(sessions.get("api-1"));
+        const writes = writeSessionMock.mock.calls.length;
+        const refreshes = refresh.mock.calls.length;
+        release();
+        expect(await outcome).toMatchObject({
+          message: "Session api-1 changed during auth selection",
+        });
+        expect(authProxyRegisterSessionMock).toHaveBeenCalledTimes(1);
+        expect(registered).toBe(true);
+        expect(sessions.get("api-1")).toEqual(latest);
+        expect(sessions.get("api-1")?.auth).toBeUndefined();
+        expect(sessions.get("api-1")).toMatchObject({
+          intervalWake: { message: "after" },
+          claudeAccountId: scenario === "owner" ? "replacement-legacy" : "primary",
+          prompt: scenario === "owner" ? "replacement prompt" : "unrelated prompt",
+          agentSessionId: "native-session-uuid",
+        });
+        expect(writeSessionMock).toHaveBeenCalledTimes(writes);
+        expect(refresh).toHaveBeenCalledTimes(refreshes);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        if (scenario === "wake") {
+          expect(authProxyRevokeSessionMock).toHaveBeenCalledExactlyOnceWith("api-1");
+        } else {
+          expect(authProxyRevokeSessionMock).not.toHaveBeenCalled();
+        }
+      } finally {
+        release();
+        await outcome;
+        refresh.mockRestore();
+        service.dispose();
+      }
+    }
+
+    it("revokes its returned registration when updateWakeMessage invalidates the claim before binding", async () => {
+      await checkRegistrationClaimInvalidation("wake");
+    });
+
+    it("registration claim invalidation preserves a replacement session owner", async () => {
+      await checkRegistrationClaimInvalidation("owner");
+    });
+
+    it("registration claim invalidation preserves a replacement proxy generation", async () => {
+      await checkRegistrationClaimInvalidation("proxy");
+    });
+
+    async function checkUnboundAuthRollback(
+      scenario:
+        | "post-write"
+        | "pre-write"
+        | "binding"
+        | "owner"
+        | "proxy"
+        | "later"
+        | "rotation"
+        | "compensation-pre-write"
+        | "compensation-post-write",
+    ): Promise<void> {
+      seedManagedAccounts("claude");
+      const original = runningSession({
+        status: "stopped",
+        stopReason: "manual_pause",
+        agentSessionId: "native-session-uuid",
+        claudeAccountId: "primary",
+      });
+      const sessions = createSessionStore(original);
+      const persist = writeSessionMock.getMockImplementation();
+      if (!persist) throw new Error("Missing session store write");
+      const own = registration("claude", "backup");
+      const { endpoint: _endpoint, token: _token, ...expectedAuth } = own;
+      authProxyRegisterSessionMock.mockResolvedValue(own);
+      const service = await createDisposedSessionService();
+      const refresh = vi.spyOn(
+        service as unknown as {
+          refreshDashboardCacheEntry: (record: SessionRecord) => Promise<void>;
+        },
+        "refreshDashboardCacheEntry",
+      );
+      const proxy =
+        scenario === "proxy"
+          ? { ...expectedAuth, generation: expectedAuth.generation + 1 }
+          : scenario === "rotation"
+            ? { ...expectedAuth, effectiveAccountId: "rotated-account" }
+            : expectedAuth;
+      authProxyGetStateMock.mockResolvedValue({
+        accounts: ["primary", "backup"].map((id) => ({ id, provider: "claude", status: "ready" })),
+        sessions: [proxy],
+      });
+      let attempted = false;
+      let persisted = false;
+      let replacement: SessionRecord | undefined;
+      let compensation: SessionRecord | undefined;
+      const failure = new Error("binding write failed");
+      writeSessionMock.mockImplementation((dataDir: string, record: SessionRecord) => {
+        if (!attempted && record.auth?.accountId === "backup") {
+          attempted = true;
+          if (scenario === "pre-write") throw failure;
+          persist(dataDir, { ...record, prompt: "latest unrelated prompt" });
+          persisted = true;
+          if (scenario === "binding" || scenario === "owner") {
+            replacement = {
+              ...record,
+              prompt: "replacement prompt",
+              claudeAccountId: "replacement-legacy",
+              ...(scenario === "binding"
+                ? { auth: { ...expectedAuth, generation: 9, accountId: "replacement" } }
+                : { createdAt: "2026-03-19T10:00:00.000Z", tmuxSession: "replacement-pane" }),
+            };
+            persist(dataDir, replacement);
+          } else if (scenario === "later") {
+            persist(dataDir, {
+              ...record,
+              prompt: "latest unrelated prompt",
+              claudeAccountId: "later-legacy",
+              status: "errored",
+              error: "later runtime error",
+              agentLaunchId: "later-launch",
+              sidecarProcs: { preview: { pid: 71, pgid: 71, starttime: 81 } },
+            });
+          }
+          throw failure;
+        }
+        if (attempted && persisted && !compensation && record.auth === undefined) {
+          if (scenario === "compensation-pre-write") throw new Error("rollback before persist");
+          persist(dataDir, record);
+          compensation = structuredClone(sessions.get("api-1"));
+          if (scenario === "compensation-post-write") throw new Error("rollback after persist");
+          return;
+        }
+        persist(dataDir, record);
+      });
+      try {
+        await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toBe(
+          failure,
+        );
+        expect(attempted).toBe(true);
+        expect(persisted).toBe(scenario !== "pre-write");
+        if (scenario === "binding" || scenario === "owner") {
+          expect(sessions.get("api-1")).toEqual(replacement);
+          expect(writeSessionMock).toHaveBeenCalledTimes(1);
+          expect(authProxyRevokeSessionMock).not.toHaveBeenCalled();
+          expect(refresh).not.toHaveBeenCalled();
+        } else if (scenario === "pre-write") {
+          expect(sessions.get("api-1")).toEqual(original);
+          expect(writeSessionMock).toHaveBeenCalledTimes(1);
+          expect(refresh).not.toHaveBeenCalled();
+          expect(authProxyRevokeSessionMock).toHaveBeenCalledExactlyOnceWith("api-1");
+        } else if (scenario === "compensation-pre-write") {
+          expect(sessions.get("api-1")).toMatchObject({
+            auth: expectedAuth,
+            agentSessionId: "native-session-uuid",
+            prompt: "latest unrelated prompt",
+          });
+          expect(sessions.get("api-1")).not.toHaveProperty("claudeAccountId");
+          expect(compensation).toBeUndefined();
+          expect(authProxyRevokeSessionMock).not.toHaveBeenCalled();
+          expect(refresh).not.toHaveBeenCalled();
+        } else {
+          const after = sessions.get("api-1");
+          expect(after).not.toHaveProperty("auth");
+          expect(after).toMatchObject({
+            agentSessionId: "native-session-uuid",
+            claudeAccountId: scenario === "later" ? "later-legacy" : "primary",
+            prompt: "latest unrelated prompt",
+          });
+          if (scenario === "later") {
+            expect(compensation).toMatchObject({
+              status: "errored",
+              stopReason: "manual_pause",
+              error: "later runtime error",
+              agentSessionId: "native-session-uuid",
+              claudeAccountId: "later-legacy",
+              prompt: "latest unrelated prompt",
+              agentLaunchId: "later-launch",
+              sidecarProcs: { preview: { pid: 71, pgid: 71, starttime: 81 } },
+            });
+            expect(compensation).not.toHaveProperty("auth");
+            expect(after).toMatchObject({
+              status: "running",
+              error: "later runtime error",
+              agentLaunchId: "later-launch",
+              sidecarProcs: { preview: { pid: 71, pgid: 71, starttime: 81 } },
+            });
+            expect(after).not.toHaveProperty("stopReason");
+          }
+          if (scenario === "proxy") expect(authProxyRevokeSessionMock).not.toHaveBeenCalled();
+          else expect(authProxyRevokeSessionMock).toHaveBeenCalledExactlyOnceWith("api-1");
+          expect(refresh).toHaveBeenCalledTimes(1);
+        }
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        writeSessionMock.mockImplementation(persist);
+        refresh.mockRestore();
+        service.dispose();
+      }
+    }
+
+    it("unbound auth rollback repairs its durable binding after a post-write throw", async () => {
+      await checkUnboundAuthRollback("post-write");
+    });
+
+    it("unbound auth rollback leaves metadata untouched after a pre-write throw", async () => {
+      await checkUnboundAuthRollback("pre-write");
+    });
+
+    it("unbound auth rollback preserves a replacement binding and legacy selection", async () => {
+      await checkUnboundAuthRollback("binding");
+    });
+
+    it("unbound auth rollback preserves a replacement session owner", async () => {
+      await checkUnboundAuthRollback("owner");
+    });
+
+    it("unbound auth rollback does not revoke a replacement proxy registration", async () => {
+      await checkUnboundAuthRollback("proxy");
+    });
+
+    it("unbound auth rollback preserves a later legacy selection and runtime fields", async () => {
+      await checkUnboundAuthRollback("later");
+    });
+
+    it("unbound auth rollback revokes its registration after a same-generation effective-account rotation", async () => {
+      await checkUnboundAuthRollback("rotation");
+    });
+
+    it("unbound auth rollback retains its registration when compensation fails before persistence", async () => {
+      await checkUnboundAuthRollback("compensation-pre-write");
+    });
+
+    it("unbound auth rollback revokes its registration when compensation throws after persistence", async () => {
+      await checkUnboundAuthRollback("compensation-post-write");
+    });
+
+    it("rolls the binding back when relaunching an unbound session fails", async () => {
+      seedManagedAccounts("claude");
+      const original = runningSession({
+        agentSessionId: "native-session-uuid",
+        claudeAccountId: "primary",
+      });
+      const sessions = createSessionStore(original);
+      mockClaudeJsonlState("waiting");
+      authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      createTmuxSessionMock.mockRejectedValue(new Error("tmux launch failed"));
+      const service = await createDisposedSessionService();
+      const {
+        endpoint: _endpoint,
+        token: _token,
+        ...proxySession
+      } = registration("claude", "backup");
+      authProxyGetStateMock.mockResolvedValue({
+        accounts: ["primary", "backup"].map((id) => ({ id, provider: "claude", status: "ready" })),
+        sessions: [proxySession],
+      });
+      // The pane exists when the launch fails: the relaunch stores a retained error.
+      vi.spyOn(
+        service as unknown as { launchResourcesMayRemain: () => Promise<boolean> },
+        "launchResourcesMayRemain",
+      ).mockResolvedValue(true);
+
+      await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
+        /tmux launch failed/,
+      );
+
+      const after = sessions.get("api-1");
+      expect(after).not.toHaveProperty("auth");
+      expect(after).toMatchObject({
+        agentSessionId: "native-session-uuid",
+        claudeAccountId: "primary",
+      });
+      // Only the binding is removed: the error the relaunch stored survives the rollback.
+      expect(after?.error).toContain("tmux launch failed");
+      expect(authProxyRevokeSessionMock).toHaveBeenCalledWith("api-1");
+      service.dispose();
+    });
+
+    it("fails the switch when the relaunch falls back to a fresh launch", async () => {
+      seedManagedAccounts("claude");
+      const original = runningSession({ agentSessionId: "native-session-uuid" });
+      const sessions = createSessionStore(original);
+      mockClaudeJsonlState("waiting");
+      authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+      let created = false;
+      tmuxSessionExistsMock.mockImplementation(async () => created);
+      isProcessRunningInTmuxMock.mockImplementation(async () => created);
+      createTmuxSessionMock
+        .mockRejectedValueOnce(new Error("resume failed"))
+        .mockImplementation(async () => {
+          created = true;
+        });
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      // Killing the fresh pane ends its process, as in production.
+      killTmuxSessionMock.mockImplementation(async () => {
+        created = false;
+      });
+      const service = await createDisposedSessionService();
+      const {
+        endpoint: _endpoint,
+        token: _token,
+        ...proxySession
+      } = registration("claude", "backup");
+      authProxyGetStateMock.mockResolvedValue({
+        accounts: ["primary", "backup"].map((id) => ({ id, provider: "claude", status: "ready" })),
+        sessions: [proxySession],
+      });
+      const refresh = vi.spyOn(
+        service as unknown as { refreshDashboardCacheEntry: (record: unknown) => Promise<void> },
+        "refreshDashboardCacheEntry",
+      );
+
+      await expect(
+        service.switchAuth("api-1", "backup", { reason: "manual" }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        message: expect.stringMatching(/Could not resume/),
+      });
+
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(2);
+      expect(sessions.get("api-1")).not.toHaveProperty("auth");
+      expect(sessions.get("api-1")?.agentSessionId).toBe("native-session-uuid");
+      // Parked, not left running: the dashboard shows the stop at once.
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "stopped",
+        stopReason: "auth_switch_unresumable",
+      });
+      expect(refresh).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: "stopped", stopReason: "auth_switch_unresumable" }),
+      );
+      expect(authProxyRevokeSessionMock).toHaveBeenCalledWith("api-1");
+      service.dispose();
+    });
+
+    it("refuses a running unbound session with no conversation id to resume", async () => {
+      seedManagedAccounts("claude");
+      const original = runningSession();
       const sessions = createSessionStore(original);
       const service = await createDisposedSessionService();
+
       await expect(
-        service.switchAuth("api-1", "backup", { reason: "manual", force }),
-      ).rejects.toThrow(/Direct authorization/);
+        service.switchAuth("api-1", "backup", { reason: "manual" }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        message: expect.stringMatching(/no recorded conversation id/),
+      });
+
       expect(sessions.get("api-1")).toEqual(original);
-      expect(authProxySwitchSessionMock).not.toHaveBeenCalled();
+      expect(authProxyRegisterSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("refuses to switch a working unbound session unless forced", async () => {
+      seedManagedAccounts("claude");
+      const original = runningSession({ agentSessionId: "native-session-uuid" });
+      const sessions = createSessionStore(original);
+      mockClaudeSessionStatus("working", "busy");
+      const service = await createDisposedSessionService();
+
+      await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
+        /is working/,
+      );
+
+      expect(sessions.get("api-1")).toEqual(original);
+      expect(authProxyRegisterSessionMock).not.toHaveBeenCalled();
       expect(killTmuxSessionMock).not.toHaveBeenCalled();
-      expect(swapSessionCredentialsMock).not.toHaveBeenCalled();
-      expect(seedSessionHomeMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("refuses an unbound switch the token budget would refuse before killing the pane", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+      });
+      seedManagedAccounts("claude");
+      const original = runningSession({
+        agentSessionId: "native-session-uuid",
+        tokenUsage: {
+          provider: "claude",
+          inputTokens: 120,
+          outputTokens: 0,
+          totalTokens: 120,
+          generations: {},
+        },
+      });
+      const sessions = createSessionStore(original);
+      mockClaudeJsonlState("waiting");
+      authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+      const service = await createDisposedSessionService();
+
+      await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
+        /exhausted its token budget/,
+      );
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")).toEqual(original);
+      expect(sessions.get("api-1")).not.toHaveProperty("auth");
+      service.dispose();
+    });
+
+    describe("unbound Codex switch thread provider", () => {
+      // Thread ids no host ~/.codex/sessions rollout can carry: the host root is a fallback scan.
+      const threadId = `native-thread-${Math.random().toString(36).slice(2)}`;
+      const refusedSideEffects = (
+        original: SessionRecord,
+        sessions: ReturnType<typeof createSessionStore>,
+      ) => {
+        expect(sessions.get("api-1")).toEqual(original);
+        expect(authProxyRegisterSessionMock).not.toHaveBeenCalled();
+        expect(authProxySwitchSessionMock).not.toHaveBeenCalled();
+        expect(authProxyRevokeSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(terminateAgentProcessesMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(buildAgentResumePlanMock).not.toHaveBeenCalled();
+        expect(
+          logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.auth.switched"),
+        ).toBe(false);
+        expect(sessions.get("api-1")?.status).toBe("running");
+      };
+
+      it("refuses a thread saved on another provider before any change", async () => {
+        seedManagedAccounts("codex");
+        const rollout = writeUnboundCodexRollout(threadId, "openai");
+        const bytes = readFileSync(rollout, "utf8");
+        const original = runningSession({ agent: "codex", agentSessionId: threadId });
+        const sessions = createSessionStore(original);
+        authProxyRegisterSessionMock.mockResolvedValue(registration("codex", "backup"));
+        const service = await createDisposedSessionService();
+
+        await expect(
+          service.switchAuth("api-1", "backup", { reason: "manual" }),
+        ).rejects.toMatchObject({
+          statusCode: 409,
+          message: expect.stringMatching(/saved provider openai cannot change to spur_managed/),
+        });
+
+        refusedSideEffects(original, sessions);
+        expect(readFileSync(rollout, "utf8")).toBe(bytes);
+        service.dispose();
+      });
+
+      it("refuses a thread whose rollout cannot be found", async () => {
+        seedManagedAccounts("codex");
+        const original = runningSession({ agent: "codex", agentSessionId: threadId });
+        const sessions = createSessionStore(original);
+        authProxyRegisterSessionMock.mockResolvedValue(registration("codex", "backup"));
+        const service = await createDisposedSessionService();
+
+        await expect(
+          service.switchAuth("api-1", "backup", { reason: "manual" }),
+        ).rejects.toMatchObject({
+          statusCode: 409,
+          message: expect.stringMatching(/saved provider cannot be verified for spur_managed/),
+        });
+
+        refusedSideEffects(original, sessions);
+        service.dispose();
+      });
+
+      it("only binds a stopped Codex session whose thread is on another provider", async () => {
+        seedManagedAccounts("codex");
+        writeUnboundCodexRollout(threadId, "openai");
+        const sessions = createSessionStore(
+          runningSession({
+            agent: "codex",
+            agentSessionId: threadId,
+            status: "stopped",
+            stopReason: "manual_pause",
+          }),
+        );
+        authProxyRegisterSessionMock.mockResolvedValue(registration("codex", "backup"));
+        const service = await createDisposedSessionService();
+
+        await service.switchAuth("api-1", "backup", { reason: "manual" });
+
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "stopped",
+          auth: { accountId: "backup" },
+        });
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        service.dispose();
+      });
+    });
+
+    it("only persists the binding for an unbound session that is not running", async () => {
+      seedManagedAccounts("claude");
+      const sessions = createSessionStore(
+        runningSession({ status: "stopped", stopReason: "manual_pause" }),
+      );
+      authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+      const service = await createDisposedSessionService();
+
+      await service.switchAuth("api-1", "backup", { reason: "manual" });
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "stopped",
+        auth: { accountId: "backup" },
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
       service.dispose();
     });
 
@@ -24679,6 +25301,77 @@ describe("SessionService", () => {
         expect(alerts.find((alert) => alert.accountId === "a")?.label).toBe("alek@x.com");
         service.dispose();
       });
+
+      const codexSession = (overrides: Parameters<typeof runningSession>[0] = {}) =>
+        runningSession({ id: "cx-1", agent: "codex", ...overrides });
+      const boundAuth = {
+        sessionId: "cx-1",
+        provider: "codex" as const,
+        mode: "auto" as const,
+        accountId: null,
+        effectiveAccountId: "c",
+        generation: 1,
+      };
+
+      it.each([
+        ["the same user", "c@x.com", "acct-1", [], []],
+        ["another user", "other@x.com", "acct-1", [], ["host:codex"]],
+        ["the same email in another account", "c@x.com", "acct-2", [], ["host:codex"]],
+        [
+          "the same user while a live unbound session uses the host login",
+          "c@x.com",
+          "acct-1",
+          [codexSession()],
+          ["host:codex"],
+        ],
+        [
+          "the same user with only bound or stopped sessions",
+          "c@x.com",
+          "acct-1",
+          [codexSession({ auth: boundAuth }), codexSession({ id: "cx-2", status: "stopped" })],
+          [],
+        ],
+      ])(
+        "raises a host alert unless a managed account is the same user: managed account of %s",
+        async (_label, email, accountId, existing, expected) => {
+          createSessionStore(...existing);
+          stored("codex", ["c"]);
+          authProxyGetStateMock.mockResolvedValue({
+            accounts: [
+              {
+                id: "c",
+                provider: "codex",
+                status: "ready",
+                identity: { email, organizationId: accountId },
+              },
+            ],
+            sessions: [],
+          });
+          mkdirSync(join(TEST_HOME, ".codex"), { recursive: true });
+          const claims = Buffer.from(
+            JSON.stringify({
+              email: "c@x.com",
+              "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+            }),
+          ).toString("base64url");
+          writeFileSync(
+            join(TEST_HOME, ".codex", "auth.json"),
+            JSON.stringify({ tokens: { access_token: "cx", id_token: `h.${claims}.s` } }),
+          );
+          __resetUsageCacheForTest();
+          vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => new Response("rejected", { status: 401 })),
+          );
+          const service = await createDisposedSessionService();
+          const { alerts } = await service.listAuthAlerts();
+          expect(alerts.filter((alert) => alert.kind === "host").map((alert) => alert.id)).toEqual(
+            expected,
+          );
+          service.dispose();
+          vi.unstubAllGlobals();
+        },
+      );
 
       it("leaves the store alone when the companion rejects an API key", async () => {
         stored("claude", ["a"]);

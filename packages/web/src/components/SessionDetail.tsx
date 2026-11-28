@@ -100,6 +100,7 @@ import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
 import { usePoll } from "@/hooks/usePoll";
 import type { PollOutcome } from "@/lib/poller";
+import { useAuthAccounts } from "@/lib/auth-accounts";
 import {
   CLOSE_SESSION_TOOLTIP,
   killConfirmText,
@@ -2357,6 +2358,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
+  // Only an unbound claude/codex session needs the account list to offer the switch.
+  const switchableUnbound =
+    session !== null &&
+    session !== undefined &&
+    session.auth === undefined &&
+    (session.agent === "claude" || session.agent === "codex");
+  const authAccounts = useAuthAccounts(switchableUnbound);
+
   const actionDialogs = useSessionActionDialogs({
     resolve: (id) => (session?.id === id ? session : null),
     showErrorToast,
@@ -3075,7 +3084,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <BusyContent busy={busyAction === "handoff"}>Handoff</BusyContent>
               </button>
             ) : null}
-            {canSwitchAuth(session) ? (
+            {canSwitchAuth(session, authAccounts.data?.accounts) ? (
               <button
                 type="button"
                 disabled={busyAction !== null}

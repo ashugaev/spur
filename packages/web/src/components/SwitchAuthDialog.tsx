@@ -14,10 +14,12 @@ import {
   quotaText,
   useAuthAccounts,
 } from "@/lib/auth-accounts";
-import type { SpurSessionAuth } from "@/lib/types";
+import type { AuthProvider, SpurSessionAuth } from "@/lib/types";
 
 interface SwitchAuthDialogProps {
-  auth: SpurSessionAuth;
+  provider: AuthProvider;
+  /** Absent for a session without a managed binding; it switches by relaunching. */
+  auth?: SpurSessionAuth;
   status: "idle" | "pending" | "error";
   errorMessage: string | null;
   /** `null` selects Auto. */
@@ -45,6 +47,7 @@ function QuotaCell({ text }: { text: ReturnType<typeof quotaText> }) {
 }
 
 export function SwitchAuthDialog({
+  provider,
   auth,
   status,
   errorMessage,
@@ -55,21 +58,22 @@ export function SwitchAuthDialog({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const accountsQuery = useAuthAccounts(true, { poll: true });
   const providerAccounts = (accountsQuery.data?.accounts ?? []).filter(
-    (account) => account.provider === auth.provider,
+    (account) => account.provider === provider,
   );
   // The pinned account always has a row, so the dialog never hides what the session runs on.
   const identified = providerAccounts.filter(
-    (account) => account.identity !== undefined || account.id === auth.accountId,
+    (account) => account.identity !== undefined || account.id === auth?.accountId,
   );
-  const resolvedAuto = autoAccount(
-    providerAccounts,
-    accountsQuery.data?.pools[auth.provider],
-    auth,
-  );
-  const current = auth.mode === "pinned" ? (auth.accountId ?? AUTO_VALUE) : AUTO_VALUE;
-  const [selected, setSelected] = useState(current);
+  const resolvedAuto = autoAccount(providerAccounts, accountsQuery.data?.pools[provider], auth);
+  // An unbound session has no current account: every choice is a change.
+  const current = auth
+    ? auth.mode === "pinned"
+      ? (auth.accountId ?? AUTO_VALUE)
+      : AUTO_VALUE
+    : null;
+  const [selected, setSelected] = useState(current ?? AUTO_VALUE);
   const [force, setForce] = useState(false);
-  const providerName = authProviderName(auth.provider);
+  const providerName = authProviderName(provider);
   const pending = status === "pending";
 
   useDialogFocus({ panelRef, initialRef: cancelRef, onEscape: onCancel, escapeBlocked: pending });
@@ -161,7 +165,7 @@ export function SwitchAuthDialog({
                     >
                       {lines.primary}
                     </span>
-                    {account.id === auth.effectiveAccountId ? (
+                    {account.id === auth?.effectiveAccountId ? (
                       <span
                         className="shrink-0 text-[var(--color-text-primary)]"
                         role="img"

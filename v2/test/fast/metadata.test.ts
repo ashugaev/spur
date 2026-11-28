@@ -1340,6 +1340,37 @@ describe("durable spawn metadata", () => {
     },
   );
 
+  it.each([
+    ["a saved account", "account-2"],
+    ["Auto", null],
+  ])("round-trips the durable request with authAccountId for %s", async (_label, authAccountId) => {
+    const dataDir = await newDataDir();
+    const session = acceptedSession();
+    session.spawnIntent.request.authAccountId = authAccountId;
+    writeSession(dataDir, session);
+    expect(readSession(dataDir, session.id)?.spawnIntent?.request.authAccountId).toBe(
+      authAccountId,
+    );
+    expect(listSessions(dataDir)[0]?.spawnIntent).toEqual(session.spawnIntent);
+  });
+
+  it.each([7, "", "  "])("rejects an invalid durable authAccountId %j", async (authAccountId) => {
+    const dataDir = await newDataDir();
+    const session = acceptedSession();
+    writeSession(dataDir, session);
+    writeFileSync(
+      join(dataDir, "sessions", "api", "api-1.json"),
+      JSON.stringify({
+        ...session,
+        spawnIntent: {
+          ...session.spawnIntent,
+          request: { ...session.spawnIntent.request, authAccountId },
+        },
+      }),
+    );
+    expect(() => readSession(dataDir, session.id)).toThrow("Invalid durable spawn metadata");
+  });
+
   it.each(["owner", "suppressed"] as const)(
     "round-trips explicit PR alert intent and internal %s provenance",
     async (kind) => {
