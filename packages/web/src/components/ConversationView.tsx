@@ -367,7 +367,7 @@ export function ConversationView({
         ref={scrollRef}
         onScroll={handleScroll}
         data-testid="conversation-scroll"
-        className="flex max-h-80 flex-col gap-2 overflow-y-auto overflow-x-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
+        className="flex max-h-[50dvh] flex-col gap-2 overflow-y-auto overflow-x-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3 lg:max-h-[min(60dvh,40rem)]"
       >
         {isLoadingOlder ? (
           <div

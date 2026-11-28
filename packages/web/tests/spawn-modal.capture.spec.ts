@@ -203,7 +203,8 @@ test.describe("spawn modal capture", () => {
     });
     await mockSessionDetail(page, deskSession);
     await page.goto(`/sessions/${deskSession.id}`);
-    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await page.getByRole("button", { name: "More session actions" }).click();
+    await page.getByRole("menuitem", { name: /^desk agent$/i }).click();
     const deskModal = page
       .getByRole("heading", { name: "Desk agent" })
       .locator("xpath=ancestor::div[contains(@class,'shadow')][1]");
@@ -475,7 +476,8 @@ test.describe("spawn modal capture", () => {
     await mockSessionDetail(page, session);
     await page.setViewportSize({ width: 375, height: 340 });
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await page.getByRole("button", { name: "More session actions" }).click();
+    await page.getByRole("menuitem", { name: /^desk agent$/i }).click();
     const modal = modalForHeading(page, "Desk agent");
     const addStep = modal.getByRole("button", { name: "+ Step" });
     for (let index = 0; index < 8; index += 1) {

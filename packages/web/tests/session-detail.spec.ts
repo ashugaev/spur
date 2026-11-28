@@ -192,6 +192,16 @@ async function openTitleMenu(page: Page): Promise<void> {
   await page.getByRole("menuitem", { name: /change title/i }).click();
 }
 
+async function secondaryAction(page: Page, name: string | RegExp): Promise<Locator> {
+  const more = page.getByRole("button", { name: "More session actions" });
+  if ((await more.getAttribute("aria-expanded")) !== "true") await more.click();
+  return page.getByRole("menuitem", { name });
+}
+
+async function revealDetails(page: Page, name: "Task & Handoff" | "Runtime & Access") {
+  await page.getByText(name, { exact: true }).click();
+}
+
 function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
   return page.route(`**/api/sessions/${session.id}`, (route) => {
     void route.fulfill({
@@ -897,6 +907,7 @@ test.describe("S1: Session detail header", () => {
 
     await expect(page.locator("header").getByText("interval wake")).toBeVisible();
     await expect(page.locator("header").getByText(/in \d+m/)).toBeVisible();
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByText("Wake interval")).toBeVisible();
     await expect(page.getByText("5m").first()).toBeVisible();
     await expect(page.getByText("Wake stop condition")).toBeVisible();
@@ -919,6 +930,7 @@ test.describe("S1: Session detail header", () => {
 
     await expect(page.locator("header").getByText("daily wake")).toBeVisible();
     await expect(page.locator("header").getByText(/in \d+m/)).toBeVisible();
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByText("Wake daily at")).toBeVisible();
     await expect(page.getByText("09:00, 17:00").first()).toBeVisible();
     await expect(page.getByText("Wake stop condition")).toBeVisible();
@@ -1047,6 +1059,7 @@ test.describe("S1: Session detail header", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
+    await revealDetails(page, "Task & Handoff");
     await page.getByRole("button", { name: "Copy task" }).click();
 
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(prompt);
@@ -1135,6 +1148,7 @@ test.describe("Spur ToDo audit", () => {
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
+    await page.getByText("All tasks & history", { exact: true }).click();
     const toggle = page.getByRole("button", { name: /Implement native ToDo/ });
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.click();
@@ -1187,6 +1201,7 @@ test.describe("Spur ToDo audit", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
+    await page.getByText("All tasks & history", { exact: true }).click();
     const toggle = page.getByRole("button", { name: new RegExp(longToken.slice(0, 30)) });
     await expect(toggle).toBeVisible();
     const textSpan = toggle.getByText(longToken, { exact: true });
@@ -1228,6 +1243,57 @@ test.describe("Spur ToDo audit", () => {
 
 // S2: Actions bar
 test.describe("S2: Actions bar", () => {
+  for (const width of [1440, 390]) {
+    test(`compact layout keeps details folded and actions reachable at ${width}px`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      const session = makeWorkingSession({
+        id: `detail-compact-${width}`,
+        prompt: "Compact layout\n\nTask details stay available on demand.",
+        error: "A visible session error",
+      });
+      await mockSessionDetail(page, session);
+      await mockSessionConversationPayload(page, session.id, {
+        messages: [{ role: "assistant", text: "Conversation stays first.", timestampMs: 1 }],
+        durationMs: 1_000,
+        state: "waiting",
+      });
+      await mockTerminalWebSocket(page);
+      await page.goto(`/sessions/${session.id}`);
+
+      await expect(page.getByText("Conversation stays first.")).toBeVisible();
+      await expect(page.getByText("A visible session error")).toBeVisible();
+      for (const name of ["Task & Handoff", "Runtime & Access"] as const) {
+        await expect(page.getByText(name, { exact: true }).locator("..")).toHaveJSProperty(
+          "open",
+          false,
+        );
+      }
+      await expect(page.getByRole("button", { name: "Copy task" })).toBeHidden();
+      const more = page.getByRole("button", { name: "More session actions" });
+      await more.focus();
+      await page.keyboard.press("Enter");
+      await expect(page.getByRole("menu", { name: "Session actions" })).toBeVisible();
+      await expect(page.getByRole("menuitem", { name: "Logs", exact: true })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("menu", { name: "Session actions" })).toHaveCount(0);
+      await expect(more).toBeFocused();
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+      ).toBe(true);
+
+      await revealDetails(page, "Task & Handoff");
+      await expect(page.getByRole("button", { name: "Copy task" })).toBeVisible();
+      await revealDetails(page, "Runtime & Access");
+      await expect(page.getByText("Worktree path")).toBeVisible();
+      await page.getByRole("button", { name: "Terminal", exact: true }).click();
+      await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
+      await page.getByRole("button", { name: /close terminal/i }).click();
+      await expect(page).not.toHaveURL(/terminal=/);
+    });
+  }
+
   test("Terminal button visible when session is attachable", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s2-1" });
     await mockSessionDetail(page, session);
@@ -1245,7 +1311,7 @@ test.describe("S2: Actions bar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByRole("button", { name: /^pause$/i })).toBeVisible();
+    await expect(await secondaryAction(page, /^pause$/i)).toBeVisible();
   });
 
   test("completed task retains artifacts and messaging until Close Session", async ({ page }) => {
@@ -1271,7 +1337,7 @@ test.describe("S2: Actions bar", () => {
     await expect(page.locator("header").getByText("completed", { exact: true })).toBeVisible();
     await expect(page.getByText("proof.zip", { exact: true })).toBeVisible();
     await expect(page.getByPlaceholder("Message...")).toBeEnabled();
-    await expect(page.getByRole("button", { name: /^close session$/i })).toHaveAttribute(
+    await expect(await secondaryAction(page, /^close session$/i)).toHaveAttribute(
       "title",
       "Stop the agent and services, delete artifacts, remove the worktree",
     );
@@ -1288,7 +1354,7 @@ test.describe("S2: Actions bar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByRole("button", { name: /^close session$/i })).toBeVisible();
+    await expect(await secondaryAction(page, /^close session$/i)).toBeVisible();
   });
 
   test("Kill button visible when session not completed/killed", async ({ page }) => {
@@ -1296,7 +1362,7 @@ test.describe("S2: Actions bar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByRole("button", { name: /^kill$/i })).toBeVisible();
+    await expect(await secondaryAction(page, /^kill$/i)).toBeVisible();
   });
 
   test("Kill button click shows confirm dialog", async ({ page }) => {
@@ -1310,7 +1376,7 @@ test.describe("S2: Actions bar", () => {
       void dialog.dismiss();
     });
 
-    await page.getByRole("button", { name: /^kill$/i }).click();
+    await (await secondaryAction(page, /^kill$/i)).click();
     expect(dialogShown).toBe(true);
   });
 
@@ -1350,12 +1416,12 @@ test.describe("S2: Actions bar", () => {
       await expect(page.getByText("starting", { exact: true })).toBeVisible();
       await expect(page.getByText("working", { exact: true })).toHaveCount(0);
       await expect(page.getByRole("button", { name: /^terminal$/i })).toHaveCount(0);
-      await expect(page.getByRole("button", { name: /^handoff$/i })).toBeDisabled();
+      await expect(page.getByRole("button", { name: "More session actions" })).toBeDisabled();
       await expect(page.getByRole("button", { name: /^send now/i })).toHaveCount(0);
       await expect(page.getByPlaceholder(/^Message\.\.\./)).toHaveCount(0);
       await page.reload();
       await expect(page.getByText("starting", { exact: true })).toBeVisible();
-      await expect(page.getByRole("button", { name: /^handoff$/i })).toBeDisabled();
+      await expect(page.getByRole("button", { name: "More session actions" })).toBeDisabled();
       settle();
       await expect(page.getByText("starting", { exact: true })).toHaveCount(0);
       await expect(
@@ -1363,7 +1429,7 @@ test.describe("S2: Actions bar", () => {
       ).toBeVisible();
       if (action === "restore") {
         await expect(page.getByRole("button", { name: /^terminal$/i })).toBeEnabled();
-        await expect(page.getByRole("button", { name: /^pause$/i })).toBeEnabled();
+        await expect(await secondaryAction(page, /^pause$/i)).toBeEnabled();
         await page.getByPlaceholder(/^Message\.\.\./).fill("Ready");
         await expect(page.getByRole("button", { name: /^send now/i })).toBeEnabled();
       } else {
@@ -1549,7 +1615,7 @@ test.describe("S2: Actions bar", () => {
       });
 
       await page.goto(`/sessions/${session.id}`);
-      await page.getByRole("button", { name: /^kill$/i }).click();
+      await (await secondaryAction(page, /^kill$/i)).click();
 
       await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toBeVisible();
       await page
@@ -1631,7 +1697,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^close session$/i }).click();
+    await (await secondaryAction(page, /^close session$/i)).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -1671,7 +1737,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^close session$/i }).click();
+    await (await secondaryAction(page, /^close session$/i)).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -1699,7 +1765,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^close session$/i }).click();
+    await (await secondaryAction(page, /^close session$/i)).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -1766,7 +1832,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^close session$/i }).click();
+    await (await secondaryAction(page, /^close session$/i)).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -1901,7 +1967,7 @@ test.describe("S2: Actions bar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await (await secondaryAction(page, /^desk agent$/i)).click();
     const deskModal = page
       .getByRole("heading", { name: "Desk agent" })
       .locator("xpath=ancestor::div[contains(@class,'shadow')][1]");
@@ -1938,7 +2004,7 @@ test.describe("S2: Actions bar", () => {
     });
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: /^handoff$/i }).click();
+    await (await secondaryAction(page, /^handoff$/i)).click();
     const handoffAgent = page.getByRole("combobox", { name: "Handoff agent" });
     await expect(handoffAgent).toHaveValue("claude");
     // Handing off to a different agent (default) never carries the source
@@ -1986,7 +2052,7 @@ test.describe("S2: Actions bar", () => {
     await mockSpawnDefaults(page);
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await (await secondaryAction(page, /^desk agent$/i)).click();
     const deskDialog = page.getByRole("dialog", { name: "Desk agent" });
     await expect(deskDialog.getByRole("combobox", { name: "Spawn project" })).toHaveCount(0);
     await expect(deskDialog.getByRole("combobox", { name: "workspace mode" })).toHaveCount(0);
@@ -2028,7 +2094,7 @@ test.describe("S2: Actions bar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await (await secondaryAction(page, /^desk agent$/i)).click();
     const textarea = page.getByRole("textbox", { name: "Desk agent prompt" });
     await textarea.fill("Prompt to clear");
     await page.getByRole("button", { name: "Clear desk agent prompt" }).click();
@@ -2057,7 +2123,7 @@ test.describe("S2: Actions bar", () => {
     await mockSpawnDefaults(page);
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await (await secondaryAction(page, /^desk agent$/i)).click();
     const deskDialog = page.getByRole("dialog", { name: "Desk agent" });
     await expect(deskDialog.getByRole("button", { name: "Desk spawn model" })).toContainText(
       "Opus",
@@ -2115,7 +2181,7 @@ test.describe("S2: Actions bar", () => {
     await mockSpawnDefaults(page);
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await (await secondaryAction(page, /^desk agent$/i)).click();
     const deskDialog = page.getByRole("dialog", { name: "Desk agent" });
     await expect(deskDialog.getByRole("button", { name: "Desk spawn model" })).toContainText(
       "Opus",
@@ -2146,6 +2212,7 @@ test.describe("S2: Actions bar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByText("Workspace Access")).toBeVisible();
     await expect(page.getByRole("link", { name: /^open web ide$/i })).toHaveAttribute(
       "href",
@@ -2178,7 +2245,7 @@ test.describe("S2a: Logs modal", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^logs$/i }).click();
+    await (await secondaryAction(page, /^logs$/i)).click();
     const dialog = page.getByRole("dialog", { name: `Logs ${session.id}` });
     await expect(dialog.getByText("No Spur log entries yet.")).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("logs-loading.png") });
@@ -2231,7 +2298,7 @@ test.describe("S2a: Logs modal", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^logs$/i }).click();
+    await (await secondaryAction(page, /^logs$/i)).click();
     const dialog = page.getByRole("dialog", { name: `Logs ${session.id}` });
     await expect(dialog.getByRole("alert")).toContainText("Logs unavailable · HTTP 502");
     await expect(dialog.getByRole("alert")).toContainText(
@@ -2273,13 +2340,12 @@ test.describe("S2a: Logs modal", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    const open = page.getByRole("button", { name: /^logs$/i });
-    await open.click();
+    await (await secondaryAction(page, /^logs$/i)).click();
     const dialog = page.getByRole("dialog", { name: `Logs ${session.id}` });
     await expect(dialog.getByText("OLD_LOG_ROW")).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("logs-rows.png") });
     await dialog.getByRole("button", { name: "Close logs" }).click();
-    await open.click();
+    await (await secondaryAction(page, /^logs$/i)).click();
     await expect(dialog.getByRole("alert")).toContainText("No retained pane for runtime api");
     await expect(dialog.getByText("OLD_LOG_ROW")).toHaveCount(0);
   });
@@ -2330,7 +2396,7 @@ test.describe("S2a: Logs modal", () => {
     ]);
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^logs$/i }).click();
+    await (await secondaryAction(page, /^logs$/i)).click();
 
     await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
     await expect(
@@ -2394,7 +2460,7 @@ test.describe("S2a: Logs modal", () => {
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: "System (1)" }).click();
-    await page.getByRole("button", { name: /^logs$/i }).click();
+    await (await secondaryAction(page, /^logs$/i)).click();
 
     await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
     await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveAttribute(
@@ -2451,7 +2517,7 @@ test.describe("S2a: Logs modal", () => {
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: "Attached (1)" }).click();
-    await page.getByRole("button", { name: /^logs$/i }).click();
+    await (await secondaryAction(page, /^logs$/i)).click();
 
     await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
     await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveCount(0);
@@ -4859,6 +4925,7 @@ test.describe("S5: Runtime sidebar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByText("Created")).toBeVisible();
     await expect(page.getByText("Last activity")).toBeVisible();
   });
@@ -4871,6 +4938,7 @@ test.describe("S5: Runtime sidebar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByText("Worktree path")).toBeVisible();
     await expect(page.getByText(/worktrees\/detail-s5-2/)).toBeVisible();
   });
@@ -4881,7 +4949,7 @@ test.describe("S5: Runtime sidebar", () => {
       const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
       if (!artifacts) return;
       mkdirSync(join(artifacts, "token-count"), { recursive: true });
-      await page.getByRole("heading", { name: "Runtime" }).scrollIntoViewIfNeeded();
+      await page.getByText("Runtime & Access", { exact: true }).scrollIntoViewIfNeeded();
       const card = page.getByRole("tooltip");
       if (await card.isVisible()) {
         await expect
@@ -5007,9 +5075,11 @@ test.describe("S5: Runtime sidebar", () => {
     for (const session of sessions) await mockSessionDetail(page, session);
 
     await page.goto("/sessions/detail-s5-token-waiting");
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByLabel("Tokens: unavailable")).toHaveText("—");
     await capture("idle");
     await page.goto("/sessions/detail-s5-token-available");
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByText("1.2K / 2K")).toBeVisible();
     await page.getByLabel("Tokens: 1,234").focus();
     await expect(page.getByRole("tooltip")).toContainText("Cache read");
@@ -5022,11 +5092,14 @@ test.describe("S5: Runtime sidebar", () => {
     await capture("available-mobile");
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.goto("/sessions/detail-s5-cursor-measured");
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByText("100", { exact: true })).toBeVisible();
     await page.goto("/sessions/detail-s5-token-unavailable");
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByLabel("Tokens: unavailable")).toHaveText("—");
     await capture("unavailable");
     await page.goto("/sessions/detail-s5-token-exhausted");
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByText("2K / 2K")).toBeVisible();
     await page.getByLabel("Tokens: 2,000").focus();
     await capture("budget-hit");
@@ -5034,10 +5107,12 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(page.getByText("Not accepting input. Restore to continue.")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
     await page.goto("/sessions/detail-s5-main-only-exhausted");
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByText("100 / 100")).toBeVisible();
     await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
     await page.goto("/sessions/detail-s5-token-warn-only");
+    await revealDetails(page, "Runtime & Access");
     const warnOnlyCount = page.getByLabel("Tokens: 100", { exact: true });
     await expect(warnOnlyCount).toHaveAttribute("style", /--color-status-error/);
     await expect(warnOnlyCount).toHaveClass(/font-bold/);
@@ -5085,7 +5160,8 @@ test.describe("S5: Runtime sidebar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    const runtime = page.getByRole("heading", { name: "Runtime" }).locator("..");
+    await revealDetails(page, "Runtime & Access");
+    const runtime = page.getByText("Runtime & Access", { exact: true }).locator("..");
     await expect(runtime.locator("dt", { hasText: /^Tokens$/ })).toHaveCount(1);
     await expect(runtime.getByText("≥100 / 100")).toBeVisible();
     await runtime.getByLabel("Tokens: at least 100").hover();
@@ -5234,11 +5310,7 @@ test.describe("S5: Runtime sidebar", () => {
       );
       await expect(page.getByText(/^starting$/i)).toBeVisible();
       await expect(page.getByText(/^working$/i)).toHaveCount(0);
-      for (const name of ["Desk agent", "Handoff", "Kill"]) {
-        const control = page.getByRole("button", { name, exact: true });
-        await expect(control).toBeVisible();
-        await expect(control).toBeDisabled();
-      }
+      await expect(page.getByRole("button", { name: "More session actions" })).toBeDisabled();
       for (const name of ["Continue anyway", "Restore", "Close Session"]) {
         await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
       }
@@ -5271,6 +5343,7 @@ test.describe("S5: Runtime sidebar", () => {
       release?.();
       await expect(page.getByText(/^starting$/i)).toHaveCount(0);
       await expect(page.getByText(/^working$/i)).toBeVisible();
+      await revealDetails(page, "Runtime & Access");
       await expect(page.getByText("100 / 100")).toBeVisible();
       await expect(page.getByPlaceholder("Message...")).toBeEnabled();
       await page.getByLabel("Tokens: 100", { exact: true }).focus();
@@ -5306,6 +5379,7 @@ test.describe("S5: Runtime sidebar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
+    await revealDetails(page, "Runtime & Access");
     await page.getByLabel("Tokens: at least 20").focus();
     await expect(page.getByText("Budget not enforced · earlier usage unknown")).toBeVisible();
     await expect(page.getByRole("button", { name: "Restore" })).toBeVisible();
@@ -5344,6 +5418,7 @@ test.describe("S5: Runtime sidebar", () => {
     });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
+    await revealDetails(page, "Runtime & Access");
     const count = page.getByLabel("Tokens: at least 20");
     await expect(count).toHaveText("≥20 / 100");
     await count.focus();
@@ -5422,6 +5497,7 @@ test.describe("S5: Runtime sidebar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
+    await revealDetails(page, "Runtime & Access");
     await expect(page.getByText("Cursor", { exact: true })).toBeVisible();
     await expect(
       page.getByText("cursor --remote ssh-remote+100.80.107.19 /tmp/worktrees/detail-s5-3"),
@@ -5443,6 +5519,7 @@ test.describe("S5: Runtime sidebar", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
+    await revealDetails(page, "Runtime & Access");
     await page.getByRole("button", { name: /^copy cursor$/i }).click();
 
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(command);

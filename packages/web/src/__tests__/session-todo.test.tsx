@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionTodo } from "@/components/SessionTodo.js";
 import type { SpurTodoProjection } from "@/lib/types.js";
@@ -77,8 +77,12 @@ describe("SessionTodo", () => {
   });
 
   it("shows compact human action and expands immutable audit detail", async () => {
+    const fullId = "12345678-1234-1234-1234-123456789012";
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify(projection), { status: 200 }),
+      new Response(
+        JSON.stringify({ ...projection, items: [{ ...projection.items[0], id: fullId }] }),
+        { status: 200 },
+      ),
     );
     render(<SessionTodo sessionId="api-1" />);
 
@@ -88,7 +92,9 @@ describe("SessionTodo", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("Need product input")).toBeInTheDocument();
+    expect(within(toggle).getByText(fullId, { exact: true })).toBeInTheDocument();
+    expect(toggle).toHaveAttribute("aria-controls", `todo-audit-${fullId}`);
+    expect(screen.getAllByText("Need product input").length).toBeGreaterThan(0);
     expect(
       screen.queryByRole("button", { name: /delete|complete|cancel|resume/i }),
     ).not.toBeInTheDocument();
@@ -130,6 +136,57 @@ describe("SessionTodo", () => {
     );
     render(<SessionTodo sessionId="api-2" />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Invalid ToDo response");
+  });
+
+  it("summarizes current work, discloses resolved items, and resets disclosure on session change", async () => {
+    const active: SpurTodoProjection = {
+      ...projection,
+      counts: { total: 2, open: 1, held: 0, completed: 1, cancelled: 0 },
+      status: "active",
+      items: [
+        { ...projection.items[0]!, id: "current", status: "open", text: "Current work" },
+        { ...projection.items[0]!, id: "done", status: "completed", text: "Finished work" },
+      ],
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () => new Response(JSON.stringify(active), { status: 200 }),
+    );
+    const { rerender } = render(<SessionTodo sessionId="api-1" />);
+    expect(await screen.findByText("Current work")).toBeInTheDocument();
+    expect(screen.queryByText("Finished work")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("All tasks & history", { selector: "summary" }));
+    expect(await screen.findByText("Finished work")).toBeInTheDocument();
+    expect(screen.getAllByText("Current work")).toHaveLength(1);
+    rerender(<SessionTodo sessionId="api-2" />);
+    expect(await screen.findByText("Current work")).toBeInTheDocument();
+    expect(screen.queryByText("Finished work")).not.toBeInTheDocument();
+    expect(screen.getByText("All tasks & history").closest("details")).not.toHaveAttribute("open");
+  });
+
+  it("keeps held reasons and required action visible once while all tasks are open", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(projection), { status: 200 }),
+    );
+    render(<SessionTodo sessionId="api-1" />);
+    expect(await screen.findByText("Need product input")).toBeInTheDocument();
+    expect(screen.getByText("Human action: Choose command name")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("All tasks & history", { selector: "summary" }));
+    await screen.findByRole("list", { name: "All Spur ToDo items" });
+    expect(screen.getAllByText("Choose the public command")).toHaveLength(1);
+    expect(screen.getByText("Need product input")).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: /Choose the public command/ });
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(within(toggle).getByText("item-12345678")).toBeInTheDocument();
+    expect(within(toggle).getAllByText("Need product input")).toHaveLength(1);
+    expect(within(toggle).getAllByText("Human action: Choose command name")).toHaveLength(1);
+    const heldItem = toggle.closest("li")!;
+    expect(screen.getAllByText("Choose the public command")).toHaveLength(1);
+    const audit = heldItem.querySelector(`#${toggle.getAttribute("aria-controls")}`)!;
+    expect(within(audit as HTMLElement).getByText("Need product input")).toBeInTheDocument();
+    expect(
+      within(audit as HTMLElement).getByText("Human action: Choose command name"),
+    ).toBeInTheDocument();
   });
 
   it("hides zero unfinished indicators for resolved work", async () => {
@@ -189,7 +246,7 @@ describe("SessionTodo", () => {
     expect(screen.getByLabelText("open")).toBeInTheDocument();
   });
 
-  it("hard-wraps a long unbroken item text and expanded reasons so they never overflow", async () => {
+  it("hard-wraps held text and full reasons before expanding audit", async () => {
     const longToken = "supercalifragilisticexpialidocious".repeat(8);
     const overflowing: SpurTodoProjection = {
       ...projection,
@@ -221,14 +278,14 @@ describe("SessionTodo", () => {
     );
     render(<SessionTodo sessionId="api-1" />);
 
-    const collapsedItemText = await screen.findByText(longToken, { selector: "span" });
+    const collapsedItemText = (await screen.findAllByText(longToken, { selector: "span" }))[0]!;
     expect(collapsedItemText).toHaveClass("min-w-0");
-    expect(collapsedItemText).toHaveClass("truncate");
-    expect(collapsedItemText).not.toHaveClass("[overflow-wrap:anywhere]");
-    expect(collapsedItemText).not.toHaveClass("whitespace-pre-wrap");
+    expect(collapsedItemText).not.toHaveClass("truncate");
+    expect(collapsedItemText).toHaveClass("[overflow-wrap:anywhere]");
+    expect(collapsedItemText).toHaveClass("whitespace-pre-wrap");
 
     fireEvent.click(screen.getByRole("button", { name: new RegExp(longToken) }));
-    const expandedItemText = screen.getByText(longToken, { selector: "span" });
+    const expandedItemText = screen.getAllByText(longToken, { selector: "span" })[0]!;
     expect(expandedItemText).toHaveClass("min-w-0");
     expect(expandedItemText).toHaveClass("[overflow-wrap:anywhere]");
     expect(expandedItemText).toHaveClass("whitespace-pre-wrap");
@@ -277,6 +334,8 @@ describe("SessionTodo", () => {
       );
       render(<SessionTodo sessionId="api-2" />);
       await screen.findByText("Text inherited");
+      fireEvent.click(screen.getByText("All tasks & history", { selector: "summary" }));
+      await screen.findByRole("list", { name: "All Spur ToDo items" });
     }
 
     it("shows the source session on an inherited item", async () => {

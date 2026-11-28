@@ -340,3 +340,40 @@ wait_for_http() {
   echo "Timed out waiting for $url" >&2
   return 1
 }
+
+validate_daemon_generation() {
+  node "$SIDECAR_REPO_ROOT/v2/bin/isolated-web-endpoint.mjs" --daemon-ready \
+    "${SPUR_ISOLATED_CONFIG:-}" "${SPUR_ISOLATED_UI_ENDPOINT_FILE:-}" \
+    "${SPUR_ISOLATED_DATA_DIR:-}" "${SPUR_ISOLATED_DAEMON_URL:-}" \
+    "${SPUR_ISOLATED_TMUX_SOCKET_NAME:-}" "${SPUR_ISOLATED_DAEMON_PID:-}" \
+    "${SPUR_ISOLATED_DAEMON_STARTTIME:-}" "$@"
+}
+
+wait_for_isolated_daemon() {
+  local attempts="${1:-30}"
+  local launcher_pid="${2:-}"
+  local deadline=$((SECONDS + attempts))
+  local runtime_snapshot
+  DAEMON_LIFECYCLE_ID=""
+  for _ in $(seq 1 "$attempts"); do
+    (( SECONDS < deadline )) || break
+    if [[ -n "$launcher_pid" ]] && ! kill -0 "$launcher_pid" 2>/dev/null; then
+      echo "Isolated daemon launcher exited before readiness" >&2
+      return 1
+    fi
+    unset SPUR_ISOLATED_CONFIG SPUR_ISOLATED_UI_ENDPOINT_FILE SPUR_ISOLATED_DATA_DIR \
+      SPUR_ISOLATED_DAEMON_URL SPUR_ISOLATED_TMUX_SOCKET_NAME SPUR_ISOLATED_DAEMON_PID \
+      SPUR_ISOLATED_DAEMON_STARTTIME SPUR_ISOLATED_PROJECT_CONFIG SPUR_ISOLATED_SOURCE_WORKTREE
+    if [[ -f "$RUNTIME_FILE" ]] && runtime_snapshot="$(<"$RUNTIME_FILE")" 2>/dev/null; then
+      # Validate this snapshot; never re-read accepted metadata.
+      # shellcheck source=/dev/null
+      if source /dev/stdin <<<"$runtime_snapshot" 2>/dev/null && DAEMON_LIFECYCLE_ID="$(validate_daemon_generation 2>/dev/null)"; then
+        return 0
+      fi
+    fi
+    (( SECONDS < deadline )) || break
+    sleep 1
+  done
+  echo "Timed out waiting for current isolated daemon runtime" >&2
+  return 1
+}
