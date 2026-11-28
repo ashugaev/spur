@@ -1363,7 +1363,7 @@ describe("snapshot hook tool", () => {
     ).not.toBe("");
   });
 
-  it("writes a no-op hook tool when snapshots are disabled", async () => {
+  it("writes a no-op hook tool that drains stdin when snapshots are disabled", async () => {
     const { dataDir, toolDir } = await setup({ snapshotAgoMs: stale });
     expect(runHook(toolDir, { hook_event_name: "Stop" })).not.toBe("");
     ensureSessionSlotTool({
@@ -1374,7 +1374,13 @@ describe("snapshot hook tool", () => {
       snapshotHook: { enabled: false },
     });
     expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
-    expect(runHook(toolDir, { hook_event_name: "PostToolUse", tool_name: "Edit" })).toBe("");
+    expect(
+      runHook(toolDir, {
+        hook_event_name: "PostToolUse",
+        tool_name: "Edit",
+        tool_response: "x".repeat(1024 * 1024),
+      }),
+    ).toBe("");
   });
 
   it("exits 0 silently on malformed input or unreadable snapshots", async () => {

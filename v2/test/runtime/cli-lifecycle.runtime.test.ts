@@ -4,7 +4,7 @@ import { constants, existsSync } from "node:fs";
 import { chmod, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { toCursorProjectPath } from "../../src/cursor-jsonl-state.js";
 import { cursorDeliveryInput, isCursorDeliveryId } from "../../src/agents/cursor-submit-ack.js";
 import { withSessionSlotInstructions } from "../../src/session-slots.js";
@@ -5603,6 +5603,31 @@ projects:
       { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
     );
     expect(thirdPort.trim()).toBe("4600");
+  });
+
+  it("waits for a populated fixture ledger before accepting no unfinished work", async () => {
+    const empty: TodoProjection = {
+      revision: "empty",
+      status: "active",
+      counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
+      items: [],
+      finishOverrides: [],
+    };
+    const fetchTodo = vi
+      .fn<(path: string) => Promise<TodoProjection>>()
+      .mockResolvedValueOnce(empty)
+      .mockResolvedValueOnce({
+        ...empty,
+        counts: { ...empty.counts, total: 1, open: 1 },
+      })
+      .mockResolvedValueOnce({
+        ...empty,
+        status: "resolved",
+        counts: { ...empty.counts, total: 1, completed: 1 },
+      });
+    await waitForCleanTodoLedger({ fetchJson: fetchTodo }, "fixture-ledger");
+    expect(fetchTodo).toHaveBeenCalledTimes(3);
+    expect(fetchTodo).toHaveBeenLastCalledWith("/sessions/fixture-ledger/todo");
   });
 
   it("real sidecar listener exposes a runtime URL and complete or kill removes it", async () => {

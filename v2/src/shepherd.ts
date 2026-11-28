@@ -37,9 +37,18 @@ export function buildShepherdProject(dataDir: string): ProjectConfig {
   };
 }
 
-export function renderShepherdPrompt(operatorMessage?: string): string {
-  const request = operatorMessage?.trim() || DEFAULT_SHEPHERD_MESSAGE;
-  return `You are Spur Shepherd: an orchestration agent for Spur.
+const LEGACY_INITIAL_ACTION = `Initial action:
+1. Run \`spur list --json\` to inspect current sessions.
+2. Decide whether to answer, spawn, send, schedule a wake, or wait.`;
+
+const INITIAL_ACTION = `Initial action:
+1. If the operator supplied a bounded INT protocol, follow its complete fresh relevant project registry census and supported targeted candidate/runtime reads. A full-fleet listing or \`/info\` probe is not a startup prerequisite for that protocol. Preserve its fresh Jira scope, owner/dedup/admission serialization and actual native runtime gates; registry metadata alone does not prove liveness.
+2. Otherwise, run \`spur list --json\` to inspect current sessions. An explicit operator request for whole-fleet diagnostics still permits that inspection.
+3. Decide whether to answer, spawn, send, schedule a wake, or wait.`;
+
+const OPERATOR_REQUEST_MARKER = "\n\nOperator request:\n";
+
+const SHEPHERD_RULES_PREFIX = `You are Spur Shepherd: an orchestration agent for Spur.
 
 Rules:
 - Delegate repo work to worker agents; do not write or modify product code yourself, regardless of which agent runs this session. If the target project defines its own routing convention (for example \`$manager\` in its \`CLAUDE.md\`/\`AGENTS.md\`), brief the worker to follow it.
@@ -54,10 +63,26 @@ Rules:
 - For another session state change, use \`spur subscribe <targetSessionId> --state needs_input --state error --message "Check this"\`; defaults to current \`$SPUR_SESSION\`.
 - Wake API: \`POST /sessions/$SPUR_SESSION/wake\` with \`{"delayMs":600000,"message":"message"}\`, \`{"at":"<iso-time>","message":"message"}\`, \`{"intervalMs":600000,"stopCondition":"condition","message":"message"}\`, or \`{"dailyAt":["09:00"],"stopCondition":"condition","message":"message"}\`. Cancel: \`POST /sessions/$SPUR_SESSION/wake/cancel\`.
 
-Initial action:
-1. Run \`spur list --json\` to inspect current sessions.
-2. Decide whether to answer, spawn, send, schedule a wake, or wait.
+`;
 
-Operator request:
-${request}`;
+export function renderShepherdPrompt(operatorMessage?: string): string {
+  const request = operatorMessage?.trim() || DEFAULT_SHEPHERD_MESSAGE;
+  return `${SHEPHERD_RULES_PREFIX}${INITIAL_ACTION}${OPERATOR_REQUEST_MARKER}${request}`;
+}
+
+export function refreshShepherdPrompt(
+  prompt: string,
+  source: { project: string; originalTaskPrompt?: string },
+): string {
+  if (source.project !== SHEPHERD_PROJECT_ID || source.originalTaskPrompt === undefined) {
+    return prompt;
+  }
+  const legacyPrefix = `${SHEPHERD_RULES_PREFIX}${LEGACY_INITIAL_ACTION}${OPERATOR_REQUEST_MARKER}`;
+  if (
+    !prompt.startsWith(legacyPrefix) ||
+    prompt.slice(legacyPrefix.length).trim() !== source.originalTaskPrompt.trim()
+  ) {
+    return prompt;
+  }
+  return `${SHEPHERD_RULES_PREFIX}${INITIAL_ACTION}${OPERATOR_REQUEST_MARKER}${prompt.slice(legacyPrefix.length)}`;
 }

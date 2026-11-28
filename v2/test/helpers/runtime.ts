@@ -192,16 +192,17 @@ export interface RuntimeTestContext {
 // caller that fires a ledger-gated manual status (e.g. `complete`) right
 // after spawn/resume can hit `todo_open_work` (PR #781 regression, see
 // GitHub Actions run 33044875236). Poll the session's ToDo projection until
-// it has no open or held items before issuing the gated call.
+// the fixture has populated it and resolved all open or held items before the gated call.
 export async function waitForCleanTodoLedger(
-  context: RuntimeTestContext,
+  context: { fetchJson(path: string): Promise<TodoProjection> },
   sessionId: string,
   opts: { timeoutMs?: number } = {},
 ): Promise<void> {
   const { timeoutMs = 15_000 } = opts;
-  await pollUntil(async () => context.fetchJson<TodoProjection>(`/sessions/${sessionId}/todo`), {
+  await pollUntil(async () => context.fetchJson(`/sessions/${sessionId}/todo`), {
     timeoutMs,
-    accept: (projection) => projection.counts.open === 0 && projection.counts.held === 0,
+    accept: (projection) =>
+      projection.counts.total > 0 && projection.counts.open === 0 && projection.counts.held === 0,
     label: `clean Spur ToDo ledger for session ${sessionId}`,
   });
 }
@@ -934,6 +935,28 @@ if (args[0] === "search" && args[1] === "prs") {
   process.exit(0);
 }
 
+if (args[0] === "api" && args.includes("meta")) {
+  print({});
+  process.exit(0);
+}
+
+if (args[0] === "api" && args.includes("search/issues")) {
+  const page = Number(argValue(args, "page=") || "1");
+  const items = state.searchPrs || [];
+  print({
+    total_count: items.length,
+    incomplete_results: false,
+    items: items.slice((page - 1) * 100, page * 100).map((item) => ({
+      number: item.number,
+      title: item.title,
+      html_url: item.url,
+      repository_url: "https://api.github.com/repos/" + item.repository.nameWithOwner,
+      pull_request: {},
+    })),
+  });
+  process.exit(0);
+}
+
 if (args[0] === "pr" && args[1] === "list") {
   const headIndex = args.indexOf("--head");
   const branch = headIndex === -1 ? "" : args[headIndex + 1] || "";
@@ -962,6 +985,10 @@ if (args[0] === "pr" && args[1] === "view") {
 
 if (args[0] === "api" && args.includes("graphql")) {
   const query = argValue(args, "query=") || "";
+  if (query.includes('__type(name: "SearchType")')) {
+    print({ data: { __type: { enumValues: [{ name: "ISSUE_ADVANCED" }] } } });
+    process.exit(0);
+  }
   const repository = {
     nameWithOwner: (argValue(args, "owner=") || "acme") + "/" + (argValue(args, "name=") || "api"),
     isFork: false,
