@@ -174,9 +174,11 @@ describe("auth terminal logins", () => {
       });
       const s = await setup({ killTmuxSession });
       let restoreTimerSpy: (() => void) | undefined;
+      let startedId: string | undefined;
       try {
         s.deps.importNativeLogin.mockRejectedValueOnce(new Error("down"));
         const started = await s.terminals.start({ accountId: ACCOUNT });
+        startedId = started.id;
         await s.advance();
         expect(s.terminals.get(started.id)).toMatchObject({
           reason: "companion_unavailable",
@@ -221,6 +223,7 @@ describe("auth terminal logins", () => {
       } finally {
         releaseCleanup();
         restoreTimerSpy?.();
+        if (startedId) await s.terminals.stop(startedId);
         s.terminals.dispose();
         await vi.waitFor(() => expect(existsSync(s.managedHome)).toBe(false));
       }
