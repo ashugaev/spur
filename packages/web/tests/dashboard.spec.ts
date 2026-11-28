@@ -2082,9 +2082,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await expect(page.getByRole("link", { name: "Open PR action row" }).first()).toHaveCount(0);
   });
 
-  test("done click confirms active desk subagents and sends desk-scoped complete", async ({
-    page,
-  }) => {
+  test("done click closes desk with subagents without confirmation", async ({ page }) => {
     const session = makeSessionWithPR({
       id: "done-desk-1",
       prompt: "Desk done row",
@@ -2135,9 +2133,10 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         body: JSON.stringify({ completedIds: [session.id, subagent.id], lifecycle }),
       });
     });
+    let dialogs = 0;
     page.on("dialog", async (dialog) => {
-      expect(dialog.message()).toBe("Close this desk? 1 subagent on this checkout will be ended.");
-      await dialog.accept();
+      dialogs += 1;
+      await dialog.dismiss();
     });
 
     await page.goto("/");
@@ -2148,6 +2147,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await expect
       .poll(() => completeBody)
       .toEqual({ scope: "desk", operationId: expect.any(String) });
+    expect(dialogs).toBe(0);
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {
