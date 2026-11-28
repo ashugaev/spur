@@ -880,7 +880,7 @@ globalThis.fetch = async (input, options) => {
 const { createReviewAppProgram, run } = await import(pathToFileURL(entry).href);
 const program = createReviewAppProgram();
 assert(program.commands.length === 1 && program.commands[0].name() === "review-app", "unexpected root command");
-assert(JSON.stringify(program.commands[0].commands.map(command => command.name())) === JSON.stringify(["prepare", "block", "recover", "status", "publish"]), "unexpected grammar");
+assert(JSON.stringify(program.commands[0].commands.map(command => command.name())) === JSON.stringify(["prepare", "block", "recover", "status", "reply", "publish"]), "unexpected grammar");
 const inspect = command => { assert(!command._executableHandler, "executable command registration"); command.commands.forEach(inspect); };
 inspect(program);
 const key = join(root, "key.pem");

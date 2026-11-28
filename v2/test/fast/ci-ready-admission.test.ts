@@ -13,6 +13,8 @@ import {
   type LaneState,
 } from "../../src/review-state.js";
 
+import { nativeReviewBody, parseRequest } from "../../src/review-app.js";
+
 type Stage =
   | "quality"
   | "playwright"
@@ -903,7 +905,7 @@ test("required jobs retain admission, fan out after Quality and preserve readonl
       (id) => present(ci.jobs[id]).name,
     ),
   ).toEqual(["Quality", "Playwright E2E", "Runtime Integration", "Real-Agent Smoke"]);
-  for (const name of ["release.yml", "review-approval.yml"])
+  for (const name of ["release.yml"])
     expect(JSON.stringify(await workflow(name))).not.toContain("ci-ready-admission");
 });
 
@@ -1123,4 +1125,31 @@ test("actual wrappers charge source setup across concurrent CI/Security invocati
   expect(await realChild("success", "pull_request", true)).toBe(false);
   expect(await realChild("skipped", "push", false)).toBe(true);
   expect(await realChild("success", "pull_request", false, "failure")).toBe(false);
+});
+
+test("review-app native review body is accepted by the ready class", () => {
+  const f = fixture();
+  const states = f.comments.slice(0, 2).map((comment) => readStateBody(present(comment).body));
+  states.forEach((state, index) => {
+    const row = present(f.reviews[index]);
+    row.body = nativeReviewBody(
+      parseRequest({
+        repo: state.repo,
+        pr: state.pr,
+        lane: state.lane,
+        session: state.session,
+        attempt: state.attempt,
+        H: state.H,
+        B: state.B,
+        contractDigest: policy.contractDigest,
+        receipt: "r",
+        assessment: state.assessment,
+        body: "No blockers. Verdict: APPROVE.",
+        verdict: "APPROVED",
+        rows: [{ status: "passed", evidence: "proof" }],
+      }),
+      state.session,
+    );
+  });
+  expect(controller.reviewReadiness(policy, actors, f).ready).toBe(true);
 });

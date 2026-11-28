@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { startServer } from "../../src/server.js";
 import { SSE_HEADERS, SseHub } from "../../src/sse.js";
 import { pageDirPath } from "../../src/stores.js";
-import { createTempDir, findFreePort } from "../helpers/common.js";
+import { createTempDir, startOnFreePort } from "../helpers/common.js";
 
 const roots: string[] = [];
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -15,29 +15,35 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-async function boot() {
+// beforeStart runs after the candidate port is picked and before the daemon binds it.
+async function boot(beforeStart?: (port: number) => Promise<void>) {
   const root = await createTempDir("spur-server-pages-");
   roots.push(root);
   const repoDir = join(root, "repo");
   const dataDir = join(root, "data");
   await mkdir(repoDir, { recursive: true });
-  const port = await findFreePort();
   const configPath = join(root, "spur.yaml");
-  await writeFile(
-    configPath,
-    [
-      "server:",
-      "  host: 127.0.0.1",
-      `  port: ${port}`,
-      `dataDir: ${dataDir}`,
-      `worktreeDir: ${join(root, "worktrees")}`,
-      "projects:",
-      "  demo:",
-      `    path: ${repoDir}`,
-    ].join("\n"),
-    "utf8",
+  const { server, port } = await startOnFreePort(
+    (_port, path) => startServer(path, { info: () => undefined, warn: () => undefined }),
+    async (port) => {
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${dataDir}`,
+          `worktreeDir: ${join(root, "worktrees")}`,
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+        "utf8",
+      );
+      await beforeStart?.(port);
+      return configPath;
+    },
   );
-  const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
   let stopped = false;
   const stop = async () => {
     if (stopped) return;
@@ -59,6 +65,27 @@ async function boot() {
 }
 
 describe("page source HTTP boundary", () => {
+  it("boots on a fresh port when another process takes the picked one before bind", async () => {
+    const blocker = createServer();
+    cleanups.push(() => new Promise<void>((resolve) => blocker.close(() => resolve())));
+    const picked: number[] = [];
+    const { base } = await boot(async (port) => {
+      picked.push(port);
+      if (picked.length === 1) {
+        await new Promise<void>((resolve, reject) => {
+          blocker.once("error", reject);
+          blocker.listen(port, "127.0.0.1", () => {
+            blocker.off("error", reject);
+            resolve();
+          });
+        });
+      }
+    });
+    expect(picked).toHaveLength(2);
+    expect(base).toBe(`http://127.0.0.1:${picked[1]}`);
+    expect((await fetch(`${base}/pages`)).status).toBe(200);
+  });
+
   it("imports, updates without SSE, exposes errors/recovery and detaches without losing SQL", async () => {
     const { dataDir, base, call } = await boot();
     const source = join(dataDir, "source");

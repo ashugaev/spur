@@ -12,8 +12,7 @@ Session-state subscriptions accept `completed` for retained task completion; lif
 `SPUR_MCP_TUNNEL_PROFILE`, `CONTROL_PLANE_API_KEY`, `SPUR_MCP_TUNNEL_ENV_FILE`: `v2/src/mcp-tunnel.ts`; [tunnel setup](mcp.md#connect-openai-products).
 Reviewer App JSON `repositories`, `receiptRoot`, `code|browser.{appId,keyPath}`: caller-owned `--app-config` file; `v2/src/review-app.ts`.
 `SPUR_REVIEW_APP_CONFIG`: reviewer App config with private `consent.approverUserId`; `v2/src/review-interface-consent.ts`.
-Approval Gate policy JSON requires CI run-name provenance from `.github/workflows/ci.yml`: `v2/src/review-gate.ts`.
-Approval writer variables `SPUR_CODE_REVIEW_ACTOR`, `SPUR_BROWSER_REVIEW_ACTOR`: distinct bot actor IDs; `.github/workflows/review-approval.yml`.
+Admission variables `SPUR_CODE_REVIEW_ACTOR`, `SPUR_BROWSER_REVIEW_ACTOR`: distinct bot actor IDs; `.github/workflows/ci-ready-admission.yml`.
 
 ## Config registry
 

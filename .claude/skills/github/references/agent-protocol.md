@@ -41,8 +41,7 @@ MERGE AUTHORITY
   Require human merge for interface-changing PRs; disable auto-merge.
   Require two distinct designated eligible non-author native APPROVED identities for target automated flow: code and browser/manual.
   Reject generic vote count, same-login lanes and local verdicts as target gate substitutes.
-  Permit native auto-merge for internal-only PRs after explicit operator consent, both required native APPROVED reviews, green required checks, admin configuration and sandbox activation proof of default-branch Approval Gate with designated consent/exact-identity/strict-CI enforcement.
+  Permit native auto-merge for internal-only PRs after explicit operator consent, both required native APPROVED reviews, green required checks, admin configuration and ruleset readback showing required approvals of at least 2; require reviewDecision APPROVED.
   Block strict success for pending/failing/missing/canceled/skipped/neutral required execution; no bypass.
   Reject footer, PR-owned receipt, prompt affirmation or replayed consent as protected approval proof.
-  Require producer provenance, revision/lifecycle invalidation and privileged runner isolation before activation.
-  Keep auto-merge OFF without live activation proof.
+  Keep auto-merge OFF without ruleset readback proof.

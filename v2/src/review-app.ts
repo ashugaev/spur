@@ -15,12 +15,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Command } from "commander";
 import { digest, parseAssessment, type InterfaceAssessment } from "./review-interface.js";
-import {
-  feedbackSummary,
-  parseFeedback,
-  publishLaneState,
-  type ReviewFeedback,
-} from "./review-state.js";
+import { parseFeedback, publishLaneState, type ReviewFeedback } from "./review-state.js";
 import {
   GitHubApp,
   ReviewAppError,
@@ -55,9 +50,16 @@ interface Attempt {
   receipt: string;
   feedback?: ReviewFeedback;
 }
+interface InlineComment {
+  path: string;
+  line: number;
+  side: "RIGHT" | "LEFT";
+  body: string;
+}
 interface Request extends Attempt {
   assessment: InterfaceAssessment;
   body: string;
+  comments?: InlineComment[];
   verdict: "APPROVED" | "CHANGES_REQUESTED";
   coverage: { challenger: string; output: string; omissionsClosed: boolean } | null;
   rows: Row[];
@@ -134,6 +136,35 @@ export function parseConfig(value: unknown): Config {
   if (config.code.appId === config.browser.appId) throw new ReviewAppError("duplicate-apps");
   return config;
 }
+function parseComments(value: unknown): InlineComment[] {
+  if (!Array.isArray(value)) throw new ReviewAppError("invalid-comments");
+  return value.map((item: unknown): InlineComment => {
+    if (!item || typeof item !== "object" || Array.isArray(item))
+      throw new ReviewAppError("invalid-comments");
+    const row = item as Record<string, unknown>;
+    const side = row["side"] ?? "RIGHT";
+    if (
+      typeof row["path"] !== "string" ||
+      !row["path"] ||
+      typeof row["body"] !== "string" ||
+      !row["body"] ||
+      typeof row["line"] !== "number" ||
+      !Number.isSafeInteger(row["line"]) ||
+      row["line"] < 1 ||
+      (side !== "RIGHT" && side !== "LEFT")
+    )
+      throw new ReviewAppError("invalid-comments");
+    return { path: row["path"], line: row["line"], side, body: row["body"] };
+  });
+}
+function footer(session: string): string {
+  return `Written by Spur · ${session}`;
+}
+// Visible review text; the attempt trailer stays in a hidden HTML comment that admission still parses.
+export function nativeReviewBody(request: Request, session: string): string {
+  const marker = `Spur review attempt: ${request.attempt}`;
+  return `${request.body}\n\n<!--\n\n${marker}\nLane: ${request.lane}\nH: ${request.H}\nB: ${request.B}\nContractDigest: ${request.contractDigest}\nStatus: ${request.verdict}\n-->\n\n${footer(session)}`;
+}
 export function parseRequest(value: unknown): Request {
   const data = object(value);
   const attempt = parseAttempt(value);
@@ -165,6 +196,7 @@ export function parseRequest(value: unknown): Request {
     ...attempt,
     assessment: parseAssessment(data.assessment),
     body: string(data.body),
+    ...(data.comments === undefined ? {} : { comments: parseComments(data.comments) }),
     verdict: data.verdict,
     coverage,
     rows,
@@ -552,6 +584,110 @@ export function recoverReview(
 ) {
   hash(legacySha256, 64);
   return transitionReview(config, request, session, "recover", transport, legacySha256);
+}
+interface ReplyRequest {
+  repo: string;
+  pr: number;
+  lane: Lane;
+  session: string;
+  comment: number;
+  body: string;
+  resolve: boolean;
+}
+export function parseReply(value: unknown): ReplyRequest {
+  const data = object(value);
+  if (data.lane !== "code" && data.lane !== "browser") throw new ReviewAppError("invalid-lane");
+  if (typeof data.resolve !== "boolean") throw new ReviewAppError("invalid-request");
+  return {
+    repo: repository(data.repo),
+    pr: integer(data.pr),
+    lane: data.lane,
+    session: identifier(data.session),
+    comment: integer(data.comment),
+    body: string(data.body),
+    resolve: data.resolve,
+  };
+}
+const REVIEW_THREADS = `query($owner:String!,$name:String!,$pr:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$pr){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}`;
+const RESOLVE_THREAD = `mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}`;
+// Answers a thread this lane App opened and optionally resolves it; never touches another author's thread.
+export async function replyThread(
+  config: Config,
+  input: unknown,
+  session: string | undefined,
+  transport?: typeof fetch,
+) {
+  const request = parseReply(input);
+  if (session !== request.session) throw new ReviewAppError("session-mismatch");
+  const app = client(config, request.repo, request.lane, transport);
+  const access = await app.authenticate();
+  const path = `/repos/${request.repo}/pulls`;
+  const root = object(await app.request(`${path}/comments/${request.comment}`));
+  const pullUrl = root["pull_request_url"];
+  if (
+    object(root["user"])["login"] !== access.actor ||
+    (root["in_reply_to_id"] !== undefined && root["in_reply_to_id"] !== null) ||
+    typeof pullUrl !== "string" ||
+    !pullUrl.endsWith(`/pulls/${request.pr}`)
+  )
+    throw new ReviewAppError("thread-not-owned");
+  const body = `${request.body}\n\n${footer(request.session)}`;
+  const existing = (await app.history(`${path}/${request.pr}/comments`)).find((value) => {
+    const row = object(value);
+    return (
+      object(row["user"])["login"] === access.actor &&
+      row["in_reply_to_id"] === request.comment &&
+      row["body"] === body
+    );
+  });
+  const replyId = integer(
+    object(
+      existing ??
+        (await app.request(`${path}/${request.pr}/comments/${request.comment}/replies`, "POST", {
+          body,
+        })),
+    )["id"],
+  );
+  if (!request.resolve) return { status: "REPLIED" as const, replyId, threadId: null };
+  const [owner, name] = request.repo.split("/");
+  let cursor: string | null = null;
+  let thread: { id: string; isResolved: boolean } | undefined;
+  while (!thread) {
+    const page = object(
+      await app.request("/graphql", "POST", {
+        query: REVIEW_THREADS,
+        variables: { owner, name, pr: request.pr, cursor },
+      }),
+    );
+    if (page["errors"] !== undefined) throw new ReviewAppError("thread-resolve-failed");
+    const threads = object(
+      object(object(object(page["data"])["repository"])["pullRequest"])["reviewThreads"],
+    );
+    for (const node of threads["nodes"] as unknown[]) {
+      const row = object(node);
+      const first = object(row["comments"])["nodes"] as unknown[];
+      if (first[0] !== undefined && object(first[0])["databaseId"] === request.comment) {
+        thread = { id: string(row["id"]), isResolved: row["isResolved"] === true };
+        break;
+      }
+    }
+    const info = object(threads["pageInfo"]);
+    if (thread || info["hasNextPage"] !== true) break;
+    cursor = string(info["endCursor"]);
+  }
+  if (!thread) throw new ReviewAppError("thread-resolve-failed");
+  if (!thread.isResolved) {
+    const result = object(
+      await app.request("/graphql", "POST", {
+        query: RESOLVE_THREAD,
+        variables: { id: thread.id },
+      }),
+    );
+    if (result["errors"] !== undefined) throw new ReviewAppError("thread-resolve-failed");
+    const resolved = object(object(object(result["data"])["resolveReviewThread"])["thread"]);
+    if (resolved["isResolved"] !== true) throw new ReviewAppError("thread-resolve-failed");
+  }
+  return { status: "RESOLVED" as const, replyId, threadId: thread.id };
 }
 async function transitionReview(
   config: Config,
@@ -960,11 +1096,7 @@ async function transitionReview(
     const access = await app.authenticate();
     await fresh(access.actor);
     const marker = `Spur review attempt: ${request.attempt}`;
-    const explanation =
-      request.verdict === "CHANGES_REQUESTED"
-        ? `\n\n${feedbackSummary(parseFeedback(request.feedback, "CHANGES_REQUESTED"))}`
-        : "";
-    const body = `${request.body}${explanation}\n\n${marker}\nLane: ${request.lane}\nH: ${request.H}\nB: ${request.B}\nContractDigest: ${request.contractDigest}\nStatus: ${request.verdict}\nScenario evidence: ${JSON.stringify(request.rows)}\nCoverage: ${JSON.stringify(request.coverage)}\n\nWritten by Spur · ${request.session}`;
+    const body = nativeReviewBody(request, request.session);
     const state = request.verdict === "APPROVED" ? "APPROVED" : "CHANGES_REQUESTED";
     const matching = (value: unknown) => {
       const review = object(value);
@@ -1007,13 +1139,23 @@ async function transitionReview(
           commit_id: request.H,
           event: state === "APPROVED" ? "APPROVE" : "REQUEST_CHANGES",
           body,
+          ...(request.comments?.length
+            ? {
+                comments: request.comments.map((comment) => ({
+                  ...comment,
+                  body: `${comment.body}\n\n${footer(request.session)}`,
+                })),
+              }
+            : {}),
         });
       } catch (error) {
         if (
           error instanceof ReviewAppError &&
           ["http-400", "http-401", "http-403", "http-404", "http-422"].includes(error.category)
         ) {
+          // Nothing published: a rerun of this attempt may carry corrected comments.
           receipt.mutationStarted = false;
+          receipt.inputDigest = null;
           await save();
           throw error;
         }
@@ -1126,6 +1268,20 @@ export function registerReviewApp(program: Command): void {
       const result = await appStatus(parseConfig(await readJson(options.appConfig)), options.repo);
       process.stdout.write(`${JSON.stringify(result)}\n`);
       if (result.some((row) => row.status !== "OK")) process.exitCode = 1;
+    });
+  command
+    .command("reply")
+    .description("Reply on a thread this lane App opened and optionally resolve it.")
+    .requiredOption("--app-config <file>")
+    .requiredOption("--request <file>")
+    .option("--json")
+    .action(async (options: { appConfig: string; request: string }) => {
+      const result = await replyThread(
+        parseConfig(await readJson(options.appConfig)),
+        await readJson(options.request),
+        process.env["SPUR_SESSION"],
+      );
+      process.stdout.write(`${JSON.stringify(result)}\n`);
     });
   command
     .command("publish")
