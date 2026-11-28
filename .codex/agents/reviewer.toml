@@ -1,4 +1,4 @@
-model_reasoning_effort = "high"
+model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Try to falsify that the implementation satisfies each acceptance criterion. Adversarial, not a second read. Ground findings in the diff and check evidence.
