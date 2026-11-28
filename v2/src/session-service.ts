@@ -26145,6 +26145,14 @@ export class SessionService {
     claim: SessionLifecycleStamp,
   ): Promise<SessionView> {
     const sessionId = session.id;
+    const registrationOwner = {
+      id: session.id,
+      project: session.project,
+      agent: session.agent,
+      workspaceId: workspaceIdOf(session),
+      tmuxSession: session.tmuxSession,
+      createdAt: session.createdAt,
+    } as const;
     const relaunch = session.status === "running";
     if (relaunch && !session.agentSessionId) {
       throw new AuthorizationError(
@@ -26196,19 +26204,26 @@ export class SessionService {
         400,
       );
     }
-    this.authSnapshot = undefined;
     const expectedAuth = publicAuthSession(registration);
+    this.authSnapshot = undefined;
     let rollbackOwner: SessionRecord | undefined;
-    const ownsSession = (record: SessionRecord): boolean =>
-      rollbackOwner !== undefined &&
-      record.id === rollbackOwner.id &&
-      record.project === rollbackOwner.project &&
-      record.agent === rollbackOwner.agent &&
-      workspaceIdOf(record) === workspaceIdOf(rollbackOwner) &&
-      record.tmuxSession === rollbackOwner.tmuxSession &&
-      record.createdAt === rollbackOwner.createdAt;
+    const ownsSession = (
+      record: SessionRecord,
+      owner: Pick<
+        SessionRecord,
+        "id" | "project" | "agent" | "workspaceId" | "tmuxSession" | "createdAt"
+      > = rollbackOwner ?? registrationOwner,
+    ): boolean =>
+      record.id === owner.id &&
+      record.project === owner.project &&
+      record.agent === owner.agent &&
+      workspaceIdOf(record) === workspaceIdOf(owner) &&
+      record.tmuxSession === owner.tmuxSession &&
+      record.createdAt === owner.createdAt;
     const ownsBinding = (record: SessionRecord): boolean =>
-      ownsSession(record) && isDeepStrictEqual(record.auth, expectedAuth);
+      rollbackOwner !== undefined &&
+      ownsSession(record, rollbackOwner) &&
+      isDeepStrictEqual(record.auth, expectedAuth);
     let updated: SessionRecord;
     let freshLaunch = false;
     try {

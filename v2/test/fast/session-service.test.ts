@@ -24239,6 +24239,124 @@ describe("SessionService", () => {
       },
     );
 
+    async function checkRegistrationClaimInvalidation(
+      scenario: "wake" | "owner" | "proxy",
+    ): Promise<void> {
+      seedManagedAccounts("claude");
+      const original = runningSession({
+        status: "stopped",
+        stopReason: "manual_pause",
+        agentSessionId: "native-session-uuid",
+        claudeAccountId: "primary",
+        prompt: "unrelated prompt",
+        intervalWake: {
+          intervalMs: 60_000,
+          nextDueAt: "2026-03-18T10:06:00.000Z",
+          message: "before",
+          stopCondition: "never",
+        },
+      });
+      const sessions = createSessionStore(original);
+      const own = registration("claude", "backup");
+      const { endpoint: _endpoint, token: _token, ...expectedAuth } = own;
+      let entered: () => void = () => undefined;
+      let release: () => void = () => undefined;
+      const reached = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const proceed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let registered = false;
+      authProxyGetStateMock.mockImplementation(async () => ({
+        accounts: ["primary", "backup"].map((id) => ({ id, provider: "claude", status: "ready" })),
+        sessions: registered
+          ? [
+              scenario === "proxy"
+                ? { ...expectedAuth, generation: expectedAuth.generation + 1 }
+                : expectedAuth,
+            ]
+          : [],
+      }));
+      authProxyRegisterSessionMock.mockImplementation(async () => {
+        entered();
+        await proceed;
+        registered = true;
+        return own;
+      });
+      const service = await createDisposedSessionService();
+      const refresh = vi.spyOn(
+        service as unknown as {
+          refreshDashboardCacheEntry: (record: SessionRecord) => Promise<void>;
+        },
+        "refreshDashboardCacheEntry",
+      );
+      const outcome = service.switchAuth("api-1", "backup", { reason: "manual" }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      try {
+        await reached;
+        vi.setSystemTime(Date.now() + 1_000);
+        await service.updateWakeMessage("api-1", { target: "interval", message: "after" });
+        const updated = sessions.get("api-1");
+        if (!updated) throw new Error("Missing updated session");
+        expect(updated.updatedAt).not.toBe(original.updatedAt);
+        if (scenario === "owner") {
+          sessions.set("api-1", {
+            ...updated,
+            createdAt: "2026-03-19T10:00:00.000Z",
+            tmuxSession: "replacement-pane",
+            claudeAccountId: "replacement-legacy",
+            prompt: "replacement prompt",
+          });
+        }
+        const latest = structuredClone(sessions.get("api-1"));
+        const writes = writeSessionMock.mock.calls.length;
+        const refreshes = refresh.mock.calls.length;
+        release();
+        expect(await outcome).toMatchObject({
+          message: "Session api-1 changed during auth selection",
+        });
+        expect(authProxyRegisterSessionMock).toHaveBeenCalledTimes(1);
+        expect(registered).toBe(true);
+        expect(sessions.get("api-1")).toEqual(latest);
+        expect(sessions.get("api-1")?.auth).toBeUndefined();
+        expect(sessions.get("api-1")).toMatchObject({
+          intervalWake: { message: "after" },
+          claudeAccountId: scenario === "owner" ? "replacement-legacy" : "primary",
+          prompt: scenario === "owner" ? "replacement prompt" : "unrelated prompt",
+          agentSessionId: "native-session-uuid",
+        });
+        expect(writeSessionMock).toHaveBeenCalledTimes(writes);
+        expect(refresh).toHaveBeenCalledTimes(refreshes);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        if (scenario === "wake") {
+          expect(authProxyRevokeSessionMock).toHaveBeenCalledExactlyOnceWith("api-1");
+        } else {
+          expect(authProxyRevokeSessionMock).not.toHaveBeenCalled();
+        }
+      } finally {
+        release();
+        await outcome;
+        refresh.mockRestore();
+        service.dispose();
+      }
+    }
+
+    it("revokes its returned registration when updateWakeMessage invalidates the claim before binding", async () => {
+      await checkRegistrationClaimInvalidation("wake");
+    });
+
+    it("registration claim invalidation preserves a replacement session owner", async () => {
+      await checkRegistrationClaimInvalidation("owner");
+    });
+
+    it("registration claim invalidation preserves a replacement proxy generation", async () => {
+      await checkRegistrationClaimInvalidation("proxy");
+    });
+
     async function checkUnboundAuthRollback(
       scenario:
         | "post-write"
