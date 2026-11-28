@@ -396,9 +396,6 @@ func (r *router) register(sessionID string, p provider, accountID *string, chang
 		b.Session = sessionSummary{SessionID: sessionID, Provider: p, Mode: mode, AccountID: accountID, EffectiveAccountID: effective, Generation: b.Session.Generation + 1}
 		b.DefaultGeneration, b.Episode = pool.DefaultGeneration, episode{}
 	}
-	if err := r.rebaseDefaultLocked(&b); err != nil {
-		return registration{}, err
-	}
 	if err := r.rotateLocked(&b, nil); err != nil {
 		return registration{}, err
 	}

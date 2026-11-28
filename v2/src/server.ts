@@ -1483,18 +1483,28 @@ export async function startServer(
           .object({
             defaultAccountId: z.string().min(1).nullable().optional(),
             autoRotate: z.boolean().optional(),
+            applyToActive: z.boolean().optional(),
           })
           .strict()
           .safeParse(await readJsonBody(request));
         if (!body.success) throw new AuthorizationError("Invalid authorization pool update", 400);
-        sendJson(response, 200, {
-          pool: await service.updateAuthorizationPool(provider.data, {
-            ...(body.data.defaultAccountId !== undefined
-              ? { defaultAccountId: body.data.defaultAccountId }
-              : {}),
-            ...(body.data.autoRotate !== undefined ? { autoRotate: body.data.autoRotate } : {}),
-          }),
-        });
+        if (body.data.applyToActive !== undefined && !body.data.defaultAccountId) {
+          throw new AuthorizationError("applyToActive requires a defaultAccountId", 400);
+        }
+        sendJson(
+          response,
+          200,
+          await service.updateAuthorizationPool(
+            provider.data,
+            {
+              ...(body.data.defaultAccountId !== undefined
+                ? { defaultAccountId: body.data.defaultAccountId }
+                : {}),
+              ...(body.data.autoRotate !== undefined ? { autoRotate: body.data.autoRotate } : {}),
+            },
+            body.data.applyToActive === true,
+          ),
+        );
         return;
       }
 

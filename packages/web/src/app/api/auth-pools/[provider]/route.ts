@@ -12,12 +12,14 @@ export async function PATCH(request: Request, context: RouteContext) {
   const body = (await request.json().catch(() => ({}))) as {
     defaultAccountId?: unknown;
     autoRotate?: unknown;
+    applyToActive?: unknown;
   };
-  const update: { defaultAccountId?: unknown; autoRotate?: unknown } = {};
+  const update: { defaultAccountId?: unknown; autoRotate?: unknown; applyToActive?: unknown } = {};
   if (body.defaultAccountId !== undefined) update.defaultAccountId = body.defaultAccountId;
   if (body.autoRotate !== undefined) update.autoRotate = body.autoRotate;
+  if (body.applyToActive !== undefined) update.applyToActive = body.applyToActive;
   try {
-    const result = await spurRequestJson<{ pool: AuthPool }>(
+    const result = await spurRequestJson<{ pool: AuthPool; moved: number }>(
       `/auth-pools/${encodeURIComponent(provider)}`,
       spurJsonInit("PATCH", update),
     );

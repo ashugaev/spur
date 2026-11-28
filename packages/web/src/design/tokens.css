@@ -105,6 +105,7 @@
 
   /* ── Elevation: shadow-* utilities ───────────────────────────────── */
   --shadow-raised: 0 4px 12px var(--color-shadow-modal-sm);
+  --shadow-dialog: 0 8px 24px var(--color-shadow-modal-sm);
   --shadow-overlay: 0 8px 30px var(--color-shadow-menu);
   --shadow-modal: 0 20px 60px var(--color-shadow-modal-lg);
 }

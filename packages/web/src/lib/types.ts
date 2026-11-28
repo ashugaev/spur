@@ -1077,6 +1077,9 @@ export interface AgentSuggestionsResponse {
   agents: AgentSuggestionEntry[];
 }
 
+/** Query cache key of the dashboard's session list. */
+export const SESSIONS_QUERY_KEY = ["sessions"] as const;
+
 export interface SpurSessionsResponse {
   lifecycleInstanceId: string;
   sessions: SpurSessionView[];

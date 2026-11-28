@@ -1,5 +1,5 @@
 {
-  "version": "2.2.0",
+  "version": "2.3.0",
   "surfaces": ["--color-bg-base", "--color-bg-surface", "--color-bg-elevated"],
   "overlays": ["--color-hover-overlay"],
   "tokens": {
@@ -339,6 +339,11 @@
       "role": "status card, inline panel",
       "since": "2.0.0"
     },
+    "--shadow-dialog": {
+      "group": "elevation",
+      "role": "compact confirmation dialog",
+      "since": "2.3.0"
+    },
     "--shadow-overlay": {
       "group": "elevation",
       "role": "menu, popover, toast, FAB",
@@ -397,7 +402,7 @@
     },
     {
       "pattern": "\\bshadow-\\[",
-      "use": "shadow-raised | shadow-overlay | shadow-modal"
+      "use": "shadow-raised | shadow-dialog | shadow-overlay | shadow-modal"
     },
     {
       "pattern": "\\brounded(?:-(?!dot\\b|none\\b)[\\w\\[\\]./-]+)?(?=[\\s\"'`])",

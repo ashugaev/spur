@@ -1,7 +1,7 @@
 "use client";
 
 import { type MutableRefObject, useCallback, useEffect, useRef, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { type UseMutationResult, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { AccountsIcon } from "@/components/icons/AccountsIcon";
 import { CheckIcon } from "@/components/icons/CheckIcon";
@@ -9,35 +9,61 @@ import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { AuthSignInFlow, type SignInTarget } from "@/components/AuthSignInFlow";
 import { BusyContent } from "@/components/BusyContent";
+import { SetDefaultDialog } from "@/components/SetDefaultDialog";
 import { CHECKBOX_CLASS, DANGER_BUTTON_CLASS, SECONDARY_BUTTON_CLASS } from "@/design/classes";
 import {
   AUTH_ACCOUNTS_QUERY_KEY,
   AUTH_PROVIDERS,
   accountLines,
   authProviderName,
+  countRunningAuthSessions,
   postAuthJson,
   quotaText,
   useAuthAccounts,
 } from "@/lib/auth-accounts";
-import type { AuthAccountSummary, AuthPool, AuthProvider } from "@/lib/types";
+import {
+  SESSIONS_QUERY_KEY,
+  type AuthAccountSummary,
+  type AuthPool,
+  type AuthProvider,
+  type SpurSessionsResponse,
+} from "@/lib/types";
 
 const NOTE_CLASS = "normal-case tracking-normal";
 const ROW_CLASS = `grid grid-cols-[minmax(0,1fr)_auto_5rem_1.75rem] items-center gap-x-2 border-b border-[var(--color-border-subtle)] py-1.5 last:border-b-0 ${NOTE_CLASS}`;
 const SIGN_IN_BUTTON_CLASS = `${SECONDARY_BUTTON_CLASS} border-[var(--color-status-attention)]! text-[var(--color-status-attention)]!`;
 
 type SignInRequest = Extract<SignInTarget, { kind: "account" }>;
+type PoolUpdate =
+  | { defaultAccountId: string | null; applyToActive?: boolean }
+  | { autoRotate: boolean };
+type PoolMutation = UseMutationResult<
+  unknown,
+  Error,
+  { provider: AuthProvider; update: PoolUpdate }
+>;
+type SetDefaultRequest = {
+  account: AuthAccountSummary;
+  active: number;
+  pinned: number;
+  replaces: string | null;
+};
 
 function ProviderSection({
   provider,
   accounts,
   pool,
+  poolMutation,
   onSignIn,
+  onSetDefault,
   focusHandoff,
 }: {
   provider: AuthProvider;
   accounts: AuthAccountSummary[];
   pool: AuthPool | undefined;
+  poolMutation: PoolMutation;
   onSignIn: (request: SignInRequest) => void;
+  onSetDefault: (request: SetDefaultRequest) => void;
   /** Set while this section moves focus itself, so the unmounting element's blur never closes the popover. */
   focusHandoff: MutableRefObject<boolean>;
 }) {
@@ -79,25 +105,16 @@ function ProviderSection({
   const name = authProviderName(provider);
   const refresh = () => queryClient.invalidateQueries({ queryKey: AUTH_ACCOUNTS_QUERY_KEY });
   const errorHandlers = {
-    onMutate: () => setLastError(null),
+    onMutate: () => {
+      setLastError(null);
+      poolMutation.reset();
+    },
     onError: (error: Error) => setLastError(error.message),
   };
-
-  const poolMutation = useMutation<
-    unknown,
-    Error,
-    { defaultAccountId: string | null } | { autoRotate: boolean }
-  >({
-    mutationFn: (update) =>
-      postAuthJson(
-        `/api/auth-pools/${provider}`,
-        "PATCH",
-        update,
-        `Failed to update ${name} rotation`,
-      ),
-    ...errorHandlers,
-    onSettled: () => void refresh(),
-  });
+  const updatePool = (update: PoolUpdate) => {
+    setLastError(null);
+    poolMutation.mutate({ provider, update });
+  };
 
   const removeMutation = useMutation<unknown, Error, string>({
     mutationFn: (id) =>
@@ -152,8 +169,34 @@ function ProviderSection({
     onSettled: () => void refresh(),
   });
 
+  // A change that would reach running Auto sessions asks which scope; otherwise it applies at once.
+  const requestDefault = (account: AuthAccountSummary) => {
+    setLastError(null);
+    poolMutation.reset();
+    const counts = countRunningAuthSessions(
+      queryClient.getQueryData<SpurSessionsResponse>(SESSIONS_QUERY_KEY),
+      provider,
+      account.id,
+    );
+    if (counts.active === 0) {
+      updatePool({ defaultAccountId: account.id });
+      return;
+    }
+    // The dialog takes focus out of the popover; hold the blur guard so the popover stays open.
+    focusHandoff.current = true;
+    onSetDefault({
+      account,
+      ...counts,
+      replaces: defaultAccount ? accountLines(defaultAccount).primary : null,
+    });
+  };
+
   const defaultId = pool?.defaultAccountId ?? null;
-  const rotating = poolMutation.isPending && "autoRotate" in (poolMutation.variables ?? {});
+  const defaultAccount = accounts.find((account) => account.id === defaultId);
+  const poolUpdate =
+    poolMutation.variables?.provider === provider ? poolMutation.variables.update : undefined;
+  const rotating = poolMutation.isPending && "autoRotate" in (poolUpdate ?? {});
+  const error = lastError ?? (poolUpdate ? poolMutation.error?.message : null);
   const busy = poolMutation.isPending || removeMutation.isPending || addMutation.isPending;
 
   return (
@@ -171,7 +214,7 @@ function ProviderSection({
             className={CHECKBOX_CLASS}
             disabled={busy}
             type="checkbox"
-            onChange={(event) => poolMutation.mutate({ autoRotate: event.target.checked })}
+            onChange={(event) => updatePool({ autoRotate: event.target.checked })}
           />
           Auto-rotate
           {rotating ? <Spinner className="h-3 w-3" strokeWidth={1.5} /> : null}
@@ -287,7 +330,7 @@ function ProviderSection({
                       className={SECONDARY_BUTTON_CLASS}
                       disabled={busy}
                       type="button"
-                      onClick={() => poolMutation.mutate({ defaultAccountId: account.id })}
+                      onClick={() => requestDefault(account)}
                     >
                       Switch
                     </button>
@@ -312,9 +355,9 @@ function ProviderSection({
           })}
         </ul>
       )}
-      {lastError ? (
+      {error ? (
         <div className={`${NOTE_CLASS} text-[var(--color-status-error)]`} role="alert">
-          {lastError}
+          {error}
         </div>
       ) : null}
       <button
@@ -334,82 +377,128 @@ function ProviderSection({
 
 /** Footer menu over every managed provider account and its global pool. */
 export function AuthAccountsMenu() {
+  const queryClient = useQueryClient();
   const popover = useFooterPopover();
   const [signIn, setSignIn] = useState<SignInRequest | null>(null);
-  const accountsQuery = useAuthAccounts(popover.open || signIn !== null, { poll: popover.open });
+  const [setDefault, setSetDefault] = useState<SetDefaultRequest | null>(null);
+  const accountsQuery = useAuthAccounts(popover.open || signIn !== null || setDefault !== null, {
+    poll: popover.open,
+  });
   const closeSignIn = useCallback(() => setSignIn(null), []);
   const focusHandoff = useRef(false);
+  const closeSetDefault = () => {
+    focusHandoff.current = false;
+    setSetDefault(null);
+  };
+  // Dialog confirmation must finish even when touch or hover dismisses the footer menu.
+  const poolMutation: PoolMutation = useMutation({
+    mutationFn: ({ provider, update }) =>
+      postAuthJson(
+        `/api/auth-pools/${provider}`,
+        "PATCH",
+        update,
+        `Failed to update ${authProviderName(provider)} rotation`,
+      ),
+    onError: () => {
+      if (!popover.open) popover.toggle();
+    },
+    onSettled: () => {
+      closeSetDefault();
+      void queryClient.invalidateQueries({ queryKey: AUTH_ACCOUNTS_QUERY_KEY });
+    },
+  });
 
   return (
-    <div
-      ref={popover.containerRef}
-      // Below sm the wrapper stays static, so the popover anchors to the
-      // full-width footer instead of this trigger and stays on screen.
-      className="sm:relative"
-      onBlur={(event) => {
-        if (!focusHandoff.current) popover.onBlur(event);
-      }}
-      onMouseEnter={popover.onMouseEnter}
-      onMouseLeave={popover.onMouseLeave}
-    >
-      <button
-        aria-expanded={popover.open}
-        aria-haspopup="true"
-        aria-label="Manage agent accounts"
-        className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-hidden transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)]"
-        data-testid="auth-accounts-trigger"
-        title="Manage agent accounts"
-        type="button"
-        onClick={popover.toggle}
+    <>
+      <div
+        ref={popover.containerRef}
+        // Below sm the wrapper stays static, so the popover anchors to the
+        // full-width footer instead of this trigger and stays on screen.
+        className="sm:relative"
+        onBlur={(event) => {
+          if (!focusHandoff.current) popover.onBlur(event);
+        }}
+        onMouseEnter={popover.onMouseEnter}
+        onMouseLeave={popover.onMouseLeave}
       >
-        <AccountsIcon className="h-4 w-4" />
-      </button>
-      {popover.open ? (
-        <div
-          className="absolute inset-x-2 bottom-full z-50 mb-1.5 flex max-h-[70vh] flex-col gap-3 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-raised sm:inset-x-auto sm:right-0 sm:w-[min(26rem,calc(100vw-1rem))]"
-          data-testid="auth-accounts-popover"
+        <button
+          aria-expanded={popover.open}
+          aria-haspopup="true"
+          aria-label="Manage agent accounts"
+          className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-hidden transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] focus-visible:outline-1 focus-visible:outline-solid focus-visible:outline-[var(--color-accent)]"
+          data-testid="auth-accounts-trigger"
+          title="Manage agent accounts"
+          type="button"
+          onClick={popover.toggle}
         >
-          {accountsQuery.isPending ? (
-            <div
-              aria-label="Loading accounts"
-              className="flex items-center justify-center py-2 text-[var(--color-text-tertiary)]"
-              data-testid="auth-accounts-loading"
-              role="status"
-            >
-              <Spinner className="h-4 w-4" strokeWidth={1.5} />
-            </div>
-          ) : accountsQuery.isError ? (
-            <div className="flex items-center justify-between gap-2">
-              <span className={`${NOTE_CLASS} text-[var(--color-status-error)]`} role="alert">
-                {accountsQuery.error.message}
-              </span>
-              <button
-                aria-busy={accountsQuery.isFetching || undefined}
-                className={SECONDARY_BUTTON_CLASS}
-                disabled={accountsQuery.isFetching}
-                type="button"
-                onClick={() => void accountsQuery.refetch()}
+          <AccountsIcon className="h-4 w-4" />
+        </button>
+        {popover.open ? (
+          <div
+            className="absolute inset-x-2 bottom-full z-50 mb-1.5 flex max-h-[70vh] flex-col gap-3 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-raised sm:inset-x-auto sm:right-0 sm:w-[min(26rem,calc(100vw-1rem))]"
+            data-testid="auth-accounts-popover"
+          >
+            {accountsQuery.isPending ? (
+              <div
+                aria-label="Loading accounts"
+                className="flex items-center justify-center py-2 text-[var(--color-text-tertiary)]"
+                data-testid="auth-accounts-loading"
+                role="status"
               >
-                <BusyContent busy={accountsQuery.isFetching}>Retry</BusyContent>
-              </button>
-            </div>
-          ) : (
-            AUTH_PROVIDERS.map((provider) => (
-              <ProviderSection
-                key={provider}
-                focusHandoff={focusHandoff}
-                accounts={accountsQuery.data.accounts.filter(
-                  (account) => account.provider === provider,
-                )}
-                pool={accountsQuery.data.pools[provider]}
-                provider={provider}
-                onSignIn={setSignIn}
-              />
-            ))
-          )}
-        </div>
+                <Spinner className="h-4 w-4" strokeWidth={1.5} />
+              </div>
+            ) : accountsQuery.isError ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className={`${NOTE_CLASS} text-[var(--color-status-error)]`} role="alert">
+                  {accountsQuery.error.message}
+                </span>
+                <button
+                  aria-busy={accountsQuery.isFetching || undefined}
+                  className={SECONDARY_BUTTON_CLASS}
+                  disabled={accountsQuery.isFetching}
+                  type="button"
+                  onClick={() => void accountsQuery.refetch()}
+                >
+                  <BusyContent busy={accountsQuery.isFetching}>Retry</BusyContent>
+                </button>
+              </div>
+            ) : (
+              AUTH_PROVIDERS.map((provider) => (
+                <ProviderSection
+                  key={provider}
+                  focusHandoff={focusHandoff}
+                  accounts={accountsQuery.data.accounts.filter(
+                    (account) => account.provider === provider,
+                  )}
+                  pool={accountsQuery.data.pools[provider]}
+                  poolMutation={poolMutation}
+                  provider={provider}
+                  onSetDefault={setSetDefault}
+                  onSignIn={setSignIn}
+                />
+              ))
+            )}
+          </div>
+        ) : null}
+        {signIn ? <AuthSignInFlow target={signIn} onClose={closeSignIn} /> : null}
+      </div>
+      {setDefault ? (
+        <SetDefaultDialog
+          account={setDefault.account}
+          active={setDefault.active}
+          pending={poolMutation.isPending}
+          pinned={setDefault.pinned}
+          provider={setDefault.account.provider}
+          replaces={setDefault.replaces}
+          onCancel={closeSetDefault}
+          onConfirm={(applyToActive) =>
+            poolMutation.mutate({
+              provider: setDefault.account.provider,
+              update: { defaultAccountId: setDefault.account.id, applyToActive },
+            })
+          }
+        />
       ) : null}
-      {signIn ? <AuthSignInFlow target={signIn} onClose={closeSignIn} /> : null}
-    </div>
+    </>
   );
 }
