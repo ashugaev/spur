@@ -15836,6 +15836,10 @@ export class SessionService {
               : {}),
             workspaceId: failedSpawnSession.workspaceId,
             agent,
+            ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+            ...(request.reasoningEffort !== undefined
+              ? { reasoningEffort: request.reasoningEffort }
+              : {}),
             prompt,
             branch: resolvedBranch?.branch ?? sessionId,
             ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
@@ -16892,6 +16896,10 @@ export class SessionService {
             : {}),
           workspaceId: erroredWorkspaceId,
           agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
+          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+          ...(request.reasoningEffort !== undefined
+            ? { reasoningEffort: request.reasoningEffort }
+            : {}),
           prompt,
           branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
           ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),

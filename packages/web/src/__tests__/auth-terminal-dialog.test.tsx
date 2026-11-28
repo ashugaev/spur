@@ -375,6 +375,31 @@ describe("AuthTerminalDialog", () => {
     expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith(ID))).toBe(true);
   });
 
+  it("stops the current terminal when Close is clicked on its first DOM commit", async () => {
+    let release: () => void = () => undefined;
+    postGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    reply("POST /api/auth-terminal-logins", "running");
+    responses[`DELETE /api/auth-terminal-logins/${ID}`] = () => ({ payload: { stopped: ID } });
+    const observer = new MutationObserver(() => {
+      if (!screen.queryByTestId("direct-terminal")) return;
+      observer.disconnect();
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    try {
+      render();
+      release();
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+      expect(calls.filter((call) => call.method === "DELETE").map((call) => call.url)).toEqual([
+        `/api/auth-terminal-logins/${ID}`,
+      ]);
+    } finally {
+      observer.disconnect();
+    }
+  });
+
   it("closes even when the stop request fails", async () => {
     reply("POST /api/auth-terminal-logins", "running");
     responses[`DELETE /api/auth-terminal-logins/${ID}`] = () => ({

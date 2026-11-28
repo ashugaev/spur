@@ -133,10 +133,10 @@ export function AuthTerminalDialog({
     void start();
   }, [start]);
 
-  const stopMutation = useMutation<unknown, Error>({
-    mutationFn: () =>
+  const stopMutation = useMutation<unknown, Error, string>({
+    mutationFn: (id) =>
       postAuthJson(
-        `/api/auth-terminal-logins/${encodeURIComponent(terminalId ?? "")}`,
+        `/api/auth-terminal-logins/${encodeURIComponent(id)}`,
         "DELETE",
         undefined,
         "Failed to stop terminal sign-in",
@@ -162,7 +162,7 @@ export function AuthTerminalDialog({
     // Any start or restart still in flight stops its terminal when it resolves.
     closedRef.current = true;
     if (terminalId) {
-      stopMutation.mutate();
+      stopMutation.mutate(terminalId);
       return;
     }
     onClose();
