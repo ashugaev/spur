@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as hostMemory from "../../src/host-memory.js";
 import * as configuredSources from "../../src/event-sources/index.js";
+import * as runtimeTmux from "../../src/runtime-tmux.js";
+import * as agentProcesses from "../../src/agent-processes.js";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 import { logSpurEvent, readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
 import { AutoPingService, autoPingRouteFingerprint } from "../../src/auto-ping.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
-import { writeSession } from "../../src/metadata.js";
+import { readSession, writeSession } from "../../src/metadata.js";
 import { sessionArtifactsDir } from "../../src/session-artifacts.js";
 import { startServer, type StartedServer } from "../../src/server.js";
 import { AgentModelError, AgentReasoningEffortError } from "../../src/agents/models.js";
@@ -808,81 +810,128 @@ describe("startServer", () => {
     }
   });
 
-  it("GET /headroom returns cap, projectCaps, live, projectedRoom, per-session rss, memory, and guard", async () => {
-    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
-    const repoDir = join(root, "repo");
-    const dataDir = join(root, "data");
-    const worktreeDir = join(root, "worktrees");
-    const port = await findFreePort();
-    await mkdir(repoDir, { recursive: true });
-    const configPath = join(root, "spur.yaml");
-    await writeFile(
-      configPath,
-      [
-        "server:",
-        "  host: 127.0.0.1",
-        `  port: ${port}`,
-        `dataDir: ${dataDir}`,
-        `worktreeDir: ${worktreeDir}`,
-        "projects:",
-        "  demo:",
-        `    path: ${repoDir}`,
-      ].join("\n"),
-      "utf8",
-    );
+  it.each([false, true])(
+    "GET /headroom returns cap, projectCaps, live, projectedRoom, per-session rss, memory, and guard [classification barrier=%s]",
+    async (reconcile) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+      const startLoops = SessionService.prototype.startBackgroundLoops;
+      let releaseClassification: (() => Promise<void>) | undefined;
+      const loops = vi
+        .spyOn(SessionService.prototype, "startBackgroundLoops")
+        .mockImplementation(function (this: SessionService) {
+          releaseClassification = async () => {
+            startLoops.call(this);
+            await this.settleBackgroundSpawns();
+          };
+        });
+      const presence = vi
+        .spyOn(runtimeTmux, "getTmuxSessionPresence")
+        .mockResolvedValue({ present: false, unresponsive: false });
+      const state = vi
+        .spyOn(AuthProxy.prototype, "getState")
+        .mockResolvedValue({ accounts: [], sessions: [] });
+      let server: StartedServer | undefined;
+      try {
+        const repoDir = join(root, "repo");
+        const dataDir = join(root, "data");
+        const worktreeDir = join(root, "worktrees");
+        const port = await findFreePort();
+        await mkdir(repoDir, { recursive: true });
+        const configPath = join(root, "spur.yaml");
+        await writeFile(
+          configPath,
+          [
+            "server:",
+            "  host: 127.0.0.1",
+            `  port: ${port}`,
+            `dataDir: ${dataDir}`,
+            `worktreeDir: ${worktreeDir}`,
+            "projects:",
+            "  demo:",
+            `    path: ${repoDir}`,
+          ].join("\n"),
+          "utf8",
+        );
 
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
-    });
+        server = await startServer(configPath, {
+          info: () => undefined,
+          warn: () => undefined,
+        });
 
-    try {
-      const session: SessionRecord = {
-        id: "demo-1",
-        project: "demo",
-        agent: "claude",
-        prompt: "ship it",
-        branch: "demo-1",
-        worktree: true,
-        worktreePath: join(worktreeDir, "demo", "demo-1"),
-        tmuxSession: "demo-1",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "running",
-        createdAt: "2026-04-15T00:00:00.000Z",
-        updatedAt: "2026-04-15T00:00:00.000Z",
-      };
-      writeSession(dataDir, session);
-
-      const response = await fetch(`http://127.0.0.1:${port}/headroom`);
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as {
-        cap: { global: number; source: string; perSessionBytes: number; reserveFraction: number };
-        projectCaps: Record<string, number>;
-        live: { count: number; byProject: Record<string, number> };
-        projectedRoom: number;
-        sessions: Array<{ id: string; project: string; status: string; rssBytes: number }>;
-        memory: unknown;
-        guard: {
-          enforce: boolean;
-          minAvailableBytes: number;
-          minFreeSwapBytes: number;
-          crossed: boolean;
+        const session: SessionRecord = {
+          id: "demo-1",
+          project: "demo",
+          agent: "claude",
+          prompt: "ship it",
+          branch: "demo-1",
+          worktree: true,
+          worktreePath: join(worktreeDir, "demo", "demo-1"),
+          tmuxSession: "demo-1",
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "running",
+          createdAt: "2026-04-15T00:00:00.000Z",
+          updatedAt: "2026-04-15T00:00:00.000Z",
         };
-      };
-      expect(body.cap).toMatchObject({ global: 100, source: "default" });
-      expect(body.live).toEqual({ count: 1, byProject: { demo: 1 } });
-      expect(body.projectedRoom).toBe(body.cap.global - 1);
-      expect(body.sessions).toEqual([
-        { id: "demo-1", project: "demo", status: "running", rssBytes: expect.any(Number) },
-      ]);
-      expect(typeof body.guard.enforce).toBe("boolean");
-      expect(typeof body.guard.crossed).toBe("boolean");
-      expect(body.memory === null || typeof body.memory === "object").toBe(true);
-      expect(body.projectCaps).toEqual({});
-    } finally {
-      await server.stop();
-    }
-  });
+        writeSession(dataDir, session);
+
+        // Route fixtures hold background startup; the companion case explicitly
+        // releases real classification after seeding the missing workspace.
+        if (reconcile) {
+          if (!releaseClassification) throw new Error("Missing background classification barrier");
+          await releaseClassification();
+          expect(readSession(dataDir, session.id)).toMatchObject({
+            status: "errored",
+            error: "Agent worktree is missing.",
+          });
+        } else {
+          expect(readSession(dataDir, session.id)?.status).toBe("running");
+        }
+
+        const response = await fetch(`http://127.0.0.1:${port}/headroom`);
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          cap: { global: number; source: string; perSessionBytes: number; reserveFraction: number };
+          projectCaps: Record<string, number>;
+          live: { count: number; byProject: Record<string, number> };
+          projectedRoom: number;
+          sessions: Array<{ id: string; project: string; status: string; rssBytes: number }>;
+          memory: unknown;
+          guard: {
+            enforce: boolean;
+            minAvailableBytes: number;
+            minFreeSwapBytes: number;
+            crossed: boolean;
+          };
+        };
+        expect(body.cap).toMatchObject({ global: 100, source: "default" });
+        if (reconcile) {
+          expect(body.live).toEqual({ count: 0, byProject: {} });
+          expect(body.projectedRoom).toBe(body.cap.global);
+          expect(body.sessions).toEqual([]);
+          return;
+        }
+        expect(body.live).toEqual({ count: 1, byProject: { demo: 1 } });
+        expect(body.projectedRoom).toBe(body.cap.global - 1);
+        expect(body.sessions).toEqual([
+          { id: "demo-1", project: "demo", status: "running", rssBytes: expect.any(Number) },
+        ]);
+        expect(typeof body.guard.enforce).toBe("boolean");
+        expect(typeof body.guard.crossed).toBe("boolean");
+        expect(body.memory === null || typeof body.memory === "object").toBe(true);
+        expect(body.projectCaps).toEqual({});
+        expect(readSession(dataDir, session.id)?.status).toBe("running");
+      } finally {
+        try {
+          await server?.stop();
+        } finally {
+          loops.mockRestore();
+          presence.mockRestore();
+          state.mockRestore();
+          await rm(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it.each([
     { enabled: false, status: 400 },
@@ -4222,69 +4271,118 @@ describe("startServer", () => {
     }
   });
 
-  it("POST /claude-accounts/remove returns 409 when a running session is bound to the account", async () => {
-    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
-    const repoDir = join(root, "repo");
-    const dataDir = join(root, "data");
-    const worktreeDir = join(root, "worktrees");
-    const port = await findFreePort();
-    await mkdir(repoDir, { recursive: true });
-    const configPath = join(root, "spur.yaml");
-    await writeFile(
-      configPath,
-      [
-        "server:",
-        "  host: 127.0.0.1",
-        `  port: ${port}`,
-        `dataDir: ${dataDir}`,
-        `worktreeDir: ${worktreeDir}`,
-        "projects:",
-        "  demo:",
-        `    path: ${repoDir}`,
-      ].join("\n"),
-      "utf8",
-    );
+  it.each([false, true])(
+    "POST /claude-accounts/remove returns 409 when a running session is bound to the account [classification barrier=%s]",
+    async (reconcile) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+      const startLoops = SessionService.prototype.startBackgroundLoops;
+      let releaseClassification: (() => Promise<void>) | undefined;
+      const loops = vi
+        .spyOn(SessionService.prototype, "startBackgroundLoops")
+        .mockImplementation(function (this: SessionService) {
+          releaseClassification = async () => {
+            startLoops.call(this);
+            await this.settleBackgroundSpawns();
+          };
+        });
+      const presence = vi
+        .spyOn(runtimeTmux, "getTmuxSessionPresence")
+        .mockResolvedValue({ present: false, unresponsive: false });
+      const foreign = vi
+        .spyOn(agentProcesses, "findForeignAgentProcessesForSession")
+        .mockResolvedValue({ status: "ok", pids: [] });
+      const remove = vi
+        .spyOn(AuthProxy.prototype, "removeAccount")
+        .mockRejectedValue(new Error("unknown provider account"));
+      const state = vi
+        .spyOn(AuthProxy.prototype, "getState")
+        .mockResolvedValue({ accounts: [], sessions: [] });
+      let server: StartedServer | undefined;
+      try {
+        const repoDir = join(root, "repo");
+        const dataDir = join(root, "data");
+        const worktreeDir = join(root, "worktrees");
+        const port = await findFreePort();
+        await mkdir(repoDir, { recursive: true });
+        const configPath = join(root, "spur.yaml");
+        await writeFile(
+          configPath,
+          [
+            "server:",
+            "  host: 127.0.0.1",
+            `  port: ${port}`,
+            `dataDir: ${dataDir}`,
+            `worktreeDir: ${worktreeDir}`,
+            "projects:",
+            "  demo:",
+            `    path: ${repoDir}`,
+          ].join("\n"),
+          "utf8",
+        );
 
-    const state = vi
-      .spyOn(AuthProxy.prototype, "getState")
-      .mockResolvedValue({ accounts: [], sessions: [] });
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
-    });
+        server = await startServer(configPath, {
+          info: () => undefined,
+          warn: () => undefined,
+        });
 
-    try {
-      const session: SessionRecord = {
-        id: "demo-1",
-        project: "demo",
-        agent: "claude",
-        prompt: "ship it",
-        branch: "demo-1",
-        worktree: true,
-        worktreePath: join(worktreeDir, "demo", "demo-1"),
-        tmuxSession: "demo-1",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "running",
-        claudeAccountId: "acc-1",
-        createdAt: "2026-04-15T00:00:00.000Z",
-        updatedAt: "2026-04-15T00:00:00.000Z",
-      };
-      writeSession(dataDir, session);
+        const session: SessionRecord = {
+          id: "demo-1",
+          project: "demo",
+          agent: "claude",
+          prompt: "ship it",
+          branch: "demo-1",
+          worktree: true,
+          worktreePath: join(worktreeDir, "demo", "demo-1"),
+          tmuxSession: "demo-1",
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "running",
+          claudeAccountId: "acc-1",
+          createdAt: "2026-04-15T00:00:00.000Z",
+          updatedAt: "2026-04-15T00:00:00.000Z",
+        };
+        writeSession(dataDir, session);
 
-      const response = await fetch(`http://127.0.0.1:${port}/claude-accounts/remove`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: "acc-1" }),
-      });
-      expect(response.status).toBe(409);
-      await expect(response.json()).resolves.toMatchObject({
-        error: expect.stringContaining("in use by a running session"),
-      });
-    } finally {
-      state.mockRestore();
-      await server.stop();
-    }
-  });
+        if (reconcile) {
+          if (!releaseClassification) throw new Error("Missing background classification barrier");
+          await releaseClassification();
+          expect(readSession(dataDir, session.id)).toMatchObject({
+            status: "errored",
+            error: "Agent worktree is missing.",
+          });
+        } else {
+          expect(readSession(dataDir, session.id)?.status).toBe("running");
+        }
+
+        const response = await fetch(`http://127.0.0.1:${port}/claude-accounts/remove`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: "acc-1" }),
+        });
+        expect(response.status).toBe(409);
+        if (reconcile) {
+          await expect(response.json()).resolves.toEqual({ error: "unknown provider account" });
+          expect(remove).toHaveBeenCalledExactlyOnceWith("acc-1");
+          return;
+        }
+        await expect(response.json()).resolves.toMatchObject({
+          error: expect.stringContaining("in use by a running session"),
+        });
+        expect(remove).not.toHaveBeenCalled();
+        expect(readSession(dataDir, session.id)?.status).toBe("running");
+      } finally {
+        try {
+          await server?.stop();
+        } finally {
+          state.mockRestore();
+          loops.mockRestore();
+          presence.mockRestore();
+          foreign.mockRestore();
+          remove.mockRestore();
+          await rm(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it("POST /claude-accounts/add returns a summary account without the absolute configDir", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));

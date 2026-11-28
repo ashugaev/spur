@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { randomUUID, createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
@@ -15,6 +16,113 @@ import { readUserActionLog } from "../../src/user-action-log.js";
 import { codexHookHomePath } from "../../src/agents/codex.js";
 import { readLiveProcessStarttime } from "../../src/sidecars/reap.js";
 import { createTempDir, execFileAsync, findFreePort } from "../helpers/common.js";
+
+interface StartupDiagnostic {
+  generation: number;
+  stage: "spawned" | "bootstrap" | "imports-complete" | "ready";
+  exit?: { code: number | null; signal: NodeJS.Signals | null };
+  close?: { code: number | null; signal: NodeJS.Signals | null };
+}
+
+function waitForOwnedReadiness(owned: ChildProcess, diagnostic: StartupDiagnostic): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const fail = (reason: string) => reject(new Error(`${reason}: ${JSON.stringify(diagnostic)}`));
+    const timer = setTimeout(() => fail("Owned daemon startup timeout"), 15000);
+    owned.on("message", (message: unknown) => {
+      if (!message || typeof message !== "object" || !("stage" in message)) return;
+      if (message.stage === "bootstrap" || message.stage === "imports-complete") {
+        diagnostic.stage = message.stage;
+      } else if (
+        message.stage === "ready" &&
+        "ready" in message &&
+        message.ready === true &&
+        "pid" in message &&
+        message.pid === owned.pid
+      ) {
+        diagnostic.stage = "ready";
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    owned.once("error", () => {
+      clearTimeout(timer);
+      fail("Owned daemon startup process error");
+    });
+    owned.once("exit", (code, signal) => {
+      diagnostic.exit = { code, signal };
+    });
+    owned.once("close", (code, signal) => {
+      diagnostic.close = { code, signal };
+      clearTimeout(timer);
+      fail("Owned daemon closed before readiness");
+    });
+  });
+}
+
+it.each(["timeout", "ready", "exit"] as const)(
+  "owned startup gate distinguishes %s with path-free generation and exit/close diagnostics",
+  async (outcome) => {
+    const root = await createTempDir("mcp-startup-gate-");
+    const owned = spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+    process.send({stage: 'bootstrap'});
+    process.on('message', message => {
+      if (message === 'exit') process.exit(7);
+      else {
+        process.send({stage: 'ready', ready: true, pid: process.pid + 1});
+        process.send({stage: 'imports-complete'});
+        process.send({stage: 'ready', ready: true, pid: process.pid});
+        process.disconnect();
+      }
+    });
+  `,
+      ],
+      {
+        cwd: root,
+        env: { HOME: root, TMPDIR: root, PATH: "" },
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      },
+    );
+    const closed = once(owned, "close");
+    const diagnostic: StartupDiagnostic = { generation: 2, stage: "spawned" };
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const startup = waitForOwnedReadiness(owned, diagnostic);
+    const result = startup.then(
+      () => "ready",
+      (error: unknown) => error,
+    );
+    try {
+      await once(owned, "message");
+      expect(diagnostic.stage).toBe("bootstrap");
+      if (outcome === "timeout") {
+        await vi.advanceTimersByTimeAsync(15000);
+        expect(await result).toEqual(
+          new Error('Owned daemon startup timeout: {"generation":2,"stage":"bootstrap"}'),
+        );
+      } else {
+        owned.send(outcome);
+        await closed;
+        if (outcome === "ready") expect(await result).toBe("ready");
+        else {
+          expect(await result).toEqual(
+            new Error(
+              'Owned daemon closed before readiness: {"generation":2,"stage":"bootstrap","exit":{"code":7,"signal":null},"close":{"code":7,"signal":null}}',
+            ),
+          );
+        }
+      }
+      expect(JSON.stringify(diagnostic)).not.toContain(root);
+    } finally {
+      vi.useRealTimers();
+      if (owned.exitCode === null && owned.signalCode === null) owned.kill("SIGKILL");
+      await closed;
+      await result;
+    }
+  },
+);
 
 async function sourceSnapshot(): Promise<Record<string, string>> {
   const directory = fileURLToPath(new URL("../../src/", import.meta.url));
@@ -168,6 +276,7 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     code: number | null;
     signal: NodeJS.Signals | null;
   }[] = [];
+  const startupDiagnostics: StartupDiagnostic[] = [];
   const startChild = (): Promise<void> => {
     generation++;
     const owned = spawn(process.execPath, ["--import", tsx, fixture, config], {
@@ -185,21 +294,9 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
         void startup.catch(() => undefined);
       }
     });
-    return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Owned daemon startup timeout")), 15000);
-      owned.once("message", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-      owned.once("error", (error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-      owned.once("exit", () => {
-        clearTimeout(timer);
-        reject(new Error("Owned daemon exited before readiness"));
-      });
-    });
+    const diagnostic: StartupDiagnostic = { generation, stage: "spawned" };
+    startupDiagnostics.push(diagnostic);
+    return waitForOwnedReadiness(owned, diagnostic);
   };
   vi.stubEnv("SPUR_DISABLE_AUTOSTART", "1");
   vi.stubEnv("SPUR_MCP_TUNNEL_ENV_FILE", join(home, "absent-tunnel.env"));
@@ -402,6 +499,7 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     Object.assign(evidence, {
       childOutput,
       childExits,
+      startupDiagnostics,
       sourceBefore,
       sourceAfter,
       sourceUnchanged: JSON.stringify(sourceBefore) === JSON.stringify(sourceAfter),

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import type * as ChildProcess from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
@@ -805,12 +806,24 @@ async function sanitizerStage(artifact: string): Promise<string> {
   return stage === "preload" ||
     stage === "lookup" ||
     stage === "lookup-complete" ||
-    stage === "fault"
+    stage === "fault" ||
+    stage === "dependency-link" ||
+    stage === "dependency-link-complete" ||
+    stage === "dependency-read" ||
+    stage === "dependency-read-complete" ||
+    stage === "dependency-realpath" ||
+    stage === "dependency-realpath-complete"
     ? stage
     : "unavailable";
 }
 
-function sanitizerPreload(artifact: string, marker: string, message: string, privatePath: string) {
+function sanitizerPreload(
+  artifact: string,
+  marker: string,
+  message: string,
+  privatePath: string,
+  gate = false,
+) {
   return `
     import filesystem from "node:fs/promises";
     import {writeFileSync} from "node:fs";
@@ -829,10 +842,31 @@ function sanitizerPreload(artifact: string, marker: string, message: string, pri
         }
         const result = await original(...args);
         writeFileSync(${JSON.stringify(artifact)}, "lookup-complete");
+        if (${gate}) {
+          await new Promise(resolve => {
+            process.once('message', () => { process.disconnect(); resolve(); });
+            process.send({stage: 'lookup-complete'});
+          });
+        }
+        return result;
+      }
+      if (storeLookups > 0) {
+        writeFileSync(${JSON.stringify(artifact)}, "dependency-realpath");
+        const result = await original(...args);
+        writeFileSync(${JSON.stringify(artifact)}, "dependency-realpath-complete");
         return result;
       }
       return original(...args);
     };
+    for (const [name, stage] of [['lstat', 'dependency-link'], ['readFile', 'dependency-read']]) {
+      const operation = filesystem[name];
+      filesystem[name] = async (...args) => {
+        if (storeLookups > 0) writeFileSync(${JSON.stringify(artifact)}, stage);
+        const result = await operation(...args);
+        if (storeLookups > 0) writeFileSync(${JSON.stringify(artifact)}, stage + '-complete');
+        return result;
+      };
+    }
     syncBuiltinESMExports();
   `;
 }
@@ -911,6 +945,90 @@ test("sanitizer stage diagnostics distinguish a completed lookup from an injecte
   expect(await sanitizerStage(artifact)).toBe("unavailable");
 });
 
+test.each(["timeout", "fault"] as const)(
+  "sanitizer CLI gate distinguishes %s after lookup-complete with path-free terminal diagnostics",
+  async (outcome) => {
+    const tree = await directory();
+    const privatePath = join(tree, "synthetic-private-path", "archive.tgz");
+    const artifact = join(tree, "sanitizer-stage");
+    const marker = join(tree, "injected-error");
+    const preload = join(tree, "filesystem-fault.mjs");
+    await writeFile(
+      preload,
+      sanitizerPreload(artifact, marker, `EACCES: ${privatePath}`, privatePath, true),
+    );
+    const { spawn } = await import("node:child_process");
+    const child = spawn(
+      process.execPath,
+      [
+        "--import",
+        pathToFileURL(preload).href,
+        join(root, "scripts/verify-review-app-package.mjs"),
+        "--tarball",
+        privatePath,
+      ],
+      {
+        cwd: tree,
+        env: { HOME: tree, TMPDIR: tree, PATH: tree, LANG: "C", LC_ALL: "C" },
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+        timeout: 5_000,
+        killSignal: "SIGKILL",
+      },
+    );
+    const terminal: { exit?: unknown; close?: unknown } = {};
+    child.once("exit", (code, signal) => {
+      terminal.exit = { code, signal };
+    });
+    const closed = once(child, "close").then(([code, signal]) => {
+      terminal.close = { code, signal };
+    });
+    const output: { stdout: string; stderr: string } = { stdout: "", stderr: "" };
+    child.stdout?.on("data", (chunk: Buffer) => {
+      output.stdout += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      output.stderr += chunk.toString();
+    });
+    try {
+      const gate = once(child, "message");
+      await Promise.race([
+        gate,
+        closed.then(() => {
+          throw new Error(`Sanitizer closed before gate: ${JSON.stringify(terminal)}`);
+        }),
+      ]);
+      expect(await sanitizerStage(artifact)).toBe("lookup-complete");
+      await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      if (outcome === "fault") child.send("release");
+      await closed;
+      if (outcome === "timeout") {
+        expect(terminal).toEqual({
+          exit: { code: null, signal: "SIGKILL" },
+          close: { code: null, signal: "SIGKILL" },
+        });
+        expect(child.killed).toBe(true);
+        expect(await sanitizerStage(artifact)).toBe("lookup-complete");
+        await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+        expect(output).toEqual({ stdout: "", stderr: "" });
+      } else {
+        expect(terminal).toEqual({
+          exit: { code: 1, signal: null },
+          close: { code: 1, signal: null },
+        });
+        expect(child.killed).toBe(false);
+        expect(await sanitizerStage(artifact)).toBe("fault");
+        expect(await readFile(marker, "utf8")).toBe(`EACCES: ${privatePath}`);
+        expect(output).toEqual({ stdout: "", stderr: "review-app-package: verification failed\n" });
+      }
+      expect(JSON.stringify(terminal)).not.toContain(privatePath);
+      expect(JSON.stringify(output)).not.toContain(privatePath);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await closed;
+    }
+  },
+);
+
 test.each(["external-fs", "prefixed-external"])(
   "production CLI sanitizes a synthetic private-path sentinel from %s failure",
   async (mode) => {
@@ -924,7 +1042,7 @@ test.each(["external-fs", "prefixed-external"])(
     const { execFile } = await import("node:child_process");
     const { promisify } = await import("node:util");
     faults.allowChildren = true;
-    const failure: unknown = await promisify(execFile)(
+    const execution = promisify(execFile)(
       process.execPath,
       [
         "--import",
@@ -940,8 +1058,19 @@ test.each(["external-fs", "prefixed-external"])(
         killSignal: "SIGKILL",
         maxBuffer: 64 * 1024,
       },
-    ).catch((error: unknown) => error);
-    expect(failure, `Sanitizer CLI stage: ${await sanitizerStage(artifact)}`).toMatchObject({
+    );
+    const terminal: { exit?: unknown; close?: unknown } = {};
+    execution.child.once("exit", (code, signal) => {
+      terminal.exit = { code, signal };
+    });
+    execution.child.once("close", (code, signal) => {
+      terminal.close = { code, signal };
+    });
+    const failure: unknown = await execution.catch((error: unknown) => error);
+    expect(
+      failure,
+      `Sanitizer CLI stage: ${await sanitizerStage(artifact)}; terminal: ${JSON.stringify(terminal)}`,
+    ).toMatchObject({
       code: 1,
       signal: null,
       killed: false,
