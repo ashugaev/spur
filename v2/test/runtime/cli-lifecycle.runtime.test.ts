@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { Console } from "node:console";
 import { createServer } from "node:http";
 import { constants, existsSync } from "node:fs";
 import { chmod, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
@@ -1400,14 +1401,48 @@ projects:
   });
 
   it("keeps build as a no-op when /info is incompatible and does not expose a Spur runtime pid", async () => {
+    type BuildNoopPhase =
+      | "setup.begin"
+      | "setup.port-ready"
+      | "setup.context-ready"
+      | "setup.config-ready"
+      | "listen.begin"
+      | "listen.ready"
+      | "build.request"
+      | "build.spawn"
+      | "build.error"
+      | "build.exit"
+      | "build.close"
+      | "build.resolved"
+      | "fetch.begin"
+      | "fetch.headers"
+      | "json.begin"
+      | "json.checked"
+      | "server-close.begin"
+      | "server-close.done"
+      | "case.done";
+    const phaseConsole = new Console({
+      stdout: process.stderr,
+      stderr: process.stderr,
+      ignoreErrors: true,
+      colorMode: false,
+    });
+    const phase = (name: BuildNoopPhase, code: number | null = null, signaled = false): void => {
+      const bucket = code === null ? "none" : code === 0 ? "zero" : "nonzero";
+      phaseConsole.log(`[Spur build-noop phase] ${name} code=${bucket} signaled=${signaled}`);
+    };
+    phase("setup.begin");
     const port = await findFreePort();
+    phase("setup.port-ready");
     const context = await createRuntimeTestContext(port);
+    phase("setup.context-ready");
     const sessionPrefix = `rt-build-noop-${port}`;
     activeContexts.push({ context, sessionPrefix });
     const configPath = await context.writeConfig(
       "build-noop.yaml",
       baseConfig(context, sessionPrefix),
     );
+    phase("setup.config-ready");
     const repoRoot = join(import.meta.dirname, "..", "..", "..");
     const incompatibleServer = createServer((request, response) => {
       if (request.url === "/info") {
@@ -1420,6 +1455,7 @@ projects:
     });
 
     try {
+      phase("listen.begin");
       await new Promise<void>((resolve, reject) => {
         incompatibleServer.once("error", reject);
         incompatibleServer.listen(port, "127.0.0.1", () => {
@@ -1427,19 +1463,43 @@ projects:
           resolve();
         });
       });
+      phase("listen.ready");
 
-      await execFileAsync("pnpm", ["--dir", "v2", "build"], {
+      phase("build.request");
+      const buildPromise = execFileAsync("pnpm", ["--dir", "v2", "build"], {
         cwd: repoRoot,
         env: {
           ...process.env,
           SPUR_CONFIG: configPath,
         },
       });
+      const buildChild = buildPromise.child;
+      const onBuildSpawn = (): void => phase("build.spawn");
+      const onBuildError = (): void => phase("build.error");
+      const onBuildExit = (code: number | null, signal: NodeJS.Signals | null): void =>
+        phase("build.exit", code, signal !== null);
+      const onBuildClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+        phase("build.close", code, signal !== null);
+        buildChild.off("spawn", onBuildSpawn);
+        buildChild.off("error", onBuildError);
+        buildChild.off("exit", onBuildExit);
+      };
+      buildChild.once("spawn", onBuildSpawn);
+      buildChild.once("error", onBuildError);
+      buildChild.once("exit", onBuildExit);
+      buildChild.once("close", onBuildClose);
+      await buildPromise;
+      phase("build.resolved");
 
+      phase("fetch.begin");
       const response = await fetch(`http://127.0.0.1:${port}/info`);
+      phase("fetch.headers");
       expect(response.status).toBe(200);
+      phase("json.begin");
       expect(await response.json()).toEqual({ pid: 7777 });
+      phase("json.checked");
     } finally {
+      phase("server-close.begin");
       await new Promise<void>((resolve, reject) => {
         incompatibleServer.close((error) => {
           if (error) {
@@ -1449,7 +1509,9 @@ projects:
           resolve();
         });
       });
+      phase("server-close.done");
     }
+    phase("case.done");
   });
 
   it("rejects unknown options through the ls alias", async () => {
