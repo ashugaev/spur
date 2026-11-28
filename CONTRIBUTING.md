@@ -42,6 +42,7 @@ older revision left fixture dirs behind, list/remove them with
 
 - `v2/` is the source of truth for runtime behavior.
 - `packages/web/` must stay a thin UI over Spur's daemon API.
+- Spur serves as a headless backend for custom UIs; preserve API compatibility and version breaking API changes through semantic-release.
 - Prefer deleting stale paths over keeping compatibility shims.
 - Keep `AGENTS.md` and `CLAUDE.md` in sync.
 - Keep mirrored files under `.agents/` and `.claude/` in sync.

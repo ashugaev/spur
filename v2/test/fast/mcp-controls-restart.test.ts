@@ -1,7 +1,10 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, ChildProcess } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { constants } from "node:fs";
+import * as fs from "node:fs/promises";
 import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { PassThrough } from "node:stream";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -15,6 +18,349 @@ import { readUserActionLog } from "../../src/user-action-log.js";
 import { codexHookHomePath } from "../../src/agents/codex.js";
 import { readLiveProcessStarttime } from "../../src/sidecars/reap.js";
 import { createTempDir, execFileAsync, findFreePort } from "../helpers/common.js";
+
+type ChildEvidence = {
+  generation: number;
+  pid: number | undefined;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  spawnError?: string;
+};
+
+function observeStartup(
+  owned: ChildProcess,
+  generation: number,
+  childOutput: string[],
+  childExits: ChildEvidence[],
+  report: (summary: string) => void = (summary) => process.stderr.write(`${summary}\n`),
+) {
+  const startedAt = Date.now();
+  const phases: { generation: number; stage: string; elapsedMs: number }[] = [];
+  const observe = (stage: string) =>
+    phases.push({ generation, stage, elapsedMs: Date.now() - startedAt });
+  observe("awaiting-fixture");
+  const evidence: ChildEvidence = {
+    generation,
+    pid: owned.pid,
+    code: null,
+    signal: null,
+    stdout: "",
+    stderr: "",
+  };
+  for (const stream of ["stdout", "stderr"] as const)
+    owned[stream]?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      evidence[stream] += text;
+      childOutput.push(text);
+    });
+  owned.once("exit", (code, signal) => {
+    evidence.code = code;
+    evidence.signal = signal;
+    childExits.push(evidence);
+  });
+  owned.once("error", (error) => {
+    evidence.spawnError = error.stack ?? error.message;
+  });
+  const closed = new Promise<void>((resolve) =>
+    owned.once("close", (code, signal) => {
+      evidence.code = code;
+      evidence.signal = signal;
+      resolve();
+    }),
+  );
+  const startup = new Promise<void>((resolve, reject) => {
+    const fail = (category: "exit" | "signal" | "spawn-error" | "timeout") => {
+      finish();
+      const summary = `Owned daemon startup failed: generation=${generation} code=${evidence.code ?? "none"} signal=${evidence.signal ?? "none"} category=${category} last-observed-stage=${phases.at(-1)?.stage} elapsedMs=${Date.now() - startedAt}`;
+      report(summary);
+      reject(new Error(summary));
+    };
+    const onMessage = (message: unknown) => {
+      if (
+        owned.pid === undefined ||
+        typeof message !== "object" ||
+        message === null ||
+        !("pid" in message) ||
+        message.pid !== owned.pid
+      )
+        return;
+      if (
+        "startupStage" in message &&
+        (message.startupStage === "importing-server" || message.startupStage === "starting-server")
+      ) {
+        observe(message.startupStage);
+        return;
+      }
+      if (!("ready" in message) || message.ready !== true) return;
+      observe("ready");
+      finish();
+      resolve();
+    };
+    const close = () =>
+      fail(evidence.spawnError ? "spawn-error" : evidence.signal ? "signal" : "exit");
+    const timer = setTimeout(() => fail("timeout"), 15000);
+    const finish = () => {
+      clearTimeout(timer);
+      owned.off("message", onMessage);
+      owned.off("close", close);
+    };
+    owned.on("message", onMessage);
+    owned.once("close", close);
+  });
+  // Replacement startup is supervised without an awaiting caller.
+  void startup.catch(() => undefined);
+  return { startup, closed, evidence, phases };
+}
+
+async function awaitChildCloses(closes: Promise<void>[]) {
+  let deadline: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      Promise.all(closes),
+      new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(
+          () => reject(new Error("Owned child stream close was not observed")),
+          10000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(deadline);
+  }
+}
+
+async function writePrivateEvidence(path: string, evidence: unknown) {
+  const file = await fs.open(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    await file.chmod(0o600);
+    await file.truncate(0);
+    await file.writeFile(JSON.stringify(evidence, null, 2));
+  } finally {
+    await file.close();
+  }
+}
+
+it("waits for owned readiness across progress and invalid IPC messages", async () => {
+  const owned = new ChildProcess();
+  Object.defineProperty(owned, "pid", { value: 42 });
+  const report = vi.fn<(summary: string) => void>();
+  const observation = observeStartup(owned, 3, [], [], report);
+  let ready = false;
+  void observation.startup.then(() => {
+    ready = true;
+  });
+  for (const message of [
+    null,
+    "private-marker",
+    { ready: true },
+    { ready: true, pid: 43 },
+    { ready: false, pid: 42 },
+    { startupStage: "private-marker", pid: 42 },
+    { startupStage: "importing-server", pid: 43 },
+    { startupStage: "importing-server", pid: 42 },
+    { startupStage: "starting-server", pid: 42 },
+  ]) {
+    owned.emit("message", message);
+    await Promise.resolve();
+    expect(ready).toBe(false);
+  }
+  owned.emit("message", { ready: true, pid: 42 });
+  await observation.startup;
+  expect(ready).toBe(true);
+  owned.emit("message", { ready: true, pid: 42 });
+  expect(observation.phases.map((phase) => phase.stage)).toEqual([
+    "awaiting-fixture",
+    "importing-server",
+    "starting-server",
+    "ready",
+  ]);
+  for (const phase of observation.phases) {
+    expect(phase.generation).toBe(3);
+    expect(phase.elapsedMs).toBeGreaterThanOrEqual(0);
+  }
+  expect(report).not.toHaveBeenCalled();
+  expect(owned.listenerCount("message")).toBe(0);
+  owned.emit("close", 0, null);
+  await observation.closed;
+});
+
+it("times out at the last owned phase without exposing invalid IPC", async () => {
+  vi.useFakeTimers();
+  const owned = new ChildProcess();
+  const report = vi.fn<(summary: string) => void>();
+  const observation = observeStartup(owned, 4, [], [], report);
+  try {
+    owned.emit("message", { ready: true });
+    Object.defineProperty(owned, "pid", { value: 42 });
+    owned.emit("message", { startupStage: "importing-server", pid: 42 });
+    owned.emit("message", { startupStage: "private-marker", pid: 42 });
+    owned.emit("message", { startupStage: "starting-server", pid: 43 });
+    await vi.advanceTimersByTimeAsync(14999);
+    expect(report).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    const failure = await observation.startup.catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(report).toHaveBeenCalledTimes(1);
+    const summary = report.mock.calls[0]?.[0] ?? "";
+    expect((failure as Error).message).toBe(summary);
+    expect(summary).toContain("generation=4");
+    expect(summary).toContain("category=timeout");
+    expect(summary).toContain("last-observed-stage=importing-server");
+    expect(summary).toContain("elapsedMs=15000");
+    expect(summary).not.toContain("private-marker");
+    expect(summary.length).toBeLessThanOrEqual(220);
+    expect(owned.listenerCount("message")).toBe(0);
+    owned.emit("close", 0, null);
+    await observation.closed;
+    expect(report).toHaveBeenCalledTimes(1);
+  } finally {
+    owned.emit("close", 0, null);
+    vi.useRealTimers();
+  }
+});
+
+it.each(["exit", "signal"] as const)(
+  "captures private startup %s evidence through close",
+  async (mode) => {
+    const marker = "private-token-fixture /private/home/example fixture.internal";
+    const report = vi.fn<(summary: string) => void>();
+    const output: string[] = [];
+    const exits: ChildEvidence[] = [];
+    const owned = spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+    process.stdout.write(${JSON.stringify(marker)});
+    process.stderr.write('trailing-private-marker', () => {
+      ${mode === "exit" ? "process.exit(23)" : "process.kill(process.pid, 'SIGTERM')"};
+    });
+  `,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const observation = observeStartup(owned, 2, output, exits, report);
+    try {
+      await observation.closed;
+      const failure = await observation.startup.catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(observation.evidence).toMatchObject({
+        generation: 2,
+        code: mode === "exit" ? 23 : null,
+        signal: mode === "signal" ? "SIGTERM" : null,
+        stdout: marker,
+        stderr: "trailing-private-marker",
+      });
+      expect(exits).toEqual([observation.evidence]);
+      expect(output.join("")).toContain("trailing-private-marker");
+      expect(report).toHaveBeenCalledTimes(1);
+      const summary = report.mock.calls[0]?.[0] ?? "";
+      expect(summary).toContain("generation=2");
+      expect(summary).toContain(`code=${mode === "exit" ? "23" : "none"}`);
+      expect(summary).toContain(`signal=${mode === "signal" ? "SIGTERM" : "none"}`);
+      expect(summary).toContain(`category=${mode}`);
+      expect(summary.length).toBeLessThanOrEqual(220);
+      expect((failure as Error).message).toBe(summary);
+      for (const secret of [
+        marker,
+        "private-token-fixture",
+        "/private/home",
+        "fixture.internal",
+        "trailing-private-marker",
+      ])
+        expect(summary).not.toContain(secret);
+    } finally {
+      if (owned.exitCode === null && owned.signalCode === null) owned.kill("SIGKILL");
+      await observation.closed;
+    }
+  },
+);
+
+it("waits for every generation's close before securing and replacing private evidence", async () => {
+  const root = await createTempDir("mcp-private-evidence-");
+  const path = join(root, "proof.json");
+  await writeFile(path, "old-private-marker", { mode: 0o664 });
+  await fs.chmod(path, 0o664);
+  const children = [new ChildProcess(), new ChildProcess()];
+  const observations = children.map((owned, index) => {
+    owned.stderr = new PassThrough();
+    const observation = observeStartup(owned, index + 1, [], [], vi.fn());
+    Object.defineProperty(owned, "pid", { value: index + 1 });
+    owned.emit("message", { ready: true, pid: owned.pid });
+    return observation;
+  });
+  const probe = await fs.open(path, "r+");
+  const prototype = Object.getPrototypeOf(probe) as fs.FileHandle;
+  await probe.close();
+  const truncate = prototype.truncate;
+  const truncateSpy = vi.spyOn(prototype, "truncate").mockImplementation(async function (
+    this: fs.FileHandle,
+    length,
+  ) {
+    expect((await this.stat()).mode & 0o777).toBe(0o600);
+    expect(await readFile(path, "utf8")).toBe("old-private-marker");
+    expect(closed).toBe(true);
+    await truncate.call(this, length);
+  });
+  let closed = false;
+  try {
+    const serialized = awaitChildCloses(observations.map((entry) => entry.closed)).then(
+      async () => {
+        closed = true;
+        await writePrivateEvidence(
+          path,
+          observations.map((entry) => entry.evidence),
+        );
+      },
+    );
+    for (const owned of children) owned.emit("exit", 0, null);
+    children[0]?.emit("close", 0, null);
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    expect(truncateSpy).not.toHaveBeenCalled();
+    children[1]?.stderr?.emit("data", Buffer.from("last-private-marker"));
+    children[1]?.emit("close", 0, null);
+    await serialized;
+    await Promise.all(observations.map((entry) => entry.startup));
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(
+      observations.map((entry) => entry.evidence),
+    );
+    expect(observations[1]?.evidence.stderr).toBe("last-private-marker");
+    expect((await fs.stat(path)).mode & 0o777).toBe(0o600);
+  } finally {
+    truncateSpy.mockRestore();
+  }
+  const link = join(root, "proof-link.json");
+  await symlink(path, link);
+  await expect(writePrivateEvidence(link, "forbidden")).rejects.toThrow();
+  expect(await readFile(path, "utf8")).toContain("last-private-marker");
+});
+
+it("bounds an unclosed generation by the existing cleanup deadline", async () => {
+  vi.useFakeTimers();
+  try {
+    const owned = new ChildProcess();
+    const observation = observeStartup(owned, 1, [], [], vi.fn());
+    Object.defineProperty(owned, "pid", { value: 1 });
+    owned.emit("message", { ready: true, pid: owned.pid });
+    await observation.startup;
+    owned.emit("exit", 0, null);
+    const closed = awaitChildCloses([observation.closed]);
+    const rejected = expect(closed).rejects.toThrow("Owned child stream close was not observed");
+    await vi.advanceTimersByTimeAsync(10000);
+    await rejected;
+    owned.emit("close", 0, null);
+    await observation.closed;
+  } finally {
+    vi.useRealTimers();
+  }
+});
 
 async function sourceSnapshot(): Promise<Record<string, string>> {
   const directory = fileURLToPath(new URL("../../src/", import.meta.url));
@@ -163,83 +509,24 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
   let generation = 0;
   let startup: Promise<void>;
   const childOutput: string[] = [];
-  const startupObservations: { generation: number; stage: string; elapsedMs: number }[] = [];
-  const childExits: {
-    pid: number | undefined;
-    code: number | null;
-    signal: NodeJS.Signals | null;
-  }[] = [];
+  const childExits: ChildEvidence[] = [];
+  const observations: ReturnType<typeof observeStartup>[] = [];
   const startChild = (): Promise<void> => {
-    const ownedGeneration = ++generation;
-    const startedAt = Date.now();
-    let startupStage = "awaiting-fixture";
-    const observe = (stage: string) => {
-      startupStage = stage;
-      startupObservations.push({
-        generation: ownedGeneration,
-        stage,
-        elapsedMs: Date.now() - startedAt,
-      });
-    };
-    observe(startupStage);
+    generation++;
     const owned = spawn(process.execPath, ["--import", tsx, fixture, config], {
       cwd: root,
       stdio: ["ignore", "pipe", "pipe", "ipc"],
       env: { ...environment, SPUR_CONFIG: config },
     });
     child = owned;
-    owned.stdout?.on("data", (chunk: Buffer) => childOutput.push(chunk.toString()));
-    owned.stderr?.on("data", (chunk: Buffer) => childOutput.push(chunk.toString()));
-    owned.once("exit", (code, signal) => {
-      childExits.push({ pid: owned.pid, code, signal });
+    const observation = observeStartup(owned, generation, childOutput, childExits);
+    observations.push(observation);
+    owned.once("exit", () => {
       if (supervise && restartAuthorized && generation === 1) {
         startup = startChild();
-        void startup.catch(() => undefined);
       }
     });
-    return new Promise<void>((resolve, reject) => {
-      const onMessage = (message: unknown) => {
-        if (
-          typeof message !== "object" ||
-          message === null ||
-          !("pid" in message) ||
-          message.pid !== owned.pid
-        )
-          return;
-        if (
-          "startupStage" in message &&
-          (message.startupStage === "importing-server" ||
-            message.startupStage === "starting-server")
-        ) {
-          observe(message.startupStage);
-          return;
-        }
-        if (!("ready" in message) || message.ready !== true) return;
-        observe("ready");
-        clearTimeout(timer);
-        owned.off("message", onMessage);
-        resolve();
-      };
-      const timer = setTimeout(() => {
-        owned.off("message", onMessage);
-        reject(
-          new Error(
-            `Owned daemon startup timeout: generation=${ownedGeneration}, last-observed-stage=${startupStage}, elapsedMs=${Date.now() - startedAt}, exitCode=${owned.exitCode}, signal=${owned.signalCode}`,
-          ),
-        );
-      }, 15000);
-      owned.on("message", onMessage);
-      owned.once("error", (error) => {
-        clearTimeout(timer);
-        owned.off("message", onMessage);
-        reject(error);
-      });
-      owned.once("exit", () => {
-        clearTimeout(timer);
-        owned.off("message", onMessage);
-        reject(new Error("Owned daemon exited before readiness"));
-      });
-    });
+    return observation.startup;
   };
   vi.stubEnv("SPUR_DISABLE_AUTOSTART", "1");
   vi.stubEnv("SPUR_MCP_TUNNEL_ENV_FILE", join(home, "absent-tunnel.env"));
@@ -347,6 +634,15 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     );
     const after = await reconnected.callTool({ name: "mcp_status", arguments: {} });
     expect(generation).toBe(2);
+    for (const observation of observations) {
+      expect(observation.phases.map((phase) => phase.stage)).toEqual([
+        "awaiting-fixture",
+        "importing-server",
+        "starting-server",
+        "ready",
+      ]);
+      for (const phase of observation.phases) expect(phase.elapsedMs).toBeGreaterThanOrEqual(0);
+    }
     const sentinelAfter = await paneIdentity();
     expect(sentinelAfter).toEqual(sentinel);
     const statusSchema = z.object({
@@ -396,32 +692,22 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     let childTerminal: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     let cleanupError: unknown;
     let sentinelStopped = sentinel === undefined;
+    let streamsClosed = false;
+    const force = setTimeout(() => {
+      if (owned && owned.exitCode === null && owned.signalCode === null) owned.kill("SIGKILL");
+    }, 5000);
     try {
+      const closed = awaitChildCloses(observations.map((observation) => observation.closed));
       if (owned && owned.exitCode === null && owned.signalCode === null) {
-        const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-          (resolve) => owned.once("exit", (code, signal) => resolve({ code, signal })),
-        );
-        const force = setTimeout(() => owned.kill("SIGKILL"), 5000);
-        let deadline: NodeJS.Timeout | undefined;
-        const timedOut = new Promise<never>((_resolve, reject) => {
-          deadline = setTimeout(
-            () => reject(new Error("Owned child exit was not observed")),
-            10000,
-          );
-        });
         owned.kill("SIGTERM");
-        try {
-          childTerminal = await Promise.race([exited, timedOut]);
-        } finally {
-          clearTimeout(force);
-          clearTimeout(deadline);
-        }
-      } else if (owned) {
-        childTerminal = { code: owned.exitCode, signal: owned.signalCode };
       }
+      await closed;
+      streamsClosed = true;
+      if (owned) childTerminal = { code: owned.exitCode, signal: owned.signalCode };
     } catch (error) {
       cleanupError = error;
     } finally {
+      clearTimeout(force);
       try {
         if (sentinel) {
           const stoppedSentinel = sentinel;
@@ -444,8 +730,9 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     const sourceAfter = await sourceSnapshot();
     Object.assign(evidence, {
       childOutput,
-      startupObservations,
+      startupObservations: observations.flatMap((observation) => observation.phases),
       childExits,
+      childGenerations: observations.map((observation) => observation.evidence),
       sourceBefore,
       sourceAfter,
       sourceUnchanged: JSON.stringify(sourceBefore) === JSON.stringify(sourceAfter),
@@ -453,15 +740,16 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
         childPid: owned?.pid,
         childTerminal,
         childExitObserved: childTerminal !== undefined,
+        streamsClosed,
         sentinelStopped,
         networkClosed: networkCleanup.every((item) => item.status === "fulfilled"),
         error: cleanupError instanceof Error ? cleanupError.message : null,
       },
     });
-    if (process.env.SPUR_SESSION_ARTIFACTS_DIR)
-      await writeFile(
+    if (streamsClosed && process.env.SPUR_SESSION_ARTIFACTS_DIR)
+      await writePrivateEvidence(
         join(process.env.SPUR_SESSION_ARTIFACTS_DIR, "isolated-restart-proof.json"),
-        JSON.stringify(evidence, null, 2),
+        evidence,
       );
     expect(cleanupError).toBeUndefined();
     expect(childTerminal).toBeDefined();
