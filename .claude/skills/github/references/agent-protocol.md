@@ -3,7 +3,7 @@ AGENT PROTOCOL
 PRODUCT
 
   Inspect requirement/code before questions.
-  Ask one critical question only when answer changes behavior, scope or acceptance; settled requirements need none.
+  Ask in current chat for missing facts or authorization that changes behavior, scope or acceptance; never infer approval.
   Continue independent work while awaiting answer; resolve material uncertainty before dependent coding.
 
 INTERFACE
@@ -11,13 +11,14 @@ INTERFACE
   Classify UI, CLI, config, prompts and workflow surfaces; architect records proposed behavior/constraints, scope digest and approval evidence/absence.
   Ground before in bound base B; after covers the full proposed PR.
   Obtain matching user authorization before dependent coding; prior explicit approval covering proposed scope counts.
-  Ask required approval in current session chat; user's typed reply there counts as approval. Mirror to authorized session Telegram only when session has Telegram. Missing channel never blocks and never enters Missing. Keep full canonical manifest; daemon appends every clause. In session chat, show manifest path or rendered clauses; route UI screenshots per telegram skill when session has Telegram.
+  Ask required approval in current session chat; user's typed reply there counts as approval. Show full canonical manifest or its path.
+  Mirror request and screenshots to authorized session Telegram when available; use `spur source reply --request-interface-approval` for interface requests.
+  Absent or failed Telegram: use chat only, without blocker reports or duplicate questions. Keep ambiguous delivery with its resolver; never retry it or gate chat approval on its resolution.
   When frozen clauses make request unreadable, mirror one separate buttonless summary pointing to existing authenticated choices. Never use ordinary buttons as consent or rewrite/re-hash manifest.
   Treat typed/button reply as human prompt approval, never authenticated CI consent.
   Require spec-critic to independently check classification and matching authorization; implementer cannot self-exempt scope.
   Preserve screenshot approval gate per design skill; matching prior approval counts, changed scope invalidates affected approval.
   Require reviewer to classify final interface scope; record missing/stale interface approval without blocking inspection, verdict or publication. Never claim retroactive consent.
-  When session has Telegram, request required interface consent before coding with `spur source reply --request-interface-approval`; otherwise ask in session chat only; schema: v2/src/review-interface.ts.
   Manifest clause (before/after/constraints): one fact, max 80 chars, plain words; no file path or code identifier unless it is the user-facing surface, e.g. a flag name. Caps: per surface before max 3, after max 5, constraints max 2; whole manifest max 20 clauses. Merge related facts into one clause. Full consented scope stays; too many clauses means raise a surface split, never drop scope.
   SUMMARY: Requester language, plain words; max 300 characters. Line 1: bold question. Then max 3 bullets, each max 60 chars, then one Restriction line. No preamble line, no repeat of clauses, no hashes, session IDs, paths, raw schema or check history; omit unused bullets. Use:
   **Approve <PR>: <effect>?**
@@ -26,7 +27,7 @@ INTERFACE
   - <change>
   Restriction: <limit>
   Keep request text brief; no JSON, clause restatement or link dump. Format with source reply Markdown (v2/src/telegram-markdown.ts): bold, code; never HTML.
-  Require designated purpose-bound Telegram callback for CI consent; retain approved semantics across internal edits only with fresh independent lane assessments.
+  Follow configured protected CI consent checks; retain approved semantics across internal edits only with fresh independent lane assessments.
 
 GITHUB PUBLICATION
 

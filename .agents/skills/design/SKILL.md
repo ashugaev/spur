@@ -24,15 +24,15 @@ HANDOFF: $SPUR_SESSION_ARTIFACTS_DIR/design/, never committed.
   design-spec.md    current -> proposed behavior; screenshot paths;
                     components/states; acceptance criteria;
                     Approval status: pending | approved by user @ <ISO>;
-                    approval message and scope; Telegram delivery evidence or none: no channel
+                    approval message and scope; Telegram delivery evidence or unavailable
   *.html           local preview when used
 
 APPROVAL
 
-  Ask approval in current session chat; typed reply there is approval. Mirror to authorized session Telegram only when session has Telegram; follow agent-protocol.md.
+  Ask approval in current session chat; typed reply there is approval. Mirror through available Telegram per agent-protocol.md.
   Request is screenshot plus one-line request, never prose current -> proposed restatement.
-  Session has Telegram: attach screenshot to Telegram through `telegram` skill, never substitute a link; route text/buttons and screenshot to one authorized recipient.
-  Missing channel never blocks.
-  Reuse prior approval matching scope; still save screenshot proof, send it when session has Telegram.
+  Telegram mirror: attach screenshot through `telegram` skill, never substitute a link; route request and screenshot to one authorized recipient.
+  Absent or failed Telegram: continue approval in current chat only.
+  Reuse prior approval matching scope; still save screenshot proof.
   Return APPROVED or PENDING_APPROVAL; manager owns wait and revisions.
   Downstream agents read design-spec.md; changed scope needs matching approval.
