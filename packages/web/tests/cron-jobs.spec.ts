@@ -1,5 +1,10 @@
 import { test, expect, type Page, mockSessions, type ProjectInfo } from "./fixtures.js";
-import type { CronJobEditDraft, CronJobEditUpdate, CronJobsResponse } from "../src/lib/types";
+import type {
+  CronJobEditDraft,
+  CronJobEditUpdate,
+  CronJobsResponse,
+  CronStorageView,
+} from "../src/lib/types";
 
 const PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 
@@ -77,7 +82,68 @@ async function mockCron(
       body: JSON.stringify(response.body),
     });
   });
+  await mockStorage(page, EMPTY_STORAGE);
   return urls;
+}
+
+const EMPTY_STORAGE: CronStorageView = {
+  note: "",
+  noteUpdatedAt: null,
+  files: [],
+  totalBytes: 0,
+  updatedAt: null,
+  truncated: false,
+};
+
+const FILLED_STORAGE: CronStorageView = {
+  note: "Last run: 14 issues triaged",
+  noteUpdatedAt: "2026-10-27T03:05:00.000Z",
+  files: [
+    {
+      id: "triage.md",
+      name: "triage.md",
+      size: 4198,
+      mimeType: "text/markdown",
+      kind: "text",
+      origin: "intentional",
+      createdAt: "2026-10-27T03:05:00.000Z",
+      updatedAt: "2026-10-27T03:05:00.000Z",
+    },
+  ],
+  totalBytes: 4198,
+  updatedAt: "2026-10-27T03:05:00.000Z",
+  truncated: false,
+};
+
+// Registered after the cron list route, so it wins for storage URLs. Keeps note writes
+// and clears in memory; returns the request methods seen.
+async function mockStorage(page: Page, initial: CronStorageView): Promise<string[]> {
+  let view = structuredClone(initial);
+  const methods: string[] = [];
+  await page.route("**/api/cron/storage/**", async (route) => {
+    const method = route.request().method();
+    methods.push(method);
+    if (method === "PATCH") {
+      const { note } = route.request().postDataJSON() as { note: string };
+      view = { ...view, note, noteUpdatedAt: new Date().toISOString() };
+    } else if (method === "DELETE") {
+      view = structuredClone(EMPTY_STORAGE);
+    }
+    await route.fulfill({ json: view });
+  });
+  return methods;
+}
+
+async function openStorage(page: Page) {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Cron jobs" }).click();
+  await page.getByRole("button", { name: /audit/ }).click();
+  return page
+    .getByRole("dialog", { name: "Cron" })
+    .locator("section")
+    .filter({
+      has: page.getByRole("heading", { name: "Storage" }),
+    });
 }
 
 test.describe("Cron jobs modal", () => {
@@ -297,5 +363,66 @@ test.describe("Cron YAML editor", () => {
     page.once("dialog", (dialog) => dialog.accept());
     await page.keyboard.press("Escape");
     await expect(page.getByRole("button", { name: "Edit YAML" })).toBeFocused();
+  });
+});
+
+test.describe("Cron job storage", () => {
+  test("starts collapsed with file count, toggles and saves the note", async ({ page }) => {
+    await mockSessions(page, [], PROJECTS);
+    await mockCron(page);
+    const methods = await mockStorage(page, FILLED_STORAGE);
+    const storage = await openStorage(page);
+    await expect(storage.getByText("1 file · 4.1 KB")).toBeVisible();
+    await expect(storage.getByRole("cell", { name: "triage.md", exact: true })).toBeVisible();
+    const toggle = storage.getByRole("button", { name: "Note" });
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(storage.getByLabel("Storage note")).toBeHidden();
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const note = storage.getByLabel("Storage note");
+    await expect(note).toHaveValue("Last run: 14 issues triaged");
+    await expect(storage.getByRole("button", { name: "Save" })).toBeDisabled();
+    await note.fill("Next run: recheck #12");
+    await expect(storage.getByText("Unsaved changes")).toBeVisible();
+    await storage.getByRole("button", { name: "Save" }).click();
+    await expect(storage.getByText("Updated just now")).toBeVisible();
+    await expect(storage.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(methods).toContain("PATCH");
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("renders empty storage with Add note and no trash", async ({ page }) => {
+    await mockSessions(page, [], PROJECTS);
+    await mockCron(page);
+    const storage = await openStorage(page);
+    await expect(storage.getByText("Empty")).toBeVisible();
+    await expect(storage.getByRole("button", { name: "Clear storage" })).toHaveCount(0);
+    await expect(storage.getByRole("table")).toHaveCount(0);
+    await storage.getByRole("button", { name: "Add note" }).click();
+    await expect(storage.getByLabel("Storage note")).toHaveValue("");
+    await expect(storage.getByText("Later runs read this note")).toBeVisible();
+  });
+
+  test("clear asks inline; Cancel restores and Delete empties storage", async ({ page }) => {
+    await mockSessions(page, [], PROJECTS);
+    await mockCron(page);
+    const methods = await mockStorage(page, FILLED_STORAGE);
+    const storage = await openStorage(page);
+    await storage.getByRole("button", { name: "Clear storage" }).click();
+    await expect(storage.getByText("Delete note and 1 file?")).toBeVisible();
+    await storage.getByRole("button", { name: "Cancel" }).click();
+    await expect(storage.getByText("Delete note and 1 file?")).toBeHidden();
+    await expect(storage.getByText("1 file · 4.1 KB")).toBeVisible();
+    expect(methods).not.toContain("DELETE");
+
+    await storage.getByRole("button", { name: "Clear storage" }).click();
+    await storage.getByRole("button", { name: "Delete" }).click();
+    await expect(storage.getByText("Empty")).toBeVisible();
+    await expect(storage.getByRole("button", { name: "Add note" })).toBeVisible();
+    await expect(storage.getByRole("button", { name: "Clear storage" })).toHaveCount(0);
+    expect(methods).toContain("DELETE");
   });
 });

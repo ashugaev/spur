@@ -4722,6 +4722,7 @@ describe("startConfiguredTriggers", () => {
         },
         {
           triggerBirthKey: `${JSON.stringify(["api", "morning", "kickoff", "fanout-cron-occurrence-1"])}:1`,
+          cronOrigin: { projectId: "api", sourceId: "morning", triggerId: "kickoff" },
         },
       );
       expect(warnMock).toHaveBeenCalledWith(

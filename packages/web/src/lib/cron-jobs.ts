@@ -6,6 +6,7 @@ import type {
   CronJobEditUpdate,
   CronJobsResponse,
   CronSourceView,
+  CronStorageView,
   CronTriggerView,
 } from "@/lib/types";
 
@@ -88,6 +89,86 @@ export async function saveCronJobDraft(
       headers: { "content-type": "application/json" },
       body: JSON.stringify(update),
     }),
+  );
+}
+
+/** Daemon path of a Cron job's storage; the Next proxies append `/note` and `/files/...`. */
+export function cronStorageDaemonPath(projectId: string, triggerId: string): string {
+  return `/projects/${encodeURIComponent(projectId)}/cron/${encodeURIComponent(triggerId)}/storage`;
+}
+
+function cronStorageUrl(projectId: string, triggerId: string): string {
+  return `/api/cron/storage/${encodeURIComponent(projectId)}/${encodeURIComponent(triggerId)}`;
+}
+
+export function cronStorageFileUrl(
+  projectId: string,
+  triggerId: string,
+  artifactId: string,
+): string {
+  const path = artifactId
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  return `${cronStorageUrl(projectId, triggerId)}/files/${path}`;
+}
+
+function isCronStorageView(value: unknown): value is CronStorageView {
+  if (typeof value !== "object" || value === null) return false;
+  const view = value as Partial<Record<keyof CronStorageView, unknown>>;
+  return (
+    typeof view.note === "string" &&
+    Array.isArray(view.files) &&
+    typeof view.totalBytes === "number" &&
+    (view.noteUpdatedAt === null || typeof view.noteUpdatedAt === "string")
+  );
+}
+
+async function storageResponse(response: Response, action: string): Promise<CronStorageView> {
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = payload as { error?: unknown } | null;
+    throw new Error(
+      typeof error?.error === "string" ? error.error : `Could not ${action} storage.`,
+    );
+  }
+  if (!isCronStorageView(payload)) throw new Error(`Could not ${action} storage.`);
+  return payload;
+}
+
+export async function fetchCronStorage(
+  projectId: string,
+  triggerId: string,
+  signal: AbortSignal,
+): Promise<CronStorageView> {
+  return storageResponse(
+    await fetch(cronStorageUrl(projectId, triggerId), { cache: "no-store", signal }),
+    "load",
+  );
+}
+
+export async function saveCronStorageNote(
+  projectId: string,
+  triggerId: string,
+  note: string,
+): Promise<CronStorageView> {
+  return storageResponse(
+    await fetch(`${cronStorageUrl(projectId, triggerId)}/note`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ note }),
+    }),
+    "save",
+  );
+}
+
+export async function clearCronStorage(
+  projectId: string,
+  triggerId: string,
+): Promise<CronStorageView> {
+  return storageResponse(
+    await fetch(cronStorageUrl(projectId, triggerId), { method: "DELETE" }),
+    "clear",
   );
 }
 

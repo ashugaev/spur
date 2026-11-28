@@ -76,8 +76,24 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+const EMPTY_STORAGE = {
+  note: "",
+  noteUpdatedAt: null,
+  files: [],
+  totalBytes: 0,
+  updatedAt: null,
+  truncated: false,
+};
+
+// Expanded spawn rows load their Storage section; answer it apart from the job list.
+function storageResponse(url: string): Response | null {
+  return url.startsWith("/api/cron/storage/") ? jsonResponse(EMPTY_STORAGE) : null;
+}
+
 function stubFetch(handler: (url: string) => Response | Promise<Response>) {
-  const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve(handler(String(input))));
+  const fetchMock = vi.fn((input: RequestInfo | URL) =>
+    Promise.resolve(storageResponse(String(input)) ?? handler(String(input))),
+  );
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
@@ -167,6 +183,20 @@ describe("CronJobsModal", () => {
     expect(within(runs).getByText("Session")).toBeInTheDocument();
     expect(within(runs).getByRole("link", { name: "api-412" })).toBeInTheDocument();
     expect(within(settings).getByRole("button", { name: "Edit YAML" })).toBeEnabled();
+  });
+
+  it("places Storage between Settings and Recent runs for a spawn trigger only", async () => {
+    const fetchMock = stubFetch(() => jsonResponse(READY));
+    renderModal();
+    fireEvent.click((await screen.findByText("audit")).closest("button") as HTMLElement);
+    const headings = Array.from(document.querySelectorAll("h3")).map((node) => node.textContent);
+    expect(headings).toEqual(["Settings", "Storage", "Recent runs"]);
+    expect(await screen.findByText("Empty")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/api/cron/storage/api/audit", expect.anything());
+    fireEvent.click(screen.getByText("audit").closest("button") as HTMLElement);
+    fireEvent.click(screen.getByText("lonely").closest("button") as HTMLElement);
+    expect(screen.getByText("Settings")).toBeInTheDocument();
+    expect(screen.queryByText("Storage")).toBeNull();
   });
 
   it("shows the window start for an empty history, or no tick recorded without one", async () => {
@@ -278,7 +308,7 @@ function stubEditor(patch?: (body: CronJobEditUpdate) => Response | Promise<Resp
       }
       return jsonResponse(DRAFT);
     }
-    return jsonResponse(READY);
+    return storageResponse(String(input)) ?? jsonResponse(READY);
   });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
@@ -456,7 +486,7 @@ describe("CronJob editor", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
       String(input).startsWith("/api/cron/edit")
         ? jsonResponse({ error: "Only Cron spawn triggers can be edited." }, 422)
-        : jsonResponse(READY),
+        : (storageResponse(String(input)) ?? jsonResponse(READY)),
     );
     vi.stubGlobal("fetch", fetchMock);
     renderModal();
@@ -595,5 +625,6 @@ describe("CronJobsModal owner states", () => {
     ]);
     expect(pairs).toContainEqual(["Action", "send"]);
     expect(pairs).toContainEqual(["Prompt", "Post the hourly digest"]);
+    expect(screen.queryByText("Storage")).toBeNull();
   });
 });

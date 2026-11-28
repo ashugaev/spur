@@ -273,6 +273,39 @@ ${configured === undefined ? "" : `          ${key}: ${configured}`}
   );
 });
 
+describe("cron storage origin", () => {
+  it("passes cronOrigin in spawn options for a cron source, never in the request", async () => {
+    const f = fixture();
+    const controller = startConfiguredTriggers(f.deps);
+    try {
+      f.emit();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.spawn).toHaveBeenCalledTimes(1);
+      expect(f.spawn.mock.calls[0]?.[1]).toEqual({
+        triggerBirthKey: expect.any(String),
+        cronOrigin: { projectId: "test", sourceId: "tick", triggerId: "review" },
+      });
+      expect(f.spawn.mock.calls[0]?.[0]).not.toHaveProperty("cronOrigin");
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("omits cronOrigin for a non-cron source", async () => {
+    const f = fixture();
+    f.config.projects.test.sources.tick.type = "webhook";
+    const controller = startConfiguredTriggers(f.deps);
+    try {
+      f.emit();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.spawn).toHaveBeenCalledTimes(1);
+      expect(f.spawn.mock.calls[0]?.[1]).toEqual({ triggerBirthKey: expect.any(String) });
+    } finally {
+      await controller.stop();
+    }
+  });
+});
+
 describe("durable spawn admission", () => {
   it("keeps equal-payload occurrences and routes distinct across disk reload", async () => {
     const f = fixture();
@@ -604,7 +637,10 @@ describe("durable spawn admission", () => {
         prompt: "sibling",
         reuseWorkspaceSessionId: "test-1",
       });
-      expect(f.spawn.mock.calls[2]?.[1]).toEqual({ triggerBirthKey: pending.blocks[1]?.birthKey });
+      expect(f.spawn.mock.calls[2]?.[1]).toEqual({
+        triggerBirthKey: pending.blocks[1]?.birthKey,
+        cronOrigin: { projectId: "test", sourceId: "tick", triggerId: "review" },
+      });
       expect(readPendingSpawnWork(f.dataDir).size).toBe(0);
     } finally {
       await controller.stop();

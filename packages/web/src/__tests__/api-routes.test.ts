@@ -119,6 +119,12 @@ import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/
 import { GET as getCronJobs } from "@/app/api/cron/route";
 import { GET as getUsage } from "@/app/api/usage/route";
 import { GET as getCronDraft, PATCH as patchCronDraft } from "@/app/api/cron/edit/route";
+import {
+  DELETE as deleteCronStorage,
+  GET as getCronStorage,
+} from "@/app/api/cron/storage/[projectId]/[triggerId]/route";
+import { PATCH as patchCronStorageNote } from "@/app/api/cron/storage/[projectId]/[triggerId]/note/route";
+import { GET as getCronStorageFile } from "@/app/api/cron/storage/[projectId]/[triggerId]/files/[...path]/route";
 import { POST as postAutoUpdate } from "@/app/api/runtime/auto-update/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
@@ -5312,6 +5318,97 @@ describe("Spur web API routes", () => {
       );
       expect(response.status).toBe(400);
       expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    });
+
+    // ── /api/cron/storage/:projectId/:triggerId ───────────────────────────
+
+    const storageParams = { params: Promise.resolve({ projectId: "api", triggerId: "audit" }) };
+    const storageView = {
+      note: "carry",
+      noteUpdatedAt: null,
+      files: [],
+      totalBytes: 0,
+      updatedAt: null,
+      truncated: false,
+    };
+
+    it("GET and DELETE /api/cron/storage forward to the daemon storage path", async () => {
+      mockedSpurRequestJson.mockResolvedValue(storageView);
+      const url = "http://localhost:3000/api/cron/storage/api/audit";
+
+      const read = await getCronStorage(new Request(url), storageParams);
+      const cleared = await deleteCronStorage(
+        new Request(url, { method: "DELETE" }),
+        storageParams,
+      );
+
+      expect(await read.json()).toEqual(storageView);
+      expect(cleared.status).toBe(200);
+      expect(mockedSpurRequestJson.mock.calls).toEqual([
+        ["/projects/api/cron/audit/storage", { timeoutMs: 10_000 }],
+        ["/projects/api/cron/audit/storage", { method: "DELETE" }],
+      ]);
+    });
+
+    it("GET /api/cron/storage preserves a daemon 409", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("not a real directory", 409));
+
+      const response = await getCronStorage(
+        new Request("http://localhost:3000/api/cron/storage/api/audit"),
+        storageParams,
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: "not a real directory" });
+    });
+
+    it("PATCH /api/cron/storage note forwards the body; malformed JSON stays local", async () => {
+      mockedSpurRequestJson.mockResolvedValue(storageView);
+      const url = "http://localhost:3000/api/cron/storage/api/audit/note";
+
+      const saved = await patchCronStorageNote(
+        new NextRequest(url, { method: "PATCH", body: JSON.stringify({ note: "carry" }) }),
+        storageParams,
+      );
+      const malformed = await patchCronStorageNote(
+        new NextRequest(url, { method: "PATCH", body: "{" }),
+        storageParams,
+      );
+
+      expect(await saved.json()).toEqual(storageView);
+      expect(malformed.status).toBe(400);
+      expect(mockedSpurRequestJson).toHaveBeenCalledTimes(1);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/projects/api/cron/audit/storage/note",
+        expect.objectContaining({ method: "PATCH", body: JSON.stringify({ note: "carry" }) }),
+      );
+    });
+
+    it("GET /api/cron/storage files encodes nested segments and sandboxes html", async () => {
+      mockedSpurRequest.mockResolvedValue(
+        new Response("<p>hi</p>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        }),
+      );
+
+      const response = await getCronStorageFile(
+        new Request("http://localhost:3000/api/cron/storage/api/audit/files/runs/a%20b.html"),
+        {
+          params: Promise.resolve({
+            projectId: "api",
+            triggerId: "audit",
+            path: ["runs", "a b.html"],
+          }),
+        },
+      );
+
+      expect(mockedSpurRequest).toHaveBeenCalledWith(
+        "/projects/api/cron/audit/storage/files/runs/a%20b.html",
+      );
+      expect(response.headers.get("content-security-policy")).toBe(
+        "sandbox allow-scripts allow-forms allow-popups allow-modals",
+      );
     });
   });
 

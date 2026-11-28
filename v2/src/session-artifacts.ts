@@ -494,7 +494,11 @@ function classifyUnknownDirent(
  * work dir) is never listed or walked.
  */
 export function listSessionArtifacts(dataDir: string, sessionId: string): ArtifactWalkResult {
-  const dir = sessionArtifactsDir(dataDir, sessionId);
+  return listArtifactsInDir(sessionArtifactsDir(dataDir, sessionId));
+}
+
+/** listSessionArtifacts walk over any artifacts root `dir`; same bounds and containment. */
+export function listArtifactsInDir(dir: string): ArtifactWalkResult {
   if (!existsSync(dir)) {
     return { artifacts: [], truncated: false };
   }
@@ -777,11 +781,15 @@ export function readSessionArtifact(
   sessionId: string,
   artifactId: string,
 ): SessionArtifactFile | null {
+  return readArtifactInDir(sessionArtifactsDir(dataDir, sessionId), artifactId);
+}
+
+/** readSessionArtifact over any artifacts root `dir`; same id parsing and realpath containment. */
+export function readArtifactInDir(dir: string, artifactId: string): SessionArtifactFile | null {
   const normalizedId = parseArtifactRelativePath(artifactId);
   if (normalizedId === null) {
     return null;
   }
-  const dir = sessionArtifactsDir(dataDir, sessionId);
   const path = join(dir, normalizedId);
   let resolvedRoot: string;
   let resolvedPath: string;

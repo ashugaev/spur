@@ -1760,6 +1760,27 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, "api-3")?.snapshotNudge).toBeUndefined();
   });
 
+  it("round-trips cronOrigin and drops a malformed one", async () => {
+    const dataDir = await newDataDir();
+    const cronOrigin = { projectId: "api", sourceId: "tick", triggerId: "review" };
+    writeSession(dataDir, { ...legacyBase, id: "api-2", tmuxSession: "api-2", cronOrigin });
+    expect(readSession(dataDir, "api-2")?.cronOrigin).toEqual(cronOrigin);
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-3",
+      tmuxSession: "api-3",
+      cronOrigin: { projectId: "api", sourceId: "tick", triggerId: "../x" },
+    });
+    expect(readSession(dataDir, "api-3")?.cronOrigin).toBeUndefined();
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-4",
+      tmuxSession: "api-4",
+      cronOrigin: { projectId: "api", sourceId: "tick" } as never,
+    });
+    expect(readSession(dataDir, "api-4")?.cronOrigin).toBeUndefined();
+  });
+
   it("round-trips authChangePing and drops malformed claims", async () => {
     const dataDir = await newDataDir();
     const claim = { key: "2:backup", attempts: 2, pinged: false };

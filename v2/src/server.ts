@@ -22,10 +22,17 @@ import {
 } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService, redactAutoPingHandles } from "./auto-ping.js";
-import { assertConfigMayUseProdSlot } from "./config.js";
+import { assertConfigMayUseProdSlot, PROJECT_ID_PATTERN } from "./config.js";
 import { PrAlertOwnerRequestError } from "./pr-alert-owner.js";
 import { projectConversationPage } from "./conversation-page.js";
 import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
+import {
+  clearCronStorage,
+  CronStorageRootError,
+  readCronStorage,
+  readCronStorageFile,
+  writeCronStorageNote,
+} from "./cron-storage.js";
 import {
   CronJobEditError,
   cronJobIdentity,
@@ -172,7 +179,7 @@ import {
   TodoTransitionConflictError,
 } from "./todo.js";
 import { CLOSEOUT_VERSION, CloseoutCorruptError } from "./closeout-archive.js";
-import { parseArtifactRelativePath } from "./session-artifacts.js";
+import { parseArtifactRelativePath, type SessionArtifactFile } from "./session-artifacts.js";
 import {
   InvalidSnapshotRequestError,
   SnapshotConflictError,
@@ -536,6 +543,75 @@ function parseCloseoutVersion(params: URLSearchParams): number | undefined | nul
 
 function sendError(response: ServerResponse, statusCode: number, message: string): void {
   sendJson(response, statusCode, { error: message } satisfies JsonError);
+}
+
+/**
+ * Decodes each slash-separated segment of an artifact path. null on an invalid
+ * percent-encoding: such an id can never match a real artifact, so callers answer 404.
+ */
+function decodeArtifactPath(raw: string): string | null {
+  try {
+    return raw
+      .split("/")
+      .map((segment) => decodeURIComponent(segment))
+      .join("/");
+  } catch {
+    return null;
+  }
+}
+
+/** Streams an artifact file; the one path for HTML sandbox CSP and SVG-as-download. */
+function sendArtifactFile(response: ServerResponse, artifact: SessionArtifactFile): void {
+  // An SVG opened as a top-level document runs its own scripts on Spur's origin,
+  // and browsers ignore a CSP sandbox on image documents, so hand it over as a
+  // download instead. <img> previews ignore content-disposition and still render.
+  const renderInline = artifact.kind !== "download" && artifact.mimeType !== "image/svg+xml";
+  response.writeHead(200, {
+    "content-type": artifact.mimeType,
+    "content-length": String(artifact.size),
+    "content-disposition": `${renderInline ? "inline" : "attachment"}; filename="${encodeURIComponent(basename(artifact.name))}"`,
+    "cache-control": "no-store",
+    // Artifact HTML is agent-authored: render it in an opaque origin so it can
+    // never read Spur's storage or call the API with the operator's session.
+    ...(artifact.mimeType.startsWith("text/html")
+      ? { "content-security-policy": ARTIFACT_HTML_SANDBOX }
+      : {}),
+  });
+  const stream = createReadStream(artifact.path);
+  stream.on("error", () => {
+    if (!response.headersSent) {
+      sendError(response, 500, "Failed to read artifact");
+    } else {
+      response.destroy();
+    }
+  });
+  stream.pipe(response);
+}
+
+/** Decoded cron storage ids; null when either fails PROJECT_ID_PATTERN or its encoding. */
+function cronStorageIds(
+  rawProjectId: string,
+  rawTriggerId: string,
+): { projectId: string; triggerId: string } | null {
+  let projectId: string;
+  let triggerId: string;
+  try {
+    projectId = decodeURIComponent(rawProjectId);
+    triggerId = decodeURIComponent(rawTriggerId);
+  } catch {
+    return null;
+  }
+  return PROJECT_ID_PATTERN.test(projectId) && PROJECT_ID_PATTERN.test(triggerId)
+    ? { projectId, triggerId }
+    : null;
+}
+
+function parseCronStorageNoteBody(value: unknown): string | null {
+  if (!isRecord(value) || Array.isArray(value)) return null;
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === "note" && typeof value.note === "string"
+    ? value.note
+    : null;
 }
 
 interface FailRequestOptions {
@@ -1789,6 +1865,112 @@ export async function startServer(
         return;
       }
 
+      const cronStorageMatch = path.match(/^\/projects\/([^/]+)\/cron\/([^/]+)\/storage$/);
+      if (
+        (method === "GET" || method === "DELETE") &&
+        cronStorageMatch?.[1] &&
+        cronStorageMatch[2]
+      ) {
+        const ids = cronStorageIds(cronStorageMatch[1], cronStorageMatch[2]);
+        if (!ids) {
+          sendError(response, 400, "Invalid cron storage project or trigger id");
+          return;
+        }
+        try {
+          const read = method === "GET" ? readCronStorage : clearCronStorage;
+          sendJson(response, 200, read(service.config.dataDir, ids.projectId, ids.triggerId));
+        } catch (error) {
+          if (!(error instanceof CronStorageRootError)) throw error;
+          sendError(response, 409, error.message);
+        }
+        return;
+      }
+
+      const cronStorageNoteMatch = path.match(
+        /^\/projects\/([^/]+)\/cron\/([^/]+)\/storage\/note$/,
+      );
+      if (method === "PATCH" && cronStorageNoteMatch?.[1] && cronStorageNoteMatch[2]) {
+        const ids = cronStorageIds(cronStorageNoteMatch[1], cronStorageNoteMatch[2]);
+        if (!ids) {
+          sendError(response, 400, "Invalid cron storage project or trigger id");
+          return;
+        }
+        const project = Object.hasOwn(service.config.projects, ids.projectId)
+          ? service.config.projects[ids.projectId]
+          : undefined;
+        const trigger =
+          project && Object.hasOwn(project.triggers, ids.triggerId)
+            ? project.triggers[ids.triggerId]
+            : undefined;
+        if (
+          !trigger ||
+          !("spawn" in trigger) ||
+          project?.sources[trigger.source]?.type !== "cron"
+        ) {
+          sendError(
+            response,
+            404,
+            `Cron spawn trigger not found: ${ids.projectId}/${ids.triggerId}`,
+          );
+          return;
+        }
+        const note = parseCronStorageNoteBody(await readJsonBody<unknown>(request));
+        if (note === null) {
+          sendError(response, 400, "Body must be exactly {note: string}");
+          return;
+        }
+        try {
+          sendJson(
+            response,
+            200,
+            writeCronStorageNote(service.config.dataDir, ids.projectId, ids.triggerId, note),
+          );
+        } catch (error) {
+          if (!(error instanceof CronStorageRootError)) throw error;
+          sendError(response, 409, error.message);
+        }
+        return;
+      }
+
+      const cronStorageFileMatch = path.match(
+        /^\/projects\/([^/]+)\/cron\/([^/]+)\/storage\/files\/(.+)$/,
+      );
+      if (
+        method === "GET" &&
+        cronStorageFileMatch?.[1] &&
+        cronStorageFileMatch[2] &&
+        cronStorageFileMatch[3]
+      ) {
+        const ids = cronStorageIds(cronStorageFileMatch[1], cronStorageFileMatch[2]);
+        if (!ids) {
+          sendError(response, 400, "Invalid cron storage project or trigger id");
+          return;
+        }
+        const artifactId = decodeArtifactPath(cronStorageFileMatch[3]);
+        let artifact: SessionArtifactFile | null;
+        try {
+          artifact =
+            artifactId === null
+              ? null
+              : readCronStorageFile(
+                  service.config.dataDir,
+                  ids.projectId,
+                  ids.triggerId,
+                  artifactId,
+                );
+        } catch (error) {
+          if (!(error instanceof CronStorageRootError)) throw error;
+          sendError(response, 409, error.message);
+          return;
+        }
+        if (!artifact) {
+          sendError(response, 404, `Cron storage file not found: ${cronStorageFileMatch[3]}`);
+          return;
+        }
+        sendArtifactFile(response, artifact);
+        return;
+      }
+
       if (method === "GET" && path === "/backlog/available") {
         sendJson(response, 200, service.listAvailableBacklog());
         return;
@@ -2405,47 +2587,16 @@ export async function startServer(
 
       const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/(.+)$/);
       if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
-        // An invalid percent-encoding in any segment (decodeURIComponent throws URIError)
-        // is not a malformed request — it just can never match a real artifact id. Treat
-        // it as a not-found id, same as any other id the store doesn't recognize, rather
-        // than letting it fall through to the generic 500 handler.
-        let sessionId: string;
-        let artifactId: string;
-        try {
-          sessionId = decodeURIComponent(artifactMatch[1]);
-          artifactId = artifactMatch[2]
-            .split("/")
-            .map((segment) => decodeURIComponent(segment))
-            .join("/");
-        } catch {
+        // An invalid percent-encoding in any segment is not a malformed request — it just
+        // can never match a real artifact id. Treat it as a not-found id rather than
+        // letting it fall through to the generic 500 handler.
+        const sessionId = decodeArtifactPath(artifactMatch[1]);
+        const artifactId = decodeArtifactPath(artifactMatch[2]);
+        if (sessionId === null || artifactId === null) {
           sendError(response, 404, `Artifact not found: ${artifactMatch[1]}/${artifactMatch[2]}`);
           return;
         }
-        const artifact = service.getArtifact(sessionId, artifactId);
-        // An SVG opened as a top-level document runs its own scripts on Spur's origin,
-        // and browsers ignore a CSP sandbox on image documents, so hand it over as a
-        // download instead. <img> previews ignore content-disposition and still render.
-        const renderInline = artifact.kind !== "download" && artifact.mimeType !== "image/svg+xml";
-        response.writeHead(200, {
-          "content-type": artifact.mimeType,
-          "content-length": String(artifact.size),
-          "content-disposition": `${renderInline ? "inline" : "attachment"}; filename="${encodeURIComponent(basename(artifact.name))}"`,
-          "cache-control": "no-store",
-          // Artifact HTML is agent-authored: render it in an opaque origin so it can
-          // never read Spur's storage or call the API with the operator's session.
-          ...(artifact.mimeType.startsWith("text/html")
-            ? { "content-security-policy": ARTIFACT_HTML_SANDBOX }
-            : {}),
-        });
-        const stream = createReadStream(artifact.path);
-        stream.on("error", () => {
-          if (!response.headersSent) {
-            sendError(response, 500, "Failed to read artifact");
-          } else {
-            response.destroy();
-          }
-        });
-        stream.pipe(response);
+        sendArtifactFile(response, service.getArtifact(sessionId, artifactId));
         return;
       }
 

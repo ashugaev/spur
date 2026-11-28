@@ -420,6 +420,7 @@ import {
   type SessionArtifactFile,
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
+import { cronStorageInstructions, ensureCronStorageDir } from "./cron-storage.js";
 import { sidecarOwnerId, workspaceIdOf } from "./session-desk.js";
 import {
   createArtifactRetentionDeps,
@@ -544,6 +545,7 @@ import {
   type CompleteSessionRequest,
   type ConversationMessage,
   type ConversationResponse,
+  type CronSpawnOrigin,
   type CreateProjectRequest,
   type CreateProjectResponse,
   type DashboardSessionView,
@@ -1676,6 +1678,7 @@ type PreparedHandoff = {
     validatedLaunchSelection: AgentLaunchSelection;
     receiptToken: symbol;
     inheritedTodo?: HandoffTodoItem[];
+    cronOrigin?: CronSpawnOrigin;
   };
 };
 
@@ -2815,6 +2818,7 @@ function buildInitialMessage(
   selfDestruct?: SelfDestructConfig,
   telegramInstructions?: string,
   githubInstructions?: string,
+  cronStorageInstructions?: string,
 ): string {
   let base = initialMessage.trim()
     ? withSelfDestructInstructions(
@@ -2837,6 +2841,9 @@ function buildInitialMessage(
   }
   if (githubInstructions) {
     base = `${base}\n\n${githubInstructions}`;
+  }
+  if (cronStorageInstructions) {
+    base = `${base}\n\n${cronStorageInstructions}`;
   }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
@@ -3081,6 +3088,7 @@ function buildSessionEnv(args: {
   symlinks: string[];
   closeoutOwner?: boolean;
   agentLaunchId?: string;
+  cronOrigin?: CronSpawnOrigin;
   extraEnv?: Record<string, string>;
 }): Record<string, string> {
   const env: Record<string, string> = {
@@ -3133,6 +3141,13 @@ function buildSessionEnv(args: {
   // Page dirs are Spur-created: skip Claude's per-folder trust dialog.
   if (args.agent === "claude" && isPageProjectId(args.projectId)) {
     env[CLAUDE_PAGE_TRUST_ENV] = "1";
+  }
+  if (args.cronOrigin) {
+    env["SPUR_CRON_STORAGE_DIR"] = ensureCronStorageDir(
+      args.dataDir,
+      args.cronOrigin.projectId,
+      args.cronOrigin.triggerId,
+    );
   }
   return {
     ...env,
@@ -3647,6 +3662,8 @@ interface SessionSpawnOptions {
   acceptQueued?: boolean;
   /** Set by source adapters, never from the HTTP body. */
   telegramOrigin?: TelegramSpawnOrigin;
+  /** Set by cron source spawn triggers and handoff/respawn carry, never from the HTTP body. */
+  cronOrigin?: CronSpawnOrigin;
   triggerBirthKey?: string;
 }
 
@@ -3702,6 +3719,7 @@ interface BackgroundSpawnOptions {
   triggerBirthRequest?: SpawnSessionRequest;
   modeResolution?: "strict" | "carried";
   telegramOrigin?: TelegramSpawnOrigin;
+  cronOrigin?: CronSpawnOrigin;
   promptKind?: UserInputKind;
   validatedLaunchSelection?: AgentLaunchSelection;
   closeoutOwnerTransfer?: boolean;
@@ -12204,6 +12222,7 @@ export class SessionService {
       repoPath: args.project.path,
       symlinks: args.project.symlinks,
       closeoutOwner: reservedSession.closeoutOwner === true,
+      ...(reservedSession.cronOrigin ? { cronOrigin: reservedSession.cronOrigin } : {}),
       ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
     });
 
@@ -15218,6 +15237,7 @@ export class SessionService {
         ...(options?.triggerBirthKey && triggerBirthRequest
           ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
           : {}),
+        ...(options?.cronOrigin ? { cronOrigin: options.cronOrigin } : {}),
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
@@ -15380,6 +15400,7 @@ export class SessionService {
               options?.telegramOrigin?.sourceId,
             ),
             githubPostInstructions(project, sessionId),
+            options?.cronOrigin ? cronStorageInstructions(!planMode && !restrictWrites) : undefined,
           );
       const budgetLimited = this.holdBudgetLimitedLaunch({
         ...placeholder,
@@ -15482,6 +15503,7 @@ export class SessionService {
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
         agentLaunchId,
+        ...(runningRecord.cronOrigin ? { cronOrigin: runningRecord.cronOrigin } : {}),
         extraEnv: {
           ...sessionAgentConfig.env,
           ...(await managedAuthLaunch(authRegistration, sessionToolDir)).env,
@@ -15834,6 +15856,7 @@ export class SessionService {
             ...(options?.triggerBirthKey && triggerBirthRequest
               ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
               : {}),
+            ...(options?.cronOrigin ? { cronOrigin: options.cronOrigin } : {}),
             workspaceId: failedSpawnSession.workspaceId,
             agent,
             prompt,
@@ -16715,6 +16738,7 @@ export class SessionService {
         ...(options.triggerBirthKey && triggerBirthRequest
           ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
           : {}),
+        ...(options.cronOrigin ? { cronOrigin: options.cronOrigin } : {}),
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
@@ -16890,6 +16914,7 @@ export class SessionService {
           ...(options.triggerBirthKey && triggerBirthRequest
             ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
             : {}),
+          ...(options.cronOrigin ? { cronOrigin: options.cronOrigin } : {}),
           workspaceId: erroredWorkspaceId,
           agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
           prompt,
@@ -17197,6 +17222,9 @@ export class SessionService {
               telegramOrigin?.sourceId,
             ),
             githubPostInstructions(project, sessionId),
+            spawnPlaceholder.cronOrigin
+              ? cronStorageInstructions(!planMode && !restrictWrites)
+              : undefined,
           );
       const budgetLimited = this.holdBudgetLimitedLaunch({
         ...spawnPlaceholder,
@@ -17307,6 +17335,7 @@ export class SessionService {
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
         agentLaunchId,
+        ...(runningRecord.cronOrigin ? { cronOrigin: runningRecord.cronOrigin } : {}),
         ...(sessionAgentConfig.env || managedLaunch.env
           ? { extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env } }
           : {}),
@@ -24430,6 +24459,7 @@ export class SessionService {
         readTelegramReplyTarget(this.config.dataDir, session.id)?.lastInboundAt !== undefined,
       ),
       githubPostInstructions(project, session.id),
+      session.cronOrigin ? cronStorageInstructions(!planMode && !restrictWrites) : undefined,
     );
     const planOptions = {
       ...withAgentModeOptions(
@@ -24487,6 +24517,7 @@ export class SessionService {
         symlinks: this.getProject(session.project).symlinks,
         closeoutOwner: session.closeoutOwner === true,
         agentLaunchId,
+        ...(session.cronOrigin ? { cronOrigin: session.cronOrigin } : {}),
         extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env },
       });
     let agentLaunchId = newAgentLaunchId();
@@ -25431,6 +25462,7 @@ export class SessionService {
         symlinks: this.getProject(current.project).symlinks,
         closeoutOwner: current.closeoutOwner === true,
         agentLaunchId: restoreAgentLaunchId,
+        ...(current.cronOrigin ? { cronOrigin: current.cronOrigin } : {}),
         extraEnv: { ...sessionAgentConfig.env, ...managedLaunch.env },
       });
 
@@ -25543,6 +25575,9 @@ export class SessionService {
             readTelegramReplyTarget(this.config.dataDir, current.id)?.lastInboundAt !== undefined,
           ),
           githubPostInstructions(restoreProject, current.id),
+          current.cronOrigin
+            ? cronStorageInstructions(!resolvePlanMode(current) && !resolveRestrictWrites(current))
+            : undefined,
         );
         // The fallback relaunched the agent instead of resuming it, so this is a
         // launch send with no transcript behind it, same as a spawn's. Binding
@@ -26680,6 +26715,7 @@ export class SessionService {
         closeoutOwnerTransfer: session.closeoutOwner === true,
         ...(prAlertOwnerTransfer ? { prAlertOwnerTransfer } : {}),
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
+        ...(session.cronOrigin ? { cronOrigin: session.cronOrigin } : {}),
       },
     );
     this.transitionsBinding?.store.observeStatus(
@@ -27462,6 +27498,7 @@ export class SessionService {
           validatedLaunchSelection: launchSelection,
           receiptToken,
           ...(inheritedTodo.length > 0 ? { inheritedTodo } : {}),
+          ...(sourceForSpawn.cronOrigin ? { cronOrigin: sourceForSpawn.cronOrigin } : {}),
         },
       };
     } catch (error) {
@@ -31029,6 +31066,7 @@ export class SessionService {
       taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      cronOrigin: _cronOrigin,
       handoffIdempotency: _handoffIdempotency,
       blockedTriggerNotices: _blockedTriggerNotices,
       spawnIntent: _spawnIntent,
@@ -31519,6 +31557,7 @@ export class SessionService {
       taskStatusRevision: _taskStatusRevision,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      cronOrigin: _cronOrigin,
       handoffIdempotency: _handoffIdempotency,
       blockedTriggerNotices: _blockedTriggerNotices,
       spawnIntent: _spawnIntent,

@@ -126,6 +126,17 @@ export interface CronJobsResponse {
   eventsSince: string | null;
 }
 
+export interface CronStorageView {
+  note: string;
+  noteUpdatedAt: string | null;
+  files: SpurSessionArtifact[];
+  /** Sum of `files` sizes; note excluded. */
+  totalBytes: number;
+  /** Latest mtime across files and note. */
+  updatedAt: string | null;
+  truncated: boolean;
+}
+
 export type QuotaProvider = "claude" | "codex";
 
 export interface QuotaWindow {

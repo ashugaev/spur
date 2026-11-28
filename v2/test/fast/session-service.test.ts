@@ -9969,6 +9969,371 @@ describe("SessionService", () => {
     });
   });
 
+  describe("cron storage", () => {
+    const cronOrigin = { projectId: "api", sourceId: "tick", triggerId: "review" };
+    const storageDir = () => join(TEST_DATA_DIR, "cron-storage", "api", "review");
+    const updateLine = "Before you finish, update";
+
+    function lastLaunchEnv(): Record<string, string> | undefined {
+      return createTmuxSessionMock.mock.calls.at(-1)?.[0]?.env;
+    }
+
+    function mockRestorablePane() {
+      let restoredTmuxCreated = false;
+      createTmuxSessionMock.mockImplementation(async () => {
+        restoredTmuxCreated = true;
+      });
+      getTmuxSessionPresenceMock.mockImplementation(async () => ({
+        present: restoredTmuxCreated,
+        unresponsive: false,
+      }));
+      getTmuxPanePresenceMock.mockImplementation(async () => ({
+        dead: !restoredTmuxCreated,
+        unresponsive: false,
+      }));
+      probeTmuxProcessMatchMock.mockImplementation(async () => ({
+        alive: restoredTmuxCreated,
+        matchedByName: restoredTmuxCreated,
+        unresponsive: false,
+      }));
+    }
+
+    function seedCronSession(overrides: Partial<SessionRecord> = {}) {
+      return createSessionStore(
+        sessionRecord({
+          id: "api-1",
+          prompt: "hello",
+          status: "stopped",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          cronOrigin,
+          ...overrides,
+        }),
+      );
+    }
+
+    it("gives a cron spawn the storage env and the prompt block before Sidecars", async () => {
+      mockClaudeJsonlState("waiting");
+      const config = configWithGitHub({
+        chat: {
+          type: "telegram",
+          runOnStart: false,
+          token: "token-123",
+          allowedUsers: [123],
+          chatId: -1001,
+        },
+        review: {
+          type: "github",
+          runOnStart: false,
+          intervalMs: 60_000,
+          selfMarker: "[AI-generated, session: {session}]",
+          signPosts: true,
+        },
+      });
+      loadConfigMock.mockReturnValue({
+        ...config,
+        projects: {
+          api: {
+            ...config.projects.api,
+            triggers: {
+              tg: { source: "chat", event: "telegram:message", send: { interrupt: false } },
+            },
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn(
+        { project: "api", prompt: "hello" },
+        { cronOrigin, telegramOrigin: { projectId: "api", sourceId: "chat", chatId: 4242 } },
+      );
+
+      expect(lastLaunchEnv()?.SPUR_CRON_STORAGE_DIR).toBe(storageDir());
+      expect(existsSync(storageDir())).toBe(true);
+      const prompt = String(sendMessageToTmuxMock.mock.calls[0]?.[1]);
+      expect(prompt.indexOf("Telegram:")).toBeGreaterThanOrEqual(0);
+      expect(prompt.indexOf("Telegram:")).toBeLessThan(prompt.indexOf("GitHub posts:"));
+      expect(prompt.indexOf("GitHub posts:")).toBeLessThan(prompt.indexOf("Cron storage:"));
+      expect(prompt.indexOf("Cron storage:")).toBeLessThan(prompt.indexOf("Sidecars:"));
+      expect(prompt).toContain(updateLine);
+      expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({ cronOrigin });
+      service.dispose();
+    });
+
+    it("leaves a non-cron spawn without the env key and the block", async () => {
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(lastLaunchEnv()).not.toHaveProperty("SPUR_CRON_STORAGE_DIR");
+      expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
+        `slot-instructions\nhello\n\n${TODO_PROMPT}`,
+      );
+      expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("cronOrigin");
+      service.dispose();
+    });
+
+    it.each([{ restrictWrites: true }, { planMode: true }])(
+      "gives a read-only block for %j",
+      async (readOnly) => {
+        mockClaudeJsonlState("waiting");
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await service.spawn({ project: "api", prompt: "hello", ...readOnly }, { cronOrigin });
+
+        const prompt = String(buildAgentLaunchPlanMock.mock.calls[0]?.[1]);
+        expect(prompt).toContain("Cron storage:");
+        expect(prompt).toContain("Read `note.md`");
+        expect(prompt).not.toContain(updateLine);
+        service.dispose();
+      },
+    );
+
+    it("passes the env to sidecars of a cron session only", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      reserveNextSessionIdMock.mockResolvedValueOnce("api-1").mockResolvedValueOnce("api-2");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const cron = await service.spawn({ project: "api", prompt: "hello" }, { cronOrigin });
+      await service.startSidecar(cron.id, "dev");
+      expect(createTmuxSidecarSessionMock.mock.calls.at(-1)?.[0]?.env).toMatchObject({
+        SPUR_CRON_STORAGE_DIR: storageDir(),
+      });
+
+      const plain = await service.spawn({ project: "api", prompt: "hello" });
+      await service.startSidecar(plain.id, "dev");
+      expect(createTmuxSidecarSessionMock.mock.calls.at(-1)?.[0]?.env).not.toHaveProperty(
+        "SPUR_CRON_STORAGE_DIR",
+      );
+      service.dispose();
+    });
+
+    it("launches an admission-queued cron spawn with the env and the block", async () => {
+      mockClaudeJsonlState("waiting");
+      const config = baseConfig();
+      config.admission.maxLiveSessions = 1;
+      loadConfigMock.mockReturnValue(config);
+      const sessions = createSessionStore();
+      const live = sessionRecord({ id: "api-1", worktree: true });
+      sessions.set(live.id, live);
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      const service = await createDisposedSessionService();
+      try {
+        const queued = await service.spawn(
+          { project: "api", prompt: "tick" },
+          { cronOrigin, acceptQueued: true },
+        );
+        expect(queued.status).toBe("spawning");
+        expect(sessions.get(queued.id)?.cronOrigin).toEqual(cronOrigin);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+
+        sessions.set(live.id, { ...live, status: "completed" });
+        (service as unknown as { drainSpawnAdmissions(): void }).drainSpawnAdmissions();
+        await service.settleBackgroundSpawns();
+
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(lastLaunchEnv()?.SPUR_CRON_STORAGE_DIR).toBe(storageDir());
+        expect(existsSync(storageDir())).toBe(true);
+        expect(String(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1])).toContain("Cron storage:");
+      } finally {
+        service.dispose();
+        await service.settleBackgroundSpawns();
+      }
+    });
+
+    it.each(["running", "stopped"] as const)(
+      "restores a %s cron session natively with the env and the block",
+      async (status) => {
+        mockClaudeJsonlState("waiting");
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        seedCronSession({ status });
+        mockRestorablePane();
+        const service = await createDisposedSessionService();
+
+        await service.restore("api-1");
+
+        expect(buildAgentRestorePlanMock).toHaveBeenCalled();
+        expect(lastLaunchEnv()?.SPUR_CRON_STORAGE_DIR).toBe(storageDir());
+        expect(String(sendMessageToTmuxMock.mock.calls.at(-1)?.[1])).toContain("Cron storage:");
+      },
+    );
+
+    it("recreates a cleared storage dir on a fresh-launch restore", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValue(null);
+      buildAgentRestorePlanMock.mockResolvedValue(null);
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      seedCronSession();
+      mockRestorablePane();
+      rmSync(join(TEST_DATA_DIR, "cron-storage"), { recursive: true, force: true });
+      const service = await createDisposedSessionService();
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: true,
+        lastScannedFile: null,
+      });
+      mockTimerPromisesSleepWithFakeTimers();
+
+      await service.restore("api-1");
+
+      expect(lastLaunchEnv()?.SPUR_CRON_STORAGE_DIR).toBe(storageDir());
+      expect(existsSync(storageDir())).toBe(true);
+      expect(String(sendMessageToTmuxMock.mock.calls.at(-1)?.[1])).toContain("Cron storage:");
+    });
+
+    it.each([{ status: "paused" as const }, { stopReason: "manual_pause" as const }])(
+      "sends no launch message when restoring %j",
+      async (state) => {
+        mockClaudeJsonlState("waiting");
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        seedCronSession(state);
+        mockRestorablePane();
+        const service = await createDisposedSessionService();
+
+        await service.restore("api-1");
+
+        expect(lastLaunchEnv()?.SPUR_CRON_STORAGE_DIR).toBe(storageDir());
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it("relaunches a dead cron session on send with the env and the block", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          status: "stopped",
+          stopReason: "stale_timeout",
+          prompt: "original recovery task",
+          cronOrigin,
+        }),
+      );
+      await useRealTodoLedger();
+      listSessionsMock.mockReturnValue([]);
+      let relaunched = false;
+      tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+      isProcessRunningInTmuxMock.mockImplementation(async () => relaunched);
+      createTmuxSessionMock
+        .mockRejectedValueOnce(new Error("resume failed"))
+        .mockImplementation(async () => {
+          relaunched = true;
+        });
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService();
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: true,
+        lastScannedFile: null,
+      });
+
+      await service.send("api-1", { message: "trigger after recovery", queue: false });
+
+      expect(lastLaunchEnv()?.SPUR_CRON_STORAGE_DIR).toBe(storageDir());
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("Cron storage:"),
+        expect.anything(),
+      );
+    });
+
+    it("carries cronOrigin to a handoff successor", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          cronOrigin,
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      const service = await createDisposedSessionService();
+
+      await service.handoff("api-1", { agent: "claude" });
+
+      expect(sessions.get("api-2")?.cronOrigin).toEqual(cronOrigin);
+      expect(lastLaunchEnv()?.SPUR_CRON_STORAGE_DIR).toBe(storageDir());
+    });
+
+    it("carries cronOrigin to a respawn successor", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", status: "completed", cronOrigin }));
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      const service = await createDisposedSessionService();
+
+      const successor = await service.respawn("api-1");
+
+      expect(sessions.get(successor.id)?.cronOrigin).toEqual(cronOrigin);
+      expect(lastLaunchEnv()?.SPUR_CRON_STORAGE_DIR).toBe(storageDir());
+    });
+
+    it("keeps cronOrigin on the errored record of a failed cron launch", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      reserveNextSessionIdMock.mockResolvedValue("api-1");
+      createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const service = await createDisposedSessionService();
+
+      await expect(
+        service.spawn({ project: "api", prompt: "tick" }, { cronOrigin }),
+      ).rejects.toThrow("tmux boom");
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        error: "tmux boom",
+        cronOrigin,
+      });
+    });
+
+    it("keeps cronOrigin on the errored record of a failed queued cron spawn", async () => {
+      mockClaudeJsonlState("waiting");
+      const config = baseConfig();
+      config.admission.maxLiveSessions = 1;
+      loadConfigMock.mockReturnValue(config);
+      const sessions = createSessionStore();
+      const live = sessionRecord({ id: "api-1", worktree: true });
+      sessions.set(live.id, live);
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      const service = await createDisposedSessionService();
+      vi.spyOn(
+        service as unknown as { logUserInput(...args: unknown[]): void },
+        "logUserInput",
+      ).mockImplementationOnce(() => {
+        throw new Error("log boom");
+      });
+
+      await expect(
+        service.spawn({ project: "api", prompt: "tick" }, { cronOrigin, acceptQueued: true }),
+      ).rejects.toThrow("log boom");
+
+      expect(sessions.get("api-2")).toMatchObject({ status: "errored", cronOrigin });
+    });
+  });
+
   it("emits the project default mode line in the launch prompt", async () => {
     mockClaudeJsonlState("waiting");
     loadConfigMock.mockReturnValue(configWithModes());

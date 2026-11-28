@@ -1326,6 +1326,8 @@ export interface SessionRecord {
   /** Internal durable trigger birth identity and original request. */
   triggerBirthKey?: string;
   triggerBirthRequest?: SpawnSessionRequest;
+  /** Cron job whose storage dir this session gets; set only by cron source spawn triggers. */
+  cronOrigin?: CronSpawnOrigin;
   /** Internal: last keyed handoff of this source. */
   handoffIdempotency?: HandoffIdempotencyReceipt;
   // The id of the workspace (shared git worktree) this session lives in.
@@ -1585,6 +1587,7 @@ export interface SessionView extends Omit<
   | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "cronOrigin"
   | "handoffIdempotency"
   | "blockedTriggerNotices"
   | "spawnIntent"
@@ -1658,6 +1661,7 @@ export type DashboardOmittedField =
   | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "cronOrigin"
   | "handoffIdempotency"
   | "blockedTriggerNotices"
   | "spawnIntent"
@@ -1824,6 +1828,28 @@ export type TelegramSpawnOrigin = Pick<
   TelegramReplyTarget,
   "projectId" | "sourceId" | "chatId" | "messageThreadId"
 >;
+
+/**
+ * Cron source spawn trigger that created a session. Keys its persistent storage dir.
+ * Trigger spawn options only; never accepted from the HTTP body.
+ */
+export interface CronSpawnOrigin {
+  projectId: string;
+  sourceId: string;
+  triggerId: string;
+}
+
+/** Contents of one cron job's storage dir. `files` excludes the root note.md. */
+export interface CronStorageView {
+  note: string;
+  noteUpdatedAt: string | null;
+  files: SessionArtifact[];
+  /** Sum of `files` sizes; note excluded. */
+  totalBytes: number;
+  /** Latest mtime across files and note. */
+  updatedAt: string | null;
+  truncated: boolean;
+}
 
 export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 export const MAX_ATTACHMENTS = 10;

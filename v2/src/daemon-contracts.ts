@@ -209,6 +209,10 @@ const cronJobValidation: readonly ContractResponse[] = [
       "Invalid config/schedule/block or unsupported YAML/action; error, code and optional field.",
   },
 ];
+const cronStorageResponse =
+  "CronStorageView {note,noteUpdatedAt:string|null,files:SessionArtifact[],totalBytes,updatedAt:string|null,truncated}; files exclude note.md, totalBytes sums files only.";
+const cronStorageErrors =
+  "400 when projectId or triggerId fails ^[a-zA-Z0-9_-]+$; 409 when a cron-storage path level is a symlink or not a directory.";
 const cronJobUpdate: ContractBody = {
   ...body("CronJobEditUpdate", [
     field("revision", "string", "64 lowercase SHA256 hex characters from the disk draft.", true),
@@ -463,7 +467,7 @@ function operation(
       {
         status: options.status ?? 200,
         contentType:
-          operationId === "get_artifact"
+          operationId === "get_artifact" || operationId === "get_cron_storage_file"
             ? "application/octet-stream (stored MIME)"
             : operationId === "get_closeout_file"
               ? "application/octet-stream"
@@ -832,6 +836,63 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
         'CronJobEditResult; saved:true, activation:"applied"|"failed"; reloads automation, restarts all sources.',
       source: "v2/src/cron-job-editor.ts",
       extraResponses: cronJobValidation,
+    },
+  ),
+  operation(
+    "get_cron_storage",
+    "GET",
+    "/projects/{projectId}/cron/{triggerId}/storage",
+    "List a Cron job's persistent storage: note.md text and files. Works without a configured trigger.",
+    {
+      examples: [{ pathParams: { projectId: "example-project", triggerId: "audit" } }],
+      response: `${cronStorageResponse} ${cronStorageErrors}`,
+      source: "v2/src/cron-storage.ts",
+    },
+  ),
+  operation(
+    "get_cron_storage_file",
+    "GET",
+    "/projects/{projectId}/cron/{triggerId}/storage/files/{path}",
+    "Read one Cron storage file with its MIME and disposition.",
+    {
+      catchAllPathParams: ["path"],
+      examples: [
+        {
+          pathParams: { projectId: "example-project", triggerId: "audit", path: "notes/run.md" },
+        },
+      ],
+      response: `Binary stream; path is storage-relative and may contain slash-separated segments; 404 for absent or unsafe paths. ${cronStorageErrors}`,
+      source: "v2/src/cron-storage.ts",
+    },
+  ),
+  operation(
+    "update_cron_storage_note",
+    "PATCH",
+    "/projects/{projectId}/cron/{triggerId}/storage/note",
+    "Replace a Cron job's storage note.md; the trigger must be a configured Cron spawn trigger.",
+    {
+      body: body("CronStorageNoteUpdate", [
+        field("note", "string", "Full note.md text; empty string keeps an empty note.", true),
+      ]),
+      examples: [
+        {
+          pathParams: { projectId: "example-project", triggerId: "audit" },
+          body: { note: "Last run audited 12 sessions." },
+        },
+      ],
+      response: `${cronStorageResponse} 404 when the trigger is not a configured Cron spawn trigger. ${cronStorageErrors}`,
+      source: "v2/src/cron-storage.ts",
+    },
+  ),
+  operation(
+    "clear_cron_storage",
+    "DELETE",
+    "/projects/{projectId}/cron/{triggerId}/storage",
+    "Delete a Cron job's storage dir: note.md and every file. Works without a configured trigger.",
+    {
+      examples: [{ pathParams: { projectId: "example-project", triggerId: "audit" } }],
+      response: `${cronStorageResponse} Always the empty view. ${cronStorageErrors}`,
+      source: "v2/src/cron-storage.ts",
     },
   ),
   operation("list_backlog", "GET", "/backlog/available", "List available backlog work."),

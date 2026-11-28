@@ -51,6 +51,7 @@ import { workspaceIdOf } from "./session-desk.js";
 import { aggregateTokenUsage } from "./token-usage.js";
 import { normalizePreflightTotals } from "./preflight-usage-store.js";
 import { parseArtifactRelativePath } from "./session-artifacts.js";
+import { isCronSpawnOrigin } from "./cron-storage.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { isTaskStatusRevision, normalizeTaskStatus } from "./task-status.js";
 
@@ -1572,6 +1573,16 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     receipt.movedTodoItems >= 0
       ? { handoffIdempotency: receipt }
       : {};
+  const rawCronOrigin: unknown = normalizedSession.cronOrigin;
+  const cronOrigin = isCronSpawnOrigin(rawCronOrigin)
+    ? {
+        cronOrigin: {
+          projectId: rawCronOrigin.projectId,
+          sourceId: rawCronOrigin.sourceId,
+          triggerId: rawCronOrigin.triggerId,
+        },
+      }
+    : {};
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const declaration = normalizeTaskStatus(normalizedSession.taskStatus);
   const taskStatus =
@@ -1635,6 +1646,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     id: normalizedSession.id,
     project: normalizedSession.project,
     ...triggerBirth,
+    ...cronOrigin,
     ...handoffIdempotency,
     // Legacy on-disk records only have `deskId` (or neither field); this is
     // where a pre-workspaceId record gets migrated in memory on every read.
